@@ -23,7 +23,8 @@
     "build": "npm run typecheck && electron-vite build",
     "build:mac": "npm run rebuild:electron && npm run build && electron-builder --mac --publish never",
     "build:win": "npm run rebuild:electron && npm run build && electron-builder --win --publish never",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "receipt:preview": "node scripts/build-receipt-preview.mjs && electron scripts/render-receipt.cjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

@@ -20,3 +20,4 @@ secrets/
 
 # Local auto-update test server (see scripts/serve-updates)
 dev-updates/
+preview/

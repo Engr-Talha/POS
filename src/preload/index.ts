@@ -137,7 +137,14 @@ const api: PosApi = {
     updatePayable: (input) => ipcRenderer.invoke(IPC.openingUpdatePayable, input),
     removePayable: (input) => ipcRenderer.invoke(IPC.openingRemovePayable, input),
 
-    commit: (input) => ipcRenderer.invoke(IPC.openingCommit, input)
+    commit: (input) => ipcRenderer.invoke(IPC.openingCommit, input),
+
+    // THE EXCEL IMPORT. Look at what these three do NOT take: a file path. The renderer cannot name a
+    // file, because it has no filesystem to name one on — main opens the dialog, main reads the bytes,
+    // and main remembers which file the owner picked. The screen only ever says "the one he chose".
+    downloadTemplate: () => ipcRenderer.invoke(IPC.openingDownloadTemplate),
+    previewImport: () => ipcRenderer.invoke(IPC.openingPreviewImport),
+    applyImport: () => ipcRenderer.invoke(IPC.openingApplyImport)
   },
 
   // Note what is NOT here: any way to set what a customer owes. That figure is DERIVED from the

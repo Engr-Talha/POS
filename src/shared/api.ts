@@ -24,7 +24,9 @@ import type {
   StockAdjustResult,
   NearExpiryItem,
   OpeningPartyListInput,
-  OpeningWizardState
+  OpeningWizardState,
+  ImportPreview,
+  ImportResult
 } from './ipc'
 import type {
   CommitOpeningInput,
@@ -297,6 +299,48 @@ export interface PosApi {
      * balancing perfectly, and nothing downstream would ever catch it. Main refuses it on `status`.
      */
     commit: (input: CommitOpeningInput) => Promise<Result<OpeningWizardState>>
+
+    // ── THE EXCEL IMPORT — a shop's whole life, migrated in one upload ────────────────────────────
+    //
+    // NOT ONE OF THESE THREE TAKES A FILE PATH, and that is the point. The renderer cannot name a file
+    // and has no filesystem to name it on: main opens the dialog, main reads the bytes, and main
+    // remembers which file the owner picked. All the screen can say is "the one the user chose".
+    // (CLAUDE.md §3 — no fs in the renderer, not hidden, not "just for now".)
+
+    /**
+     * Build the Excel template — PRE-FILLED with every item the shop already has — and save it wherever
+     * the owner says. Returns the path it was written to, so the screen can tell them where it went, or
+     * NULL if they closed the save dialog.
+     *
+     * This is an EXPORT, and it keeps working on an expired licence. A shop that cannot get its own
+     * catalogue out of the app is a shop we have taken hostage. (CLAUDE.md §6)
+     */
+    downloadTemplate: () => Promise<Result<string | null>>
+
+    /**
+     * Pick the filled-in file and say WHAT WOULD HAPPEN. WRITES NOTHING — not one row, not one lookup.
+     * NULL = they closed the file picker.
+     *
+     * `errors` is every problem in the whole file, not just the first: the owner has one spreadsheet
+     * open, and being told about one broken cell at a time is how people give up and type 900 rows in
+     * by hand instead. If it is non-empty, the import is refused — and refused again by MAIN even if
+     * the screen offers the button anyway.
+     */
+    previewImport: () => Promise<Result<ImportPreview | null>>
+
+    /**
+     * DO IT — using the file they just previewed, so they do not have to find it twice.
+     *
+     * OWNER ONLY, and one transaction: every item, every customer, every supplier and the whole draft,
+     * or none of it. A half-imported shop — some items in, some not, stock that does not match the
+     * ledger — is worse than no import at all, because nobody can tell which half is real.
+     *
+     * IT DOES NOT COMMIT THE OPENING BALANCES. It fills in the draft. The owner reviews it and presses
+     * Commit himself — that door is still ahead of him, and it only opens once.
+     *
+     * NULL = there was no previewed file and they closed the file picker.
+     */
+    applyImport: () => Promise<Result<ImportResult | null>>
   }
 
   /**

@@ -1,4 +1,8 @@
 import { ipcMain, app, dialog, BrowserWindow } from 'electron'
+import type { OpenDialogOptions, SaveDialogOptions } from 'electron'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import type { ZodType } from 'zod'
 import {
   IPC,
@@ -24,7 +28,9 @@ import {
   type StockAdjustResult,
   type NearExpiryItem,
   type SystemInfo,
-  type OpeningWizardState
+  type OpeningWizardState,
+  type ImportPreview,
+  type ImportResult
 } from '@shared/ipc'
 import {
   CommitOpeningInput,
@@ -86,6 +92,8 @@ import * as stockService from '../services/stock'
 import * as catalogService from '../services/catalog'
 import * as openingService from '../services/opening'
 import * as customersService from '../services/customers'
+import * as excelTemplateService from '../services/excel-template'
+import * as excelImportService from '../services/excel-import'
 import log from '../logger'
 
 /**
@@ -153,6 +161,75 @@ function handle<TIn, TOut>(
       )
     }
   })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// THE EXCEL IMPORT — the file the owner picked, and why MAIN is the only one who knows where it is
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE FILE, REMEMBERED BETWEEN "PREVIEW" AND "IMPORT".
+ *
+ * The owner picks a file, reads the review screen, and presses Import. Making him find the same file a
+ * second time in a Windows file dialog is how the wrong file gets picked on the second go.
+ *
+ * SO THE PATH LIVES HERE, IN MAIN — and nowhere else. None of the three import handlers takes a path
+ * as an argument, deliberately: a renderer that could name a file could name ANY file, and hand main a
+ * path to read that no user ever chose. The renderer cannot say WHICH file. It can only say "the one
+ * the user picked", and main is the one holding it. (CLAUDE.md §3)
+ *
+ * The HASH is what makes "the one the user picked" mean something. See the note in openingApplyImport.
+ *
+ * AND IT IS STAMPED WITH WHO PICKED IT. A PIN sign-in switches user without a sign-out, so this outlives
+ * the session that created it: without `userId`, the next owner at the till could press Import and apply
+ * a file the LAST owner chose and he has never seen. He is sent to the file picker instead.
+ */
+let pickedImportFile: { path: string; hash: string; userId: number } | null = null
+
+function hashOf(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+/** The one place a file is chosen. Returns null when the owner closes the dialog — not an error. */
+async function pickImportFile(): Promise<string | null> {
+  const options: OpenDialogOptions = {
+    title: 'Choose your filled-in template',
+    filters: [{ name: 'Excel file', extensions: ['xlsx'] }],
+    properties: ['openFile'],
+    buttonLabel: 'Open'
+  }
+
+  const window = BrowserWindow.getFocusedWindow()
+  const result = window
+    ? await dialog.showOpenDialog(window, options)
+    : await dialog.showOpenDialog(options)
+
+  if (result.canceled) return null
+  return result.filePaths[0] ?? null
+}
+
+/**
+ * The bytes. A file that has been moved, renamed or deleted since it was chosen is an EVERYDAY event —
+ * not a crash — and the owner gets a sentence he can act on rather than "Something went wrong".
+ */
+function readImportFile(path: string): Buffer {
+  try {
+    return readFileSync(path)
+  } catch (error) {
+    pickedImportFile = null // whatever we were holding, it is not there any more
+    throw new AppError(
+      ErrorCode.NOT_FOUND,
+      'We could not open that file. It may have been moved, renamed or deleted since you chose it. Please choose it again.',
+      `readFileSync failed for ${path}: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
+
+/** A filename a shopkeeper can find again next week. No colons or slashes — Windows refuses them. */
+function templateFileName(now: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  return `Opening balances template - ${day}.xlsx`
 }
 
 export function registerIpcHandlers(): void {
@@ -815,6 +892,163 @@ export function registerIpcHandlers(): void {
 
     // The door is shut now, and it does not reopen. Say so, in the same shape the wizard already reads.
     return { ...summary, hasTraded: openingService.hasTraded(getDb()), canEdit: false }
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THE EXCEL IMPORT — a shop's whole life, migrated in one upload
+  //
+  // The owner exports his old POS's item list to Excel, fills in what he has, and uploads it. Out of it
+  // come his catalogue, his opening stock, his customers' udhaar, his suppliers' dues and the cash in
+  // his till — as a DRAFT he then reviews and commits himself.
+  //
+  // THE ASYMMETRY THAT MATTERS HERE (CLAUDE.md §6):
+  //
+  //   downloadTemplate  is an EXPORT.        Permission, NO assertWritable().
+  //   previewImport     WRITES NOTHING.      Permission, NO assertWritable().
+  //   applyImport       writes.              Permission AND assertWritable().
+  //
+  // An owner whose licence has lapsed can still download his catalogue and still see what an import
+  // would do. He simply cannot apply it until he renews. We warn them; we do not hold their data
+  // hostage — and "export your data" is the one thing read-only mode exists to protect.
+  //
+  // ALL THREE ARE OWNER-ONLY ('settings.manage'). This is not a catalogue screen a manager keeps tidy;
+  // it is the shop's day-one balance sheet, and the same gate is already on every other step of this
+  // wizard. Opening a gate later is safe; shipping one too wide is not.
+  //
+  // NONE OF THE THREE TAKES AN ARGUMENT. There is no path to validate because the renderer never gets
+  // to name one — see `pickedImportFile`.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * THE TEMPLATE — pre-filled with every item the shop already has, so the owner types numbers, not
+   * names. Retyping 340 item names into a spreadsheet is how 340 items get imported twice under two
+   * spellings.
+   *
+   * The dialog comes FIRST and the workbook is built after it: a shop with 100k items should not sit
+   * through a build it is about to cancel. If the build fails, no file is written and the owner gets a
+   * plain sentence — the Result envelope, like everything else.
+   */
+  handle<void, string | null>(IPC.openingDownloadTemplate, null, async () => {
+    session.requirePermissionOf('settings.manage')
+    // NO assertWritable(). This is an export, and an expired shop must still be able to get its own
+    // catalogue out. (CLAUDE.md §6)
+
+    const options: SaveDialogOptions = {
+      title: 'Save the import template',
+      defaultPath: join(app.getPath('documents'), templateFileName(new Date())),
+      filters: [{ name: 'Excel file', extensions: ['xlsx'] }],
+      buttonLabel: 'Save template'
+    }
+
+    const window = BrowserWindow.getFocusedWindow()
+    const chosen = window
+      ? await dialog.showSaveDialog(window, options)
+      : await dialog.showSaveDialog(options)
+
+    if (chosen.canceled || !chosen.filePath) return null
+
+    const workbook = await excelTemplateService.buildTemplate(getDb())
+    writeFileSync(chosen.filePath, workbook)
+
+    log.info(`[opening] import template written to ${chosen.filePath}`)
+    return chosen.filePath
+  })
+
+  /**
+   * WHAT WOULD HAPPEN. Nothing is written to answer this question — not one row, not one lookup.
+   *
+   * Every problem in the file comes back at once, by row number, in plain language. Not the first one
+   * and then stop: the owner has one spreadsheet open, and being told about one broken cell at a time —
+   * upload, fix, upload, fix — across a 900-row sheet is how people give up and type it all in by hand.
+   *
+   * The file is REMEMBERED here, on a successful read, so that Import does not send him hunting for it
+   * again. A file that would not open at all is not remembered — there is nothing to import.
+   */
+  handle<void, ImportPreview | null>(IPC.openingPreviewImport, null, async () => {
+    const user = session.requirePermissionOf('settings.manage')
+    // NO assertWritable(). parseWorkbook() reads the file and the database and writes NOTHING.
+
+    const path = await pickImportFile()
+    if (path === null) return null // they closed the dialog. Not an error — a Tuesday.
+
+    const buffer = readImportFile(path)
+    const preview = await excelImportService.parseWorkbook(getDb(), buffer)
+
+    pickedImportFile = { path, hash: hashOf(buffer), userId: user.id }
+
+    log.info(
+      `[opening] previewed ${basename(path)}: ${preview.stock.rows.length} stock row(s), ` +
+        `${preview.stock.openingLines} with an opening quantity, ` +
+        `${preview.udhaar.rows.length} udhaar, ${preview.dues.rows.length} dues, ` +
+        `${preview.errors.length} problem(s)`
+    )
+
+    // The screen is told the file's NAME, never its path — so the owner can see at a glance that he
+    // picked this month's sheet and not last month's. A name is something to read; a path would be
+    // something the renderer could act on, and the renderer has no filesystem to act on it with.
+    return { ...preview, fileName: basename(path) }
+  })
+
+  /**
+   * DO IT — in ONE transaction, or not at all.
+   *
+   * ── WHAT YOU REVIEWED IS WHAT YOU IMPORT ─────────────────────────────────────────────────────────
+   *
+   * The file is read AGAIN here, and its hash is checked against the one that was previewed. If the
+   * spreadsheet has been edited in between, we STOP and send him back to the review screen.
+   *
+   * Both of the alternatives are worse, and quietly so. Import the remembered BYTES, and the fix he
+   * just made in Excel is silently thrown away — he watches "340 items imported" and never learns his
+   * correction did not land. Import the NEW bytes without a word, and the shop's entire opening balance
+   * sheet is written from figures nobody has looked at, while the screen in front of him still shows
+   * the old ones. Neither of those can be caught downstream: the journals balance either way.
+   *
+   * So: same file, or look again. It costs him one click in a case that should be rare.
+   *
+   * The audit row is written by the SERVICE — inside the transaction, with the actor and the whole
+   * balance sheet on it. It is not written a second time here. A log that records the same act twice is
+   * a log nobody trusts. (See ipc/audit-contract.test.ts.)
+   *
+   * AND IT DOES NOT COMMIT. It fills in the draft. The one-way door is still ahead of him.
+   */
+  handle<void, ImportResult | null>(IPC.openingApplyImport, null, async () => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+
+    // THE FILE *HE* PREVIEWED. Not the one the last owner previewed before handing over the till — see
+    // the note on pickedImportFile. If there is nothing of his remembered — main was restarted, or a
+    // different user picked it — we ask for the file rather than leave him with a button that does
+    // nothing, and rather than apply a file he has never laid eyes on.
+    const remembered = pickedImportFile?.userId === user.id ? pickedImportFile : null
+    const path = remembered?.path ?? (await pickImportFile())
+    if (path === null) return null
+
+    const buffer = readImportFile(path)
+
+    if (remembered && hashOf(buffer) !== remembered.hash) {
+      throw new AppError(
+        ErrorCode.VALIDATION,
+        'This file has changed since you looked at it, so what is on the screen is no longer what is in the file. Please preview it again, check the figures, and then import.',
+        `import file changed on disk between preview and apply: ${path}`
+      )
+    }
+
+    const result = await excelImportService.applyImport(getDb(), user, buffer)
+
+    log.info(
+      `[opening] imported ${basename(path)} by ${user.username} (${user.role}): ` +
+        `products +${result.productsCreated}/~${result.productsUpdated} ` +
+        `barcodes +${result.barcodesAdded} lookups +${result.lookupsCreated} ` +
+        `customers +${result.customersCreated} suppliers +${result.suppliersCreated} ` +
+        `stockLines=${result.stockLines} value=${result.summary.stockValueMinor} ` +
+        `udhaar=${result.summary.receivablesMinor} dues=${result.summary.payablesMinor} — ` +
+        `DRAFT ONLY, not committed`
+    )
+
+    // Deliberately still remembered: re-importing the same file is safe (it REPLACES the draft rather
+    // than adding to it — regression-tested), and springing a file dialog on a second click would be a
+    // worse surprise than doing the harmless thing twice.
+    return result
   })
 
   // ── Customers ─────────────────────────────────────────────────────────────

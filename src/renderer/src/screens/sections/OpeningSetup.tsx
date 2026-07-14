@@ -5,6 +5,7 @@ import {
   Badge,
   Button,
   Card,
+  Code,
   Divider,
   Group,
   Modal,
@@ -28,21 +29,33 @@ import {
   CalendarDays,
   CircleAlert,
   CircleCheck,
+  Download,
+  FileSpreadsheet,
   HandCoins,
   Info,
   Landmark,
+  ListChecks,
   Lock,
   PackageOpen,
   Pencil,
   Plus,
+  Tags,
   Trash2,
   TriangleAlert,
   Truck,
+  Upload,
   Users,
   Wallet
 } from 'lucide-react'
 import type { ProductListItem, Supplier } from '@shared/catalog'
-import type { OpeningWizardState } from '@shared/ipc'
+import type {
+  ImportError,
+  ImportLookupList,
+  ImportPartyRow,
+  ImportPreview,
+  ImportStockRow,
+  OpeningWizardState
+} from '@shared/ipc'
 import type { Customer, OpeningPayable, OpeningReceivable, OpeningStockLine } from '@shared/opening'
 import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
@@ -244,7 +257,22 @@ function Wizard({
   onChanged
 }: StepProps): React.JSX.Element {
   const [step, setStep] = useState(0)
+
+  // Bumped by an import, and used as the Stepper's key, so every step below REMOUNTS and re-reads.
+  //
+  // This is not cosmetic. An import REWRITES the three draft lists underneath these steps, and each
+  // step reads its rows once, on mount. StepCash goes further: it SEEDS ITS TWO FIELDS from the
+  // summary. Without the remount the owner imports 900 items, still sees the old list, and — worse —
+  // a stale Cash step still holding yesterday's figure would write it straight back over the one he
+  // just imported the moment he pressed Save. The steps must be told the ground moved.
+  const [draftVersion, setDraftVersion] = useState(0)
+
   const steps: StepProps = { wizard, currencySymbol, readOnly, onChanged }
+
+  async function afterImport(): Promise<void> {
+    await onChanged()
+    setDraftVersion((current) => current + 1)
+  }
 
   return (
     <Stack gap="lg" maw={980}>
@@ -257,7 +285,14 @@ function Wizard({
         </Alert>
       )}
 
-      <Stepper active={step} onStepClick={setStep} allowNextStepsSelect size="sm">
+      <ImportFromExcel
+        wizard={wizard}
+        currencySymbol={currencySymbol}
+        readOnly={readOnly}
+        onImported={afterImport}
+      />
+
+      <Stepper key={draftVersion} active={step} onStepClick={setStep} allowNextStepsSelect size="sm">
         <Stepper.Step label="Start" description="The date" icon={<CalendarDays size={15} />}>
           <StepIntro {...steps} />
         </Stepper.Step>
@@ -1642,6 +1677,922 @@ function SummaryCard({
       )}
     </Card>
   )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import from Excel — the five steps above, filled in from one spreadsheet
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * THE SAME WIZARD, FILLED IN FROM A SPREADSHEET.
+ *
+ * A shop with 900 items is never going to type them in one at a time — and if one at a time is the
+ * only way in, the opening balances simply never get entered at all, which is the exact failure this
+ * screen exists to prevent. So: download a sheet that ALREADY LISTS HIS ITEMS, fill in two columns,
+ * upload it back.
+ *
+ * THE FLOW, AND IT MUST NEVER SURPRISE HIM:
+ *   1. Download the template. It already has his items in it — he adds how many, and what they cost.
+ *   2. Upload the filled sheet.
+ *   3. PREVIEW: what it WOULD do, and every problem in it, in plain words. NOT ONE ROW IS WRITTEN.
+ *   4. Import: fills in the DRAFT, exactly as typing would have. IMPORT IS NOT COMMIT.
+ *   5. He still reads the totals on the Review step and presses "Save to the books" himself.
+ *
+ * A FILE WITH ANY PROBLEM IN IT IS NOT IMPORTED — NOT EVEN THE GOOD ROWS. Taking 880 of 900 rows and
+ * quietly dropping 20 is how a shop opens with stock it can never find and nobody ever knows why. The
+ * button is disabled, it says which rows and why, and MAIN refuses the file regardless of what this
+ * screen does with the button.
+ *
+ * THE RENDERER NEVER NAMES A FILE. Not one of these three calls takes a path: main opens the dialog,
+ * main reads the bytes, main remembers the pick. All this screen can ever say is "the one you chose".
+ * (CLAUDE.md §3 — the renderer has no filesystem, not even a little one.)
+ *
+ * ON AN EXPIRED LICENCE the template and the preview still work, and only the Import button goes.
+ * Reading his own catalogue out of his own app is not something an unpaid invoice takes away from
+ * him. (CLAUDE.md §6.)
+ */
+function ImportFromExcel({
+  wizard,
+  currencySymbol,
+  readOnly,
+  onImported
+}: {
+  wizard: OpeningWizardState
+  currencySymbol: string
+  readOnly: boolean
+  onImported: () => Promise<void>
+}): React.JSX.Element {
+  const [busy, setBusy] = useState<'template' | 'file' | null>(null)
+  const [savedTo, setSavedTo] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [preview, setPreview] = useState<ImportPreview | null>(null)
+
+  async function downloadTemplate(): Promise<void> {
+    setBusy('template')
+    setError(null)
+
+    const result = await window.pos.opening.downloadTemplate()
+    setBusy(null)
+
+    if (!result.ok) {
+      setError(result.error.userMessage)
+      return
+    }
+
+    // NULL = he closed the save dialog. That is not an error and does not deserve a word.
+    if (result.data === null) return
+
+    setSavedTo(result.data)
+    notifications.show({
+      color: 'teal',
+      icon: <CircleCheck size={18} />,
+      title: 'Your template is saved',
+      message: 'Open it in Excel, fill it in, then come back here and upload it.',
+      autoClose: 6000
+    })
+  }
+
+  async function chooseFile(): Promise<void> {
+    setBusy('file')
+    setError(null)
+
+    // WRITES NOTHING — not one row, not one lookup. It reads the file and says what WOULD happen.
+    const result = await window.pos.opening.previewImport()
+    setBusy(null)
+
+    if (!result.ok) {
+      setError(result.error.userMessage)
+      return
+    }
+    if (result.data === null) return // he closed the file picker
+
+    setPreview(result.data)
+  }
+
+  return (
+    <>
+      <Card withBorder padding="lg">
+        <Group gap="sm" mb="xs">
+          <FileSpreadsheet size={18} />
+          <Text fw={600}>Import from Excel</Text>
+          <Badge variant="light">Quicker, for a lot of items</Badge>
+        </Group>
+
+        <Text size="sm" c="dimmed">
+          Hundreds of items to enter? Download the sheet — <strong>it already lists every item you
+          have</strong> — and fill in just two things: <strong>how many you have</strong> and{' '}
+          <strong>what one of them cost you</strong>. Items you do not have yet, customers who owe you
+          udhaar and suppliers you owe can all be typed straight into the sheet too.
+        </Text>
+
+        <Group mt="md" gap="sm">
+          <Button
+            leftSection={<Download size={16} />}
+            loading={busy === 'template'}
+            disabled={busy !== null}
+            onClick={() => void downloadTemplate()}
+          >
+            Download the template
+          </Button>
+
+          <Button
+            variant="default"
+            leftSection={<Upload size={16} />}
+            loading={busy === 'file'}
+            disabled={busy !== null}
+            onClick={() => void chooseFile()}
+          >
+            Upload the filled sheet
+          </Button>
+        </Group>
+
+        {savedTo && (
+          <Alert color="teal" icon={<CircleCheck size={18} />} mt="md" title="Your template is saved">
+            <Text size="sm">It went here:</Text>
+            <Code block mt={6}>
+              {savedTo}
+            </Code>
+            <Text size="sm" mt="sm">
+              Open it in Excel, fill in the quantities and the costs, save it, then press{' '}
+              <strong>Upload the filled sheet</strong>.
+            </Text>
+          </Alert>
+        )}
+
+        {error && (
+          <Alert color="red" icon={<CircleAlert size={18} />} mt="md" title="That did not work">
+            {error}
+          </Alert>
+        )}
+
+        <Text size="xs" c="dimmed" mt="md">
+          You will see exactly what the file would do before any of it happens. Uploading a sheet{' '}
+          <strong>replaces your opening lists — it does not add to them</strong>, so if a figure is
+          wrong you simply fix the sheet and upload it again. And nothing reaches your books until you
+          press “Save to the books” on the last step yourself.
+        </Text>
+      </Card>
+
+      {preview && (
+        <ImportPreviewModal
+          preview={preview}
+          wizard={wizard}
+          currencySymbol={currencySymbol}
+          readOnly={readOnly}
+          onClose={() => setPreview(null)}
+          onReupload={() => {
+            setPreview(null)
+            void chooseFile()
+          }}
+          onImported={onImported}
+        />
+      )}
+    </>
+  )
+}
+
+/**
+ * WHAT THIS FILE WOULD DO — shown before it does any of it, which is the entire point of the feature.
+ *
+ * Every figure here came back from MAIN, computed by the same code that will do the writing and
+ * rounded exactly as the journal will round it. This screen does no arithmetic of its own: it cannot
+ * promise a total the import will not produce.
+ */
+function ImportPreviewModal({
+  preview,
+  wizard,
+  currencySymbol,
+  readOnly,
+  onClose,
+  onReupload,
+  onImported
+}: {
+  preview: ImportPreview
+  wizard: OpeningWizardState
+  currencySymbol: string
+  readOnly: boolean
+  onClose: () => void
+  onReupload: () => void
+  onImported: () => Promise<void>
+}): React.JSX.Element {
+  const [applying, setApplying] = useState(false)
+  const [applyError, setApplyError] = useState<string | null>(null)
+
+  const problems = preview.errors.length
+  const blocked = problems > 0
+
+  // What is on his lists RIGHT NOW — because the import is about to throw every bit of it away, and
+  // that includes anything he typed in by hand. Said with the actual numbers, not in the abstract.
+  const onListNow =
+    wizard.counts.stockLines + wizard.counts.receivables + wizard.counts.payables
+
+  async function runImport(): Promise<void> {
+    setApplying(true)
+    setApplyError(null)
+
+    const result = await window.pos.opening.applyImport()
+    setApplying(false)
+
+    if (!result.ok) {
+      // The likeliest one by a mile: he fixed the sheet in Excel while this window sat open, so the
+      // file main remembered is no longer the file he is looking at. Main refuses rather than guess
+      // which of the two he meant — and the way out is one button.
+      setApplyError(result.error.userMessage)
+      return
+    }
+
+    // NULL = main had no remembered file, and he closed the picker it offered him instead.
+    if (result.data === null) {
+      onClose()
+      return
+    }
+
+    const done = result.data
+    notifications.show({
+      color: 'teal',
+      icon: <CircleCheck size={18} />,
+      title: 'Your sheet is on the list',
+      message: `${count(done.stockLines, 'stock line', 'stock lines')}, ${count(done.receivables, 'udhaar entry', 'udhaar entries')} and ${count(done.payables, 'supplier due', 'supplier dues')}. It is NOT in your books yet — check the totals on the Review step and save it yourself.`,
+      autoClose: 10000
+    })
+
+    // Refresh the wizard's figures BEFORE this window goes, so what is underneath is already true.
+    await onImported()
+    onClose()
+  }
+
+  return (
+    <Modal
+      opened
+      onClose={onClose}
+      fullScreen
+      title={
+        <Group gap="sm">
+          <FileSpreadsheet size={18} />
+          <Text fw={600}>What this file will do</Text>
+          <Badge variant="light">{preview.fileName}</Badge>
+        </Group>
+      }
+    >
+      <Stack gap="lg" maw={1100} mx="auto" pb="xl">
+        {blocked ? (
+          <Alert
+            color="red"
+            icon={<CircleAlert size={18} />}
+            title={`This file has ${count(problems, 'problem', 'problems')} in it — nothing has been imported`}
+          >
+            <Text size="sm">
+              Nothing has been changed and nothing has been written. Fix the rows listed below{' '}
+              <strong>in the sheet</strong>, save it in Excel, and upload it again.
+            </Text>
+            <Text size="sm" mt="sm">
+              The whole file goes in, or none of it does. Importing the rows that are fine and quietly
+              skipping the rest would leave you with stock you cannot account for and no way of ever
+              telling which lines were dropped.
+            </Text>
+          </Alert>
+        ) : (
+          <Alert color="teal" icon={<CircleCheck size={18} />} title="This file is ready">
+            <Text size="sm">
+              Every row was read and every figure below is exact. Nothing has been written yet — this
+              is what <strong>would</strong> happen if you press Import.
+            </Text>
+          </Alert>
+        )}
+
+        {blocked && <ImportProblems errors={preview.errors} />}
+
+        <PreviewSummary
+          preview={preview}
+          wizard={wizard}
+          currencySymbol={currencySymbol}
+          blocked={blocked}
+        />
+
+        <PreviewLookups lookups={preview.lookupsToCreate} />
+
+        <PreviewStockTable rows={preview.stock.rows} currencySymbol={currencySymbol} />
+
+        <PreviewPartyTable
+          title="Customers who owe you (udhaar)"
+          heading="Customer"
+          rows={preview.udhaar.rows}
+          currencySymbol={currencySymbol}
+        />
+
+        <PreviewPartyTable
+          title="Suppliers you owe"
+          heading="Supplier"
+          rows={preview.dues.rows}
+          currencySymbol={currencySymbol}
+        />
+
+        {/* ── The one-way bit of an import: it REPLACES the lists ─────────────── */}
+        <Card withBorder padding="lg">
+          <Group gap="sm" mb="xs">
+            <TriangleAlert size={18} />
+            <Text fw={600}>Before you press Import</Text>
+          </Group>
+
+          {onListNow > 0 ? (
+            <Alert color="orange" icon={<TriangleAlert size={18} />}>
+              <Text size="sm">
+                Your opening lists already have{' '}
+                <strong>{count(wizard.counts.stockLines, 'stock line', 'stock lines')}</strong>,{' '}
+                <strong>
+                  {count(wizard.counts.receivables, 'udhaar entry', 'udhaar entries')}
+                </strong>{' '}
+                and{' '}
+                <strong>{count(wizard.counts.payables, 'supplier due', 'supplier dues')}</strong> on
+                them.
+              </Text>
+              <Text size="sm" mt="sm">
+                Importing <strong>throws all of that away</strong> and puts this file in its place —
+                including anything you typed in by hand. It does not add to it. That is what lets you
+                fix a wrong figure in the sheet and upload it again without ending up with double the
+                stock you have.
+              </Text>
+            </Alert>
+          ) : (
+            <Text size="sm" c="dimmed">
+              This fills in your opening lists from the sheet. Upload a corrected sheet later and it{' '}
+              <strong>replaces</strong> what is on them — it never adds to it, so the same file
+              uploaded twice cannot double your stock.
+            </Text>
+          )}
+
+          <Text size="sm" c="dimmed" mt="md">
+            <strong>This does not save anything to your books.</strong> It fills in the same lists you
+            would have typed in yourself, and the Review step still has the last word: you check the
+            totals, and you press “Save to the books”.
+          </Text>
+
+          <Text size="xs" c="dimmed" mt="xs">
+            New items, customers and suppliers from this file stay in your catalogue for good. A later
+            upload replaces your opening <em>lists</em> — it does not undo your catalogue.
+          </Text>
+
+          {readOnly && (
+            <Alert color="orange" icon={<TriangleAlert size={18} />} mt="md">
+              Your licence has expired, so nothing can be imported. You can still download the
+              template, and you can still check a file here — you just cannot fill in the lists with
+              it until the licence is renewed.
+            </Alert>
+          )}
+
+          {applyError && (
+            <Alert
+              color="red"
+              icon={<CircleAlert size={18} />}
+              mt="md"
+              title="That could not be imported"
+            >
+              <Text size="sm">{applyError}</Text>
+              <Group mt="sm">
+                <Button
+                  size="xs"
+                  variant="default"
+                  leftSection={<Upload size={14} />}
+                  onClick={onReupload}
+                >
+                  Choose the file again
+                </Button>
+              </Group>
+            </Alert>
+          )}
+
+          <Group justify="flex-end" mt="lg">
+            <Button variant="default" disabled={applying} onClick={onClose}>
+              Cancel
+            </Button>
+
+            <Tooltip
+              label="Fix the rows listed above in your sheet, then upload it again"
+              disabled={!blocked}
+            >
+              {/* A disabled button inside a Tooltip needs a wrapper to still fire the hover. */}
+              <div>
+                <Button
+                  color="teal"
+                  leftSection={<ListChecks size={16} />}
+                  loading={applying}
+                  disabled={blocked || readOnly}
+                  onClick={() => void runImport()}
+                >
+                  Import into my list
+                </Button>
+              </div>
+            </Tooltip>
+          </Group>
+        </Card>
+      </Stack>
+    </Modal>
+  )
+}
+
+/**
+ * EVERY PROBLEM IN THE FILE, not just the first — because he has one spreadsheet open and being told
+ * about one broken cell at a time is how a man gives up and types 900 rows in by hand.
+ *
+ * Sheet, row, column, the value that was actually in the cell, and what is wrong with it in words he
+ * can act on. The row number is the one EXCEL shows him, because that is the only one he can see.
+ */
+function ImportProblems({ errors }: { errors: ImportError[] }): React.JSX.Element {
+  const paged = usePagedRows(errors)
+
+  return (
+    <Card withBorder padding="lg">
+      <Group justify="space-between" mb="sm">
+        <Group gap="sm">
+          <CircleAlert size={18} />
+          <Text fw={600}>What needs fixing</Text>
+        </Group>
+        <Text size="sm" c="dimmed">
+          {count(errors.length, 'problem', 'problems')}
+        </Text>
+      </Group>
+
+      <Table.ScrollContainer minWidth={860}>
+        <Table striped highlightOnHover withTableBorder>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th w={130}>Sheet</Table.Th>
+              <Table.Th w={70} ta="right">
+                Row
+              </Table.Th>
+              <Table.Th w={150}>Column</Table.Th>
+              <Table.Th w={130}>What it says</Table.Th>
+              <Table.Th>What is wrong</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {paged.visible.map((problem, index) => (
+              <Table.Tr key={`${problem.sheet}-${problem.row}-${problem.column}-${index}`}>
+                <Table.Td>
+                  <Text size="sm">{problem.sheet}</Text>
+                </Table.Td>
+                <Table.Td ta="right">
+                  <Text size="sm" ff="monospace" fw={600}>
+                    {problem.row}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm">{problem.column === '' ? '—' : problem.column}</Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm" ff="monospace" c={problem.value === '' ? 'dimmed' : undefined}>
+                    {problem.value === '' ? '(empty)' : problem.value}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm">{problem.message}</Text>
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Table.ScrollContainer>
+
+      <PagedFooter paged={paged} total={errors.length} noun="problems" />
+    </Card>
+  )
+}
+
+/** The headline figures — the ones he checks against the paper in his hand before he says yes. */
+function PreviewSummary({
+  preview,
+  wizard,
+  currencySymbol,
+  blocked
+}: {
+  preview: ImportPreview
+  wizard: OpeningWizardState
+  currencySymbol: string
+  blocked: boolean
+}): React.JSX.Element {
+  const { stock, udhaar, dues } = preview
+  const catalogueOnly = stock.rows.length - stock.openingLines
+
+  const money = (minor: number): string => formatMoney(minor, { symbol: currencySymbol })
+
+  const rows: Array<{ label: string; hint: string; value: React.ReactNode }> = [
+    {
+      label: 'Items',
+      hint: `${count(stock.existingProducts, 'item you already have', 'items you already have')} · ${count(stock.newProducts, 'new item', 'new items')} will be created`,
+      value: <Text size="sm" fw={600}>{count(stock.rows.length, 'item', 'items')}</Text>
+    },
+    {
+      label: 'Stock value',
+      hint:
+        catalogueOnly > 0
+          ? `${count(stock.openingLines, 'line has', 'lines have')} a quantity · ${catalogueOnly} added to the catalogue with no opening stock`
+          : `${count(stock.openingLines, 'line', 'lines')} with a quantity`,
+      value: (
+        <Text size="sm" fw={600}>
+          {money(stock.totalValueMinor)}
+        </Text>
+      )
+    },
+    {
+      label: 'Customers owe you (udhaar)',
+      hint: `${count(udhaar.rows.length, 'customer', 'customers')} · ${count(udhaar.newCustomers, 'new customer', 'new customers')} will be created`,
+      value: (
+        <Text size="sm" fw={600}>
+          {money(udhaar.totalMinor)}
+        </Text>
+      )
+    },
+    {
+      label: 'You owe suppliers',
+      hint: `${count(dues.rows.length, 'supplier', 'suppliers')} · ${count(dues.newSuppliers, 'new supplier', 'new suppliers')} will be created`,
+      value: (
+        <Text size="sm" fw={600}>
+          {money(dues.totalMinor)}
+        </Text>
+      )
+    },
+    {
+      label: 'Cash in the till',
+      hint: preview.cash === undefined ? 'The sheet left this blank' : '',
+      value:
+        preview.cash === undefined ? (
+          <Text size="sm" c="dimmed">
+            stays at {money(wizard.openingCashMinor)}
+          </Text>
+        ) : (
+          <Text size="sm" fw={600}>
+            {money(preview.cash)}
+          </Text>
+        )
+    },
+    {
+      label: 'Money in the bank',
+      hint: preview.bank === undefined ? 'The sheet left this blank' : '',
+      value:
+        preview.bank === undefined ? (
+          <Text size="sm" c="dimmed">
+            stays at {money(wizard.openingBankMinor)}
+          </Text>
+        ) : (
+          <Text size="sm" fw={600}>
+            {money(preview.bank)}
+          </Text>
+        )
+    }
+  ]
+
+  return (
+    <Card withBorder padding="lg">
+      <Group gap="sm" mb="sm">
+        <Boxes size={18} />
+        <Text fw={600}>What is in this file</Text>
+      </Group>
+
+      {/* A total that quietly leaves out the broken rows is a WRONG total, and a man reading it next
+          to "14 problems" will believe it is what he is getting. So it is labelled, in red, above the
+          figures it applies to — not in a footnote underneath them. */}
+      {blocked && (
+        <Alert color="red" icon={<TriangleAlert size={18} />} mb="md">
+          <Text size="sm">
+            These figures <strong>leave out the rows with problems</strong> — they are not what you
+            would end up with. Fix those rows and upload the sheet again to see the real totals.
+          </Text>
+        </Alert>
+      )}
+
+      <Table>
+        <Table.Tbody>
+          {rows.map((row) => (
+            <Table.Tr key={row.label}>
+              <Table.Td>
+                <Text size="sm">{row.label}</Text>
+                {row.hint !== '' && (
+                  <Text size="xs" c="dimmed">
+                    {row.hint}
+                  </Text>
+                )}
+              </Table.Td>
+              <Table.Td ta="right">{row.value}</Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Card>
+  )
+}
+
+/** Every list in this app is lookups-driven, so a sheet naming a category the shop has never had is
+ *  ADDING one — and he is told which, by name, before it appears in his dropdowns. (CLAUDE.md §4.) */
+function PreviewLookups({
+  lookups
+}: {
+  lookups: Record<ImportLookupList, string[]>
+}): React.JSX.Element | null {
+  const lists: Array<{ list: ImportLookupList; label: string }> = [
+    { list: 'department', label: 'Departments' },
+    { list: 'category', label: 'Categories' },
+    { list: 'sub_category', label: 'Sub-categories' },
+    { list: 'brand', label: 'Brands' },
+    { list: 'location', label: 'Locations' }
+  ]
+
+  const present = lists.filter(({ list }) => lookups[list].length > 0)
+  if (present.length === 0) return null
+
+  return (
+    <Card withBorder padding="lg">
+      <Group gap="sm" mb="xs">
+        <Tags size={18} />
+        <Text fw={600}>New lists this sheet will create</Text>
+      </Group>
+
+      <Text size="sm" c="dimmed" mb="md">
+        These do not exist in your shop yet, so they will be added and will appear in your dropdowns.
+        If one of them is a spelling mistake, fix it in the sheet and upload it again — otherwise you
+        will be left with both spellings.
+      </Text>
+
+      <Stack gap="sm">
+        {present.map(({ list, label }) => (
+          <div key={list}>
+            <Text size="xs" c="dimmed" mb={4}>
+              {label} ({lookups[list].length})
+            </Text>
+            <Group gap={6}>
+              {lookups[list].map((name) => (
+                <Badge key={name} variant="light" color="blue">
+                  {name}
+                </Badge>
+              ))}
+            </Group>
+          </div>
+        ))}
+      </Stack>
+    </Card>
+  )
+}
+
+/**
+ * Every stock line the file would produce.
+ *
+ * THREE DIFFERENT INTEGER SCALES ARE ON THIS ONE ROW and they are not interchangeable: `qtyM` is
+ * thousandths, `unitCost` is ten-thousandths, `lineValueMinor` and `retailPrice` are 2-dp money. Each
+ * goes through its own formatter, and this table never multiplies one by another — main already did
+ * that, and rounded it exactly as the journal will.
+ */
+function PreviewStockTable({
+  rows,
+  currencySymbol
+}: {
+  rows: ImportStockRow[]
+  currencySymbol: string
+}): React.JSX.Element {
+  const paged = usePagedRows(rows)
+
+  return (
+    <Card withBorder padding="lg">
+      <Group justify="space-between" mb="sm">
+        <Group gap="sm">
+          <PackageOpen size={18} />
+          <Text fw={600}>Items</Text>
+        </Group>
+        <Text size="sm" c="dimmed">
+          {count(rows.length, 'row', 'rows')}
+        </Text>
+      </Group>
+
+      {rows.length === 0 ? (
+        <Stack align="center" gap="xs" py="lg">
+          <PackageOpen size={28} opacity={0.5} />
+          <Text size="sm" c="dimmed" ta="center" maw={520}>
+            The Stock sheet is empty. That is allowed — the file can carry only udhaar, only dues, or
+            only your cash and bank.
+          </Text>
+        </Stack>
+      ) : (
+        <>
+          <Table.ScrollContainer minWidth={980}>
+            <Table striped highlightOnHover withTableBorder>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th w={70} ta="right">
+                    Row
+                  </Table.Th>
+                  <Table.Th>Stock code</Table.Th>
+                  <Table.Th>Item</Table.Th>
+                  <Table.Th ta="right">Quantity</Table.Th>
+                  <Table.Th ta="right">Cost each</Table.Th>
+                  <Table.Th ta="right">Value</Table.Th>
+                  <Table.Th ta="right">Sells for</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {paged.visible.map((row) => (
+                  <Table.Tr key={row.row}>
+                    <Table.Td ta="right">
+                      <Text size="sm" ff="monospace" c="dimmed">
+                        {row.row}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm" ff="monospace">
+                        {row.sku}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Group gap={6} wrap="nowrap">
+                        <Text size="sm">{row.name}</Text>
+                        {row.isNew && (
+                          <Badge size="xs" variant="light" color="teal">
+                            new
+                          </Badge>
+                        )}
+                      </Group>
+                      {row.qtyM === 0 && (
+                        <Text size="xs" c="dimmed">
+                          Added to your catalogue — no opening stock
+                        </Text>
+                      )}
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      <Text size="sm" fw={600} c={row.qtyM === 0 ? 'dimmed' : undefined}>
+                        {formatQty(row.qtyM)}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      <Text size="sm">{formatCost(row.unitCost, { symbol: currencySymbol })}</Text>
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      <Text size="sm">
+                        {formatMoney(row.lineValueMinor, { symbol: currencySymbol })}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      {row.retailPrice === undefined ? (
+                        <Text size="sm" c="dimmed">
+                          unchanged
+                        </Text>
+                      ) : (
+                        <Text size="sm">
+                          {formatMoney(row.retailPrice, { symbol: currencySymbol })}
+                        </Text>
+                      )}
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+
+          <PagedFooter paged={paged} total={rows.length} noun="rows" />
+        </>
+      )}
+    </Card>
+  )
+}
+
+/** Udhaar and dues are the same four columns both ways, so they are the same table both ways. */
+function PreviewPartyTable({
+  title,
+  heading,
+  rows,
+  currencySymbol
+}: {
+  title: string
+  heading: string
+  rows: ImportPartyRow[]
+  currencySymbol: string
+}): React.JSX.Element | null {
+  const paged = usePagedRows(rows)
+
+  // Nothing on the sheet, nothing to say. An empty table with a "nothing here" panel for a sheet he
+  // deliberately left blank is just noise on a screen that is already long.
+  if (rows.length === 0) return null
+
+  return (
+    <Card withBorder padding="lg">
+      <Group justify="space-between" mb="sm">
+        <Group gap="sm">
+          <Users size={18} />
+          <Text fw={600}>{title}</Text>
+        </Group>
+        <Text size="sm" c="dimmed">
+          {count(rows.length, 'row', 'rows')}
+        </Text>
+      </Group>
+
+      <Table.ScrollContainer minWidth={720}>
+        <Table striped highlightOnHover withTableBorder>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th w={70} ta="right">
+                Row
+              </Table.Th>
+              <Table.Th>{heading}</Table.Th>
+              <Table.Th>Phone</Table.Th>
+              <Table.Th>Note</Table.Th>
+              <Table.Th ta="right">Amount</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {paged.visible.map((row) => (
+              <Table.Tr key={row.row}>
+                <Table.Td ta="right">
+                  <Text size="sm" ff="monospace" c="dimmed">
+                    {row.row}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Group gap={6} wrap="nowrap">
+                    <Text size="sm">{row.name}</Text>
+                    {row.isNew && (
+                      <Badge size="xs" variant="light" color="teal">
+                        new
+                      </Badge>
+                    )}
+                  </Group>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm" c={row.phone ? undefined : 'dimmed'}>
+                    {row.phone ?? '—'}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="sm" c={row.note ? undefined : 'dimmed'}>
+                    {row.note ?? '—'}
+                  </Text>
+                </Table.Td>
+                <Table.Td ta="right">
+                  <Text size="sm" fw={600}>
+                    {formatMoney(row.amount, { symbol: currencySymbol })}
+                  </Text>
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Table.ScrollContainer>
+
+      <PagedFooter paged={paged} total={rows.length} noun="rows" />
+    </Card>
+  )
+}
+
+// ── The preview's own small parts ────────────────────────────────────────────
+
+type Paged<T> = {
+  page: number
+  pages: number
+  visible: T[]
+  setPage: (page: number) => void
+}
+
+/**
+ * Paging for the preview tables, in the browser — the rows are already in memory, so there is nothing
+ * to fetch.
+ *
+ * It is here because a 10,000-row sheet must not put 10,000 rows into the DOM: the window would lock
+ * up for seconds and he would think the app had died, at the exact moment he is deciding whether to
+ * trust it with his shop. The page is CLAMPED to the number of pages, so a shorter list after a
+ * re-upload cannot strand him on a page that no longer exists.
+ */
+function usePagedRows<T>(rows: T[]): Paged<T> {
+  const [page, setPage] = useState(1)
+
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
+  const safe = Math.min(page, pages)
+  const visible = rows.slice((safe - 1) * PAGE_SIZE, safe * PAGE_SIZE)
+
+  return { page: safe, pages, visible, setPage }
+}
+
+function PagedFooter<T>({
+  paged,
+  total,
+  noun
+}: {
+  paged: Paged<T>
+  total: number
+  noun: string
+}): React.JSX.Element | null {
+  if (paged.pages <= 1) return null
+
+  const first = (paged.page - 1) * PAGE_SIZE + 1
+  const last = Math.min(paged.page * PAGE_SIZE, total)
+
+  return (
+    <Group justify="space-between" mt="md">
+      <Text size="xs" c="dimmed">
+        {first}–{last} of {total} {noun}
+      </Text>
+      <Pagination value={paged.page} onChange={paged.setPage} total={paged.pages} size="sm" />
+    </Group>
+  )
+}
+
+/** "1 item" / "312 items" — an "s" bolted onto every noun reads like a machine wrote it. */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
