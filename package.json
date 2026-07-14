@@ -9,6 +9,7 @@
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
+    "app": "open 'release/mac-arm64/Insha POS.app'",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
