@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 /**
  * THE IPC CONTRACT. The one place the renderer and the main process agree on.
  *
@@ -7,14 +9,28 @@
  */
 
 export const IPC = {
-  /** Version, platform, where the database lives. */
   systemGetInfo: 'system:getInfo',
-  /** Proves better-sqlite3 actually loaded and WAL is on — the check that catches trap #8. */
   systemDbSelfCheck: 'system:dbSelfCheck',
-  /** Manual "check for updates" (Settings). The automatic check is silent. */
   updateCheck: 'update:check',
-  /** main -> renderer push. Update state changes. */
-  updateStatus: 'update:status'
+  updateStatus: 'update:status',
+
+  appGetState: 'app:getState',
+
+  licenseActivate: 'license:activate',
+
+  authCreateFirstOwner: 'auth:createFirstOwner',
+  authSignIn: 'auth:signIn',
+  authSignInWithPin: 'auth:signInWithPin',
+  authSignOut: 'auth:signOut',
+
+  backupRun: 'backup:run',
+  backupChooseFolder: 'backup:chooseFolder',
+  backupRestore: 'backup:restore',
+
+  lookupsList: 'lookups:list',
+  lookupsAdd: 'lookups:add',
+
+  auditList: 'audit:list'
 } as const
 
 export type SystemInfo = {
@@ -30,7 +46,6 @@ export type DbSelfCheck = {
   sqliteVersion: string
   journalMode: string
   foreignKeys: boolean
-  /** A real write+read round trip. If this works, the native module is genuinely alive. */
   roundTripOk: boolean
 }
 
@@ -46,3 +61,55 @@ export type UpdateStatus =
    * it is an offline POS. This state exists for the Settings screen and the log file only.
    */
   | { state: 'error'; technical: string }
+
+// ── Input schemas ────────────────────────────────────────────────────────────
+// Every handler that takes user input validates it with one of these, in MAIN, before it reaches a
+// service. The renderer is not trusted to have validated anything.
+
+export const ActivateInput = z.object({
+  key: z.string().min(1, 'Please paste your licence key.')
+})
+
+export const CreateFirstOwnerInput = z.object({
+  username: z.string().trim().min(1).max(50),
+  fullName: z.string().trim().min(1).max(100),
+  password: z.string().min(8, 'Please choose a password of at least 8 characters.')
+})
+
+export const SignInInput = z.object({
+  username: z.string().trim().min(1),
+  password: z.string().min(1)
+})
+
+export const PinInput = z.object({
+  pin: z.string().trim().min(4).max(12)
+})
+
+export const RestoreInput = z.object({
+  backupPath: z.string().min(1)
+})
+
+export const LookupsListInput = z.object({
+  listKey: z.string().min(1),
+  includeInactive: z.boolean().optional()
+})
+
+export const LookupsAddInput = z.object({
+  listKey: z.string().min(1),
+  label: z.string().trim().min(1, 'Please enter a name.')
+})
+
+export const AuditListInput = z.object({
+  page: z.number().int().positive().optional(),
+  pageSize: z.number().int().positive().max(200).optional(),
+  action: z.string().optional()
+})
+
+export type ActivateInput = z.infer<typeof ActivateInput>
+export type CreateFirstOwnerInput = z.infer<typeof CreateFirstOwnerInput>
+export type SignInInput = z.infer<typeof SignInInput>
+export type PinInput = z.infer<typeof PinInput>
+export type RestoreInput = z.infer<typeof RestoreInput>
+export type LookupsListInput = z.infer<typeof LookupsListInput>
+export type LookupsAddInput = z.infer<typeof LookupsAddInput>
+export type AuditListInput = z.infer<typeof AuditListInput>

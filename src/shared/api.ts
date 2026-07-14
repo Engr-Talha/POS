@@ -1,5 +1,19 @@
 import type { Result } from './result'
-import type { SystemInfo, DbSelfCheck, UpdateStatus } from './ipc'
+import type {
+  SystemInfo,
+  DbSelfCheck,
+  UpdateStatus,
+  ActivateInput,
+  CreateFirstOwnerInput,
+  SignInInput,
+  PinInput,
+  RestoreInput,
+  LookupsListInput,
+  LookupsAddInput,
+  AuditListInput
+} from './ipc'
+import type { AuditEntry, BackupResult, Lookup } from './types'
+import type { AppState } from './app-state'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -17,9 +31,43 @@ export interface PosApi {
     getInfo: () => Promise<Result<SystemInfo>>
     dbSelfCheck: () => Promise<Result<DbSelfCheck>>
   }
+
   updates: {
     check: () => Promise<Result<UpdateStatus>>
-    /** Subscribe to update status pushed from main. Returns an unsubscribe function. */
     onStatus: (callback: (status: UpdateStatus) => void) => () => void
+  }
+
+  /** What screen should we be on? Answered by MAIN, never worked out in the renderer. */
+  app: {
+    getState: () => Promise<Result<AppState>>
+  }
+
+  license: {
+    activate: (input: ActivateInput) => Promise<Result<AppState>>
+  }
+
+  auth: {
+    createFirstOwner: (input: CreateFirstOwnerInput) => Promise<Result<AppState>>
+    signIn: (input: SignInInput) => Promise<Result<AppState>>
+    signInWithPin: (input: PinInput) => Promise<Result<AppState>>
+    signOut: () => Promise<Result<AppState>>
+  }
+
+  backup: {
+    /** Always allowed — even on an expired licence. Their data is never held hostage. */
+    run: () => Promise<Result<BackupResult>>
+    chooseFolder: () => Promise<Result<string | null>>
+    restore: (input: RestoreInput) => Promise<Result<{ restoredFrom: string; safetyCopy: string }>>
+  }
+
+  lookups: {
+    list: (input: LookupsListInput) => Promise<Result<Lookup[]>>
+    add: (input: LookupsAddInput) => Promise<Result<Lookup>>
+  }
+
+  audit: {
+    list: (
+      input: AuditListInput
+    ) => Promise<Result<{ rows: AuditEntry[]; total: number; page: number; pageSize: number }>>
   }
 }

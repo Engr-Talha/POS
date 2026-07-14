@@ -27,6 +27,36 @@ const api: PosApi = {
       ipcRenderer.on(IPC.updateStatus, listener)
       return () => ipcRenderer.removeListener(IPC.updateStatus, listener)
     }
+  },
+
+  app: {
+    getState: () => ipcRenderer.invoke(IPC.appGetState)
+  },
+
+  license: {
+    activate: (input) => ipcRenderer.invoke(IPC.licenseActivate, input)
+  },
+
+  auth: {
+    createFirstOwner: (input) => ipcRenderer.invoke(IPC.authCreateFirstOwner, input),
+    signIn: (input) => ipcRenderer.invoke(IPC.authSignIn, input),
+    signInWithPin: (input) => ipcRenderer.invoke(IPC.authSignInWithPin, input),
+    signOut: () => ipcRenderer.invoke(IPC.authSignOut)
+  },
+
+  backup: {
+    run: () => ipcRenderer.invoke(IPC.backupRun),
+    chooseFolder: () => ipcRenderer.invoke(IPC.backupChooseFolder),
+    restore: (input) => ipcRenderer.invoke(IPC.backupRestore, input)
+  },
+
+  lookups: {
+    list: (input) => ipcRenderer.invoke(IPC.lookupsList, input),
+    add: (input) => ipcRenderer.invoke(IPC.lookupsAdd, input)
+  },
+
+  audit: {
+    list: (input) => ipcRenderer.invoke(IPC.auditList, input)
   }
 }
 
