@@ -355,7 +355,8 @@ function ScaledInput({
   placeholder,
   leftSection,
   rightSection,
-  error
+  error,
+  autoFocus
 }: {
   label?: string
   description?: string
@@ -370,6 +371,8 @@ function ScaledInput({
   leftSection?: React.ReactNode
   rightSection?: React.ReactNode
   error?: string
+  /** The Sell screen's payment box opens straight onto the amount — a cashier is holding a 500 note. */
+  autoFocus?: boolean
 }): React.JSX.Element {
   const [text, setText] = useState(() => render(value))
   const [editing, setEditing] = useState(false)
@@ -392,6 +395,7 @@ function ScaledInput({
       placeholder={placeholder}
       leftSection={leftSection}
       rightSection={rightSection}
+      autoFocus={autoFocus}
       inputMode="decimal"
       error={error ?? (bad ? 'That is not a number we can use.' : undefined)}
       onFocus={() => setEditing(true)}

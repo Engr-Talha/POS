@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { ItemType, StockMovement } from './catalog'
 import type { OpeningSummary } from './opening'
+import { PRICE_TIERS, SaleLineInput, type SaleDetail } from './sales'
+import type { TaxMode } from './tax'
 
 /**
  * THE IPC CONTRACT. The one place the renderer and the main process agree on.
@@ -128,7 +130,49 @@ export const IPC = {
   // from the movements.
   customersList: 'customers:list',
   customersCreate: 'customers:create',
-  customersUpdate: 'customers:update'
+  customersUpdate: 'customers:update',
+
+  // ── SELLING — the till ─────────────────────────────────────────────────────
+  //
+  // THE CART IS NOT IN THE DATABASE. `scan`, `addLine`, `updateLine` and `removeLine` do not write a
+  // single row: the Sell screen holds the cart in memory and rings it up in ONE call. A cart that
+  // lived as rows would mean a database write per keystroke on the busiest screen in the shop.
+  //
+  // So why are the cart operations here at all, rather than done in the renderer? Because
+  // `addLine` carries a BUSINESS RULE — scanning the same tin twice bumps the quantity to 2 rather
+  // than stacking a second row, *unless* the line carries a discount, an override, a batch or a
+  // serial, which are paperwork that must not be silently folded together. That rule belongs in one
+  // place. Re-implementing it in the renderer is how the screen and the receipt start to disagree.
+  //
+  // A cart that must SURVIVE (the customer went back for the milk) is a different thing: it is HELD.
+  saleScan: 'sale:scan',
+  saleAddLine: 'sale:addLine',
+  saleUpdateLine: 'sale:updateLine',
+  saleRemoveLine: 'sale:removeLine',
+
+  saleHold: 'sale:hold',
+  saleSaveQuote: 'sale:saveQuote',
+  saleResume: 'sale:resume',
+  saleListHeld: 'sale:listHeld',
+  saleDiscard: 'sale:discard',
+
+  /** THE ONE THAT MATTERS. Number drawn, prices frozen, stock moved, journal posted — or none of it. */
+  saleComplete: 'sale:complete',
+  saleVoid: 'sale:void',
+
+  saleList: 'sale:list',
+  saleGet: 'sale:get',
+  saleGetByInvoiceNo: 'sale:getByInvoiceNo',
+  saleOutstandingCredit: 'sale:outstandingCredit',
+
+  // ── PRINTING & THE CASH DRAWER ─────────────────────────────────────────────
+  //
+  // `printReceipt` takes a SALE ID, never a receipt. Main reads the sale from the database and builds
+  // the paper itself. Handing the renderer a "print this ReceiptData" endpoint would let a tampered
+  // renderer print a receipt for a sale that never happened, with any total it liked.
+  printReceipt: 'printing:printReceipt',
+  printOpenDrawer: 'printing:openDrawer',
+  printListPrinters: 'printing:listPrinters'
 } as const
 
 export type SystemInfo = {
@@ -459,6 +503,211 @@ export type NearExpiryItem = {
   valueMinor: number
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// SELLING — the inputs that had no home in shared/sales.ts
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Everything the sale handlers validate with — HoldSaleInput, CompleteSaleInput, VoidSaleInput,
+// SaleListInput and the rest — is imported straight from '@shared/sales'. These are the leftovers:
+// the scanner, the three cart transforms, and the two plain-id reads. An IPC input MUST be a schema;
+// the renderer is not trusted, and neither is a future LAN client.
+
+/**
+ * THE SCANNER'S HOT PATH. A barcode, and which price column to read it at.
+ *
+ * `minLength` is deliberately NOT enforced here — `scanner.minLength` is a SETTING that stops a stray
+ * keypress being read as a scan, and it belongs to the screen that owns the keyboard. Main's job is to
+ * answer the question it was asked. An unknown barcode comes back as `null`, not as an error: a
+ * loyalty card swiped at the till is a Tuesday, not a fault.
+ */
+export const ScanBarcodeInput = z.object({
+  barcode: z.string().trim().min(1, 'Please scan or type a barcode.').max(64),
+  /** Which price column. Switching off retail is gated on `selling.wholesaleTierRole` in MAIN. */
+  tier: z.enum(PRICE_TIERS).optional(),
+  /** Phase 7 seam: a per-customer agreed price would be read against this. */
+  customerId: RowId.nullish()
+})
+
+/**
+ * THE FIELDS OF A CART LINE A CASHIER MAY ACTUALLY CHANGE.
+ *
+ * Deliberately NOT `Partial<SaleLineInput>`. You cannot change WHAT a line is — swapping `productId`
+ * on line 3 would leave the merge rule in `addLine` describing a line that no longer exists, and a
+ * "changed" line is really a remove and an add. Quantity, discount, override and serials are the only
+ * things a till ever edits in place.
+ */
+export const CartLineChanges = z.object({
+  qtyM: z.number().int().positive('Please enter a quantity.').optional(),
+  lineDiscount: z.number().int().min(0).optional(),
+  discountReasonCode: z.string().trim().min(1).max(50).nullish(),
+  priceOverride: z.number().int().min(0).nullish(),
+  serials: z.array(z.string().trim().min(1).max(100)).optional()
+})
+
+/** The three cart transforms are PURE: cart in, cart out. No database, no clock, no row written. */
+export const CartAddLineInput = z.object({
+  cart: z.array(SaleLineInput),
+  line: SaleLineInput
+})
+
+export const CartUpdateLineInput = z.object({
+  cart: z.array(SaleLineInput),
+  index: z.number().int().min(0),
+  changes: CartLineChanges
+})
+
+export const CartRemoveLineInput = z.object({
+  cart: z.array(SaleLineInput),
+  index: z.number().int().min(0)
+})
+
+/** The hold tray on the Sell screen — parked carts, or quotations. */
+export const ListHeldInput = z.object({
+  status: z.enum(['held', 'quote']).default('held')
+})
+
+/** What this customer already owes. Read BEFORE a credit sale, so the cashier sees the udhaar. */
+export const OutstandingCreditInput = z.object({ customerId: RowId })
+
+/**
+ * PRINT A COPY OF A SALE'S RECEIPT.
+ *
+ * NOTE WHAT IT DOES NOT TAKE: an `isDuplicate` flag. That is deliberate, and it is a security boundary.
+ *
+ * Every print the RENDERER can ask for is a REPRINT. It is stamped DUPLICATE and it is written to the
+ * audit log — always, with no way to opt out. The service's `receiptFor()` only logs `sale.reprint`
+ * when `isDuplicate` is true, so an endpoint that let the caller pass `false` would hand the renderer
+ * unlimited un-stamped, UN-AUDITED copies of any receipt in the shop. A second un-stamped "original" is
+ * indistinguishable from the customer's real one — which is exactly what someone returning goods
+ * against a stranger's sale needs.
+ *
+ * The ONE un-stamped original in this app is printed by `sale:complete`, inside the same call that
+ * created the sale. It cannot be replayed: asking for it again would mean ringing up another sale.
+ */
+export const PrintReceiptInput = z.object({ id: RowId })
+
+/**
+ * OPENING THE TILL WITH NO SALE — a classic theft vector, and the reason this input exists at all.
+ *
+ * The reason code is REQUIRED, and MAIN checks it against the ACTIVE rows of the `no_sale_reason`
+ * lookup list — never a hardcoded dropdown (CLAUDE.md §4). That list has no seeded rows yet (the
+ * `cash_movements` table it belongs with is Phase 6), so on a fresh shop the owner adds its reasons in
+ * Settings → Manage Lists like any other list. The generic lookups endpoints already serve it.
+ */
+export const OpenDrawerInput = z.object({
+  /** lookups('no_sale_reason').code. */
+  reasonCode: z.string().trim().min(1, 'Please choose a reason.').max(50),
+  /** Free text on top of the code — "customer wanted change for a 5000 note". */
+  reasonText: z.string().trim().max(500).nullish()
+})
+
+// ── What the scanner gives back ──────────────────────────────────────────────
+
+/**
+ * WHAT THE SELL SCREEN NEEDS THE INSTANT A BARCODE COMES IN.
+ *
+ * Mirrored from `services/sales.ts` because `shared/` cannot import from `main/`. The handler is
+ * annotated with THIS type, so if the service's shape ever drifts the BUILD BREAKS here rather than
+ * the till quietly showing a blank price. (Same device as StockAdjustResult.)
+ *
+ * READ THE SCALES. `unitPrice` is 2-dp MONEY (minor units); `qtyM` and `onHandM` are 3-dp QUANTITY
+ * (thousandths). They are not interchangeable and mixing them is how a shop's books get falsified.
+ */
+export type ScannedItem = {
+  productId: number
+  name: string
+  nameOtherLang: string | null
+  /**
+   * Set when a PACK barcode was scanned (a carton). Pass it straight back on the cart line — the
+   * line is then priced at the CARTON's price and moves 24 PIECES of stock. That is the whole of
+   * "buy in cartons, sell in pieces".
+   */
+  packId: number | null
+  /** The pack's unit, for the cart chip: "Carton". Null for a plain item. */
+  packLabel: string | null
+  /** 3-dp qty of BASE units this ONE scan sells. A plain item: 1000. A carton of 24: 24000. */
+  qtyM: number
+  /** 2-dp money — the price of ONE of what was scanned (one piece, or one whole carton). */
+  unitPrice: number
+  taxRateBp: number
+  taxMode: TaxMode
+  /** Sold by weight — the Sell screen asks the scale, not the keyboard. */
+  isWeighted: boolean
+  /** ONLY a flagged item prompts for an IMEI. A tin of beans still scans in one keystroke. */
+  trackSerials: boolean
+  uom: string | null
+  /**
+   * A SERVICE OR A BAG CHARGE HAS NO SHELF, and `onHandM` is 0 for it — the same 0 a tin that has run
+   * out reports. Without this field the Sell screen cannot tell those two apart, and it would warn
+   * "not enough stock" on every delivery fee the shop charged. A warning that cries wolf is one the
+   * cashier learns to click through, which is worse than no warning at all.
+   */
+  itemType: ItemType
+  /** DERIVED from the movements, never stored. Shown so the cashier can see they are about to oversell. */
+  onHandM: number
+}
+
+// ── What printing gives back ─────────────────────────────────────────────────
+//
+// `shared/` cannot import from `main/`, so the printer's result shapes are declared HERE and
+// printing/printer.ts imports them back. That is the point: if the printer's shape ever drifts from
+// what the Sell screen reads, THE BUILD BREAKS — rather than the cashier silently never being told
+// their receipt did not print. (Same device as StockAdjustResult.)
+
+/**
+ * DID IT PRINT? A `problem` is not an error — the sale is SAVED either way.
+ *
+ * A printer jam must never lose a completed sale, so a failed print comes back as DATA on a successful
+ * call, and the screen turns it into a warning and a "Print again" button. It is never a red box that
+ * makes a cashier think the money did not go through.
+ */
+export type PrintOutcome = {
+  printed: boolean
+  copies: number
+  /** Null = the system default printer. */
+  printerName: string | null
+  /** Cashier-readable, and actionable. Null when it printed. */
+  problem: string | null
+}
+
+/** Did the drawer open? Same contract, same reason: never an error, always the truth. */
+export type DrawerOutcome = {
+  opened: boolean
+  problem: string | null
+}
+
+/**
+ * For the Settings dropdown — so the owner PICKS their printer instead of mistyping its name.
+ *
+ * `name` is what the OS understands and what goes into the `printer.name` setting; `displayName` is
+ * what the shopkeeper recognises. There is deliberately NO `isDefault` flag: Electron dropped it from
+ * its own PrinterInfo, and guessing at it from the platform-specific `options` bag would be a flag that
+ * is right on one machine and wrong on the next. It is not needed anyway — an EMPTY `printer.name`
+ * already means "use the system default", so the dropdown's blank entry is the default printer.
+ */
+export type PrinterInfo = {
+  name: string
+  displayName: string
+  /** The OS's longer description — tells two similarly-named printers apart. */
+  description: string
+}
+
+/**
+ * WHAT COMES BACK FROM RINGING UP A SALE.
+ *
+ * The sale is COMMITTED before a single byte goes to the printer. `print` and `drawer` are what the
+ * hardware then did — reported, never thrown. If `print.printed` is false the shop still made the
+ * sale, the customer still paid, and the books are still right; they just need to press Print again.
+ */
+export type CompleteSaleResponse = {
+  sale: SaleDetail
+  /** The balanced journal this sale posted. */
+  journalId: number
+  print: PrintOutcome
+  /** Kicked only on a CASH sale, and only when `drawer.enabled` is on. */
+  drawer: DrawerOutcome
+}
+
 export type ActivateInput = z.infer<typeof ActivateInput>
 export type CreateFirstOwnerInput = z.infer<typeof CreateFirstOwnerInput>
 export type SignInInput = z.infer<typeof SignInInput>
@@ -478,3 +727,12 @@ export type StockLevelsInput = z.infer<typeof StockLevelsInput>
 export type LowStockInput = z.infer<typeof LowStockInput>
 export type NearExpiryInput = z.infer<typeof NearExpiryInput>
 export type OpeningPartyListInput = z.infer<typeof OpeningPartyListInput>
+export type ScanBarcodeInput = z.infer<typeof ScanBarcodeInput>
+export type CartLineChanges = z.infer<typeof CartLineChanges>
+export type CartAddLineInput = z.infer<typeof CartAddLineInput>
+export type CartUpdateLineInput = z.infer<typeof CartUpdateLineInput>
+export type CartRemoveLineInput = z.infer<typeof CartRemoveLineInput>
+export type ListHeldInput = z.infer<typeof ListHeldInput>
+export type OutstandingCreditInput = z.infer<typeof OutstandingCreditInput>
+export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
+export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>

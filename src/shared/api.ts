@@ -26,8 +26,35 @@ import type {
   OpeningPartyListInput,
   OpeningWizardState,
   ImportPreview,
-  ImportResult
+  ImportResult,
+  ScanBarcodeInput,
+  ScannedItem,
+  CartAddLineInput,
+  CartUpdateLineInput,
+  CartRemoveLineInput,
+  ListHeldInput,
+  OutstandingCreditInput,
+  OpenDrawerInput,
+  PrintReceiptInput,
+  CompleteSaleResponse,
+  PrintOutcome,
+  DrawerOutcome,
+  PrinterInfo
 } from './ipc'
+import type {
+  CompleteSaleInput,
+  DiscardSaleInput,
+  HoldSaleInput,
+  ResumeSaleInput,
+  SaleByInvoiceNoInput,
+  SaleDetail,
+  SaleGetInput,
+  SaleLineInput,
+  SaleListInput,
+  SaleListItem,
+  SaveQuoteInput,
+  VoidSaleInput
+} from './sales'
 import type {
   CommitOpeningInput,
   CreateCustomerInput,
@@ -357,5 +384,150 @@ export interface PosApi {
     create: (input: CreateCustomerInput) => Promise<Result<Customer>>
     /** Send ONLY the fields the form edited. (Trap #18.) */
     update: (input: UpdateCustomerInput) => Promise<Result<Customer>>
+  }
+
+  /**
+   * THE TILL. The busiest screen in the shop, and the one that must never make the cashier wait.
+   *
+   * ── THE RENDERER SENDS INTENT. MAIN DECIDES THE MONEY. ─────────────────────────────────────────
+   *
+   * Look at what a cart line CANNOT carry: `net`, `taxAmount`, `gross`, `unitCost`, `at`. Main resolves
+   * the price from the catalog, the tax from the product, the cost from the weighted average and the
+   * time from its own clock, and FREEZES all of them onto the sale line. If the renderer could post its
+   * own totals, a tampered renderer could sell a Rs 200,000 television for Rs 1 behind a perfectly
+   * balanced journal, and every report in the app would agree that it happened. (shared/sales.ts.)
+   *
+   * The two exceptions are deliberate, permissioned and audited: an OPEN ITEM (there is no catalog row
+   * to read a price from — that is what an open item IS) and a PRICE OVERRIDE.
+   *
+   * ── THE CART LIVES IN THE SCREEN, NOT IN THE DATABASE. ─────────────────────────────────────────
+   *
+   * `scan`, `addLine`, `updateLine` and `removeLine` write NOTHING. The Sell screen holds the cart in
+   * React state and rings it up in one `complete()` call. A cart that lived as rows would be a database
+   * write per keystroke on the hot path.
+   *
+   * ── HOW TO SHOW THE RUNNING TOTAL, WITHOUT REINVENTING THE MONEY ───────────────────────────────
+   *
+   * Do NOT write new arithmetic. Each line's net/tax/gross comes from `computeLineTax()` in
+   * shared/tax.ts — the SAME pure function main freezes the line with, so the two cannot drift. And the
+   * grand total with a cart discount is not a new formula either; it is the invariant the sale service
+   * is property-tested against:
+   *
+   *     grandTotal === SUM(line.gross, before the cart discount) − cartDiscount     — exact, to the paisa.
+   *
+   * `complete()` returns the authoritative frozen sale regardless, so the screen is only ever
+   * *predicting* what main will do — and predicting it with main's own functions.
+   */
+  sales: {
+    /**
+     * THE HOT PATH. One indexed lookup — the same two B-tree seeks whether the shop has 100 items or
+     * 100,000. Resolves product barcodes AND pack barcodes: scanning the carton returns the carton's
+     * price and `qtyM: 24000`, because stock is measured in base units and always has been.
+     *
+     * An unknown barcode is `{ ok: true, data: null }` — NOT an error. A loyalty card swiped at the
+     * till is an everyday event, and the cashier gets "not found", not a red box.
+     *
+     * A carton with NO SELLING PRICE is refused: it carries the supplier's barcode so a delivery can be
+     * booked in, and ringing it up would give away a free carton. (CLAUDE.md §4, Selling.)
+     */
+    scan: (input: ScanBarcodeInput) => Promise<Result<ScannedItem | null>>
+
+    /**
+     * Add a line. Pure — cart in, cart out, nothing written.
+     *
+     * Scanning the same tin twice makes it qty 2 rather than two rows — UNLESS the line carries a
+     * discount, an override, a batch or a serial, which are paperwork and must not be silently folded
+     * together. That rule lives in main so the screen and the receipt cannot disagree about it.
+     */
+    addLine: (input: CartAddLineInput) => Promise<Result<SaleLineInput[]>>
+    /** Change a line in place: quantity, discount, override, serials. Not WHAT it is — that is a re-scan. */
+    updateLine: (input: CartUpdateLineInput) => Promise<Result<SaleLineInput[]>>
+    removeLine: (input: CartRemoveLineInput) => Promise<Result<SaleLineInput[]>>
+
+    /**
+     * PARK THE CART — the customer went back for the milk, and the queue is moving.
+     *
+     * NO INVOICE NUMBER, no stock movement, no journal. Nothing has happened yet, and that is exactly
+     * what keeps the numbering gapless: a number is drawn only on completion.
+     */
+    hold: (input: HoldSaleInput) => Promise<Result<SaleDetail>>
+    /** A price the shop offered, which may never become a sale. Also takes no number. (PLAN.md §2.) */
+    saveQuote: (input: SaveQuoteInput) => Promise<Result<SaleDetail>>
+    /**
+     * Pick a parked cart back up. It comes back as CART LINES, re-priced from the catalog when it is
+     * rung up — a cart held before this morning's price change is sold at this morning's price.
+     */
+    resume: (input: ResumeSaleInput) => Promise<Result<SaleLineInput[]>>
+    /** The hold tray. Parked carts, or quotations. */
+    listHeld: (input: ListHeldInput) => Promise<Result<SaleListItem[]>>
+    /** Throw a parked cart away. Only 'held' and 'quote' rows are ever deleted; history is not. */
+    discard: (input: DiscardSaleInput) => Promise<Result<boolean>>
+
+    /**
+     * RING IT UP — and then print, and then open the drawer.
+     *
+     * The sale is COMMITTED before a single byte reaches the printer: number drawn, prices frozen,
+     * stock moved, journal balanced, payments written — all of it in ONE transaction, or none of it.
+     *
+     * SO A PRINTER JAM CANNOT LOSE A SALE. If the receipt does not print, this still returns
+     * `{ ok: true }` with `print.printed === false` and a sentence to show the cashier. Show them a
+     * warning and a "Print again" button — never a red error box, because the money DID go through.
+     */
+    complete: (input: CompleteSaleInput) => Promise<Result<CompleteSaleResponse>>
+
+    /**
+     * CANCEL A COMPLETED SALE. Supervisor-only, enforced in MAIN.
+     *
+     * It REVERSES: a contra journal is posted and the stock goes back at the cost it left at. It does
+     * NOT delete, and the sale KEEPS its invoice number forever. A book that renumbers itself around a
+     * cancellation cannot be audited. The reason code is required by the database itself.
+     */
+    void: (input: VoidSaleInput) => Promise<Result<SaleDetail>>
+
+    /** The sales list — paginated and indexed. Assume years of trading at 1000+ sales a day. */
+    list: (input: SaleListInput) => Promise<Result<PagedResult<SaleListItem>>>
+    get: (input: SaleGetInput) => Promise<Result<SaleDetail>>
+    /** The returns desk's first move: the number printed on the receipt in the customer's hand. */
+    getByInvoiceNo: (input: SaleByInvoiceNoInput) => Promise<Result<SaleDetail>>
+
+    /**
+     * What this customer already owes — read BEFORE taking a credit sale, so the cashier can see the
+     * udhaar before adding to it. What happens when they are over their limit is the SETTING
+     * `selling.creditLimit` (warn or block), enforced in MAIN.
+     */
+    outstandingCredit: (input: OutstandingCreditInput) => Promise<Result<number>>
+  }
+
+  /**
+   * THE PRINTER AND THE CASH DRAWER.
+   *
+   * `printReceipt` takes a SALE ID — never a receipt. Main reads the sale from the database and builds
+   * the paper itself. A "print this ReceiptData" endpoint would let a tampered renderer print a receipt
+   * for a sale that never happened, with any total it liked.
+   *
+   * Neither of these is blocked by an expired licence. Reprinting a receipt is an EXPORT, and opening
+   * the till gets the shop its own cash out of its own box. Read-only mode stops NEW sales; it never
+   * holds anything they already have hostage. (CLAUDE.md §6.)
+   */
+  printing: {
+    /**
+     * Print (or REPRINT) the receipt for a sale. A reprint is stamped DUPLICATE and is audit-logged —
+     * "just print it again" is how one sale's receipt ends up in two customers' hands.
+     *
+     * `printed: false` is not an error. It means the paper did not come out; the sale is untouched.
+     */
+    printReceipt: (input: PrintReceiptInput) => Promise<Result<PrintOutcome>>
+
+    /**
+     * A NO-SALE DRAWER OPEN — opening the till with no sale behind it.
+     *
+     * A CLASSIC THEFT VECTOR, and treated as one: it needs the `drawer.no_sale` permission (supervisor),
+     * it needs a reason code from the `no_sale_reason` list, and it is ALWAYS audit-logged with who,
+     * when and why — whether or not the drawer physically opened.
+     */
+    openDrawer: (input: OpenDrawerInput) => Promise<Result<DrawerOutcome>>
+
+    /** The printers the OS can see, for the Settings dropdown. Owner picks; nobody types a name. */
+    listPrinters: () => Promise<Result<PrinterInfo[]>>
   }
 }

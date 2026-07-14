@@ -153,6 +153,44 @@ const api: PosApi = {
     list: (input) => ipcRenderer.invoke(IPC.customersList, input),
     create: (input) => ipcRenderer.invoke(IPC.customersCreate, input),
     update: (input) => ipcRenderer.invoke(IPC.customersUpdate, input)
+  },
+
+  // THE TILL. Look at what a cart line CANNOT carry across this line: net, taxAmount, gross, unitCost,
+  // or a timestamp. The renderer says WHAT was scanned and HOW MANY; MAIN decides what it costs, what
+  // tax it bears, what it cost the shop, and when it happened. A renderer that could post its own
+  // totals could sell a television for one rupee behind a perfectly balanced journal.
+  //
+  // `scan`, `addLine`, `updateLine` and `removeLine` write nothing — the cart lives in the screen.
+  // `complete` is the one that draws the invoice number, moves the stock and posts the journal.
+  sales: {
+    scan: (input) => ipcRenderer.invoke(IPC.saleScan, input),
+
+    addLine: (input) => ipcRenderer.invoke(IPC.saleAddLine, input),
+    updateLine: (input) => ipcRenderer.invoke(IPC.saleUpdateLine, input),
+    removeLine: (input) => ipcRenderer.invoke(IPC.saleRemoveLine, input),
+
+    hold: (input) => ipcRenderer.invoke(IPC.saleHold, input),
+    saveQuote: (input) => ipcRenderer.invoke(IPC.saleSaveQuote, input),
+    resume: (input) => ipcRenderer.invoke(IPC.saleResume, input),
+    listHeld: (input) => ipcRenderer.invoke(IPC.saleListHeld, input),
+    discard: (input) => ipcRenderer.invoke(IPC.saleDiscard, input),
+
+    complete: (input) => ipcRenderer.invoke(IPC.saleComplete, input),
+    void: (input) => ipcRenderer.invoke(IPC.saleVoid, input),
+
+    list: (input) => ipcRenderer.invoke(IPC.saleList, input),
+    get: (input) => ipcRenderer.invoke(IPC.saleGet, input),
+    getByInvoiceNo: (input) => ipcRenderer.invoke(IPC.saleGetByInvoiceNo, input),
+    outstandingCredit: (input) => ipcRenderer.invoke(IPC.saleOutstandingCredit, input)
+  },
+
+  // The printer and the cash drawer. `printReceipt` takes a SALE ID — the renderer cannot hand main a
+  // receipt to print, because a renderer that could would be able to print a receipt for a sale that
+  // never happened. Main reads the sale from the database and builds the paper itself.
+  printing: {
+    printReceipt: (input) => ipcRenderer.invoke(IPC.printReceipt, input),
+    openDrawer: (input) => ipcRenderer.invoke(IPC.printOpenDrawer, input),
+    listPrinters: () => ipcRenderer.invoke(IPC.printListPrinters)
   }
 }
 

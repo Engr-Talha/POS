@@ -25,13 +25,39 @@ import {
   LowStockInput,
   NearExpiryInput,
   OpeningPartyListInput,
+  ScanBarcodeInput,
+  CartAddLineInput,
+  CartUpdateLineInput,
+  CartRemoveLineInput,
+  ListHeldInput,
+  OutstandingCreditInput,
+  OpenDrawerInput,
+  PrintReceiptInput,
   type StockAdjustResult,
   type NearExpiryItem,
   type SystemInfo,
   type OpeningWizardState,
   type ImportPreview,
-  type ImportResult
+  type ImportResult,
+  type ScannedItem,
+  type CompleteSaleResponse,
+  type PrintOutcome,
+  type DrawerOutcome,
+  type PrinterInfo
 } from '@shared/ipc'
+import {
+  CompleteSaleInput,
+  DiscardSaleInput,
+  HoldSaleInput,
+  ResumeSaleInput,
+  SaleByInvoiceNoInput,
+  SaleGetInput,
+  SaleListInput,
+  SaveQuoteInput,
+  VoidSaleInput,
+  type SaleDetail,
+  type SaleLineInput
+} from '@shared/sales'
 import {
   CommitOpeningInput,
   CreateCustomerInput,
@@ -94,6 +120,8 @@ import * as openingService from '../services/opening'
 import * as customersService from '../services/customers'
 import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
+import * as salesService from '../services/sales'
+import * as printer from '../printing/printer'
 import log from '../logger'
 
 /**
@@ -230,6 +258,118 @@ function templateFileName(now: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0')
   const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   return `Opening balances template - ${day}.xlsx`
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// THE PRINTER AND THE DRAWER — and the rule that outranks both
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// A PRINTER JAM MUST NEVER LOSE A COMPLETED SALE.
+//
+// By the time any of this runs, `sales.complete()` has already committed: the money is taken, the stock
+// has moved, the journal has posted and the invoice number is drawn. Out of paper is a Tuesday. So the
+// two functions below NEVER THROW — they come back and SAY what the hardware did, and the sale stands
+// either way. The cashier is shown a warning and a Print again button; they are never shown a red box
+// that makes them think the money did not go through, because it did.
+
+/** Everything the printer needs, and every bit of it from SETTINGS. Not one constant. (CLAUDE.md §4) */
+function printOptions(db: ReturnType<typeof getDb>): printer.PrintReceiptOptions {
+  return {
+    width: printer.resolveWidth(settingsService.get<string>(db, 'printer.receiptWidth', '80mm')),
+    printerName: settingsService.get<string>(db, 'printer.name', ''),
+    copies: printer.clampCopies(settingsService.get<number>(db, 'printer.copies', 1))
+  }
+}
+
+/**
+ * Build the receipt from the DATABASE and print it. Never throws.
+ *
+ * `receiptFor()` is what stamps a reprint DUPLICATE and writes the `sale.reprint` audit row — so the
+ * paper and the log are produced by the same call, and a receipt cannot be reprinted without a trace.
+ */
+async function printSaleReceipt(
+  db: ReturnType<typeof getDb>,
+  actor: Parameters<typeof salesService.receiptFor>[1],
+  saleId: number,
+  isDuplicate: boolean
+): Promise<PrintOutcome> {
+  try {
+    const receipt = salesService.receiptFor(db, actor, { id: saleId, isDuplicate })
+    return await printer.printReceipt(receipt, printOptions(db))
+  } catch (error) {
+    // Building the receipt failed — not printing it. The sale is still SAVED, so this is still not an
+    // error the cashier is allowed to mistake for a failed sale.
+    const technical = error instanceof Error ? error.message : String(error)
+    log.error(`[printer] could not build the receipt for sale ${saleId}: ${technical}`)
+
+    return {
+      printed: false,
+      copies: 0,
+      printerName: null,
+      problem:
+        'The sale is saved, but the receipt could not be prepared. Please try printing it again from the sales list.'
+    }
+  }
+}
+
+/**
+ * Kick the drawer — but only on a CASH sale, and only if the shop has the drawer switched on
+ * (`drawer.enabled`). A card sale does not open the till, because no cash is going into it.
+ *
+ * "Which payment was cash" is read from the LOOKUPS table, never hardcoded: `payment_method` is a
+ * lookups list like every other dropdown in this app, and a shop may well have added 'Cash (USD)'.
+ * We match on the CODE, which is what survives a row being re-seeded. (CLAUDE.md §4)
+ */
+async function kickDrawerForSale(
+  db: ReturnType<typeof getDb>,
+  sale: SaleDetail
+): Promise<DrawerOutcome> {
+  if (!settingsService.get<boolean>(db, 'drawer.enabled', true)) {
+    return { opened: false, problem: null } // switched off in Settings. Not a fault — a choice.
+  }
+
+  const cashMethodIds = new Set(
+    lookupsService
+      .list(db, 'payment_method', true)
+      .filter((method) => method.code === 'cash')
+      .map((method) => method.id)
+  )
+
+  const tookCash = sale.payments.some((payment) => cashMethodIds.has(payment.methodLookupId))
+  if (!tookCash) return { opened: false, problem: null }
+
+  return printer.openCashDrawer({
+    kickCode: settingsService.get<string>(db, 'drawer.kickCode', ''),
+    printerName: settingsService.get<string>(db, 'printer.name', '')
+  })
+}
+
+/**
+ * THE REASON THE TILL WAS OPENED WITH NO SALE — and it had better be on the list.
+ *
+ * Mirrors `assertAdjustmentReason` in services/stock.ts exactly: the code must be an ACTIVE row of a
+ * lookups list. NEVER a hardcoded dropdown (CLAUDE.md §4).
+ *
+ * The `no_sale_reason` list has no SEEDED rows yet — it belongs with `cash_movements`, which is Phase 6
+ * — so on a fresh shop it is empty and the owner fills it in Settings → Manage Lists like any other
+ * list. The generic `lookups:list` / `lookups:add` handlers already serve it (they take the list key as
+ * data), so this needs no new endpoint. The message below says exactly that, in words an owner can act
+ * on, rather than failing with "unknown reason code".
+ */
+function assertNoSaleReason(db: ReturnType<typeof getDb>, code: string): void {
+  const row = db
+    .prepare(
+      `SELECT code FROM lookups WHERE list_key = 'no_sale_reason' AND code = ? AND is_active = 1`
+    )
+    .get(code) as { code: string } | undefined
+
+  if (!row) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      'Please choose a reason for opening the till from the list. An owner can set these up in Settings → Manage Lists.',
+      `unknown or inactive no_sale_reason code "${code}"`
+    )
+  }
 }
 
 export function registerIpcHandlers(): void {
@@ -1059,12 +1199,28 @@ export function registerIpcHandlers(): void {
   // DERIVED from the ledger, exactly as stock is derived from the movements. `creditLimit` is a
   // different thing: how much udhaar they are ALLOWED to run up. A limit, not a debt.
   //
-  // Writes are gated on 'settings.manage' — the ONLY screen that creates a customer today is the
-  // owner-only opening wizard, so this is the honest gate for what actually exists. Phase 7 puts a
-  // customer in front of a cashier at the till, and that needs its own 'customer.manage' permission in
+  // Writes are gated on 'settings.manage' — a cashier cannot invent a customer at the till, which is
+  // how udhaar quietly gets written off to "Ali". A new credit customer is added by the owner. Phase 7
+  // puts a customer LEDGER in front of a cashier, and that needs its own 'customer.manage' permission in
   // shared/rbac.ts. Opening a gate later is safe; shipping one too wide is not.
+  //
+  // ── THE READ IS 'sale.create', AND IT HAS TO BE (Phase 5). ─────────────────────────────────────────
+  //
+  // It was 'report.view' (manager). But CREDIT (UDHAAR) IS A PAYMENT METHOD ON THE TILL, and
+  // `selling.requireCustomerForCredit` defaults to ON — so a credit sale must NAME the customer. A
+  // cashier who cannot list customers cannot name one, and therefore cannot take udhaar at all: the
+  // single most common credit workflow in a Pakistani shop, closed to the only role that mans the till.
+  //
+  // Main's own contract already assumed this. `sale:outstandingCredit` is gated on 'sale.create' and its
+  // doc says "read BEFORE taking a credit sale, so the cashier can see the udhaar before adding to it" —
+  // an endpoint that was unreachable, because nothing gave the cashier a customer id to pass it.
+  //
+  // What this exposes is name, phone, address, type and CREDIT LIMIT — every field a cashier needs to
+  // decide whether to give someone credit, and not one figure about what the shop pays for anything.
+  // No cost, no margin. (Contrast `products.list`, which carries `costPrice` and therefore stays at
+  // 'report.view': a name-search at the till needs its own narrow endpoint, not a wider gate on this one.)
   handle(IPC.customersList, CustomerListInput, (input) => {
-    session.requirePermissionOf('report.view')
+    session.requirePermissionOf('sale.create')
     return customersService.list(getDb(), input)
   })
 
@@ -1081,5 +1237,288 @@ export function registerIpcHandlers(): void {
     // Only the fields the form sent arrive here. The service audits customer.update, with a before/after
     // of exactly the fields that were touched.
     return customersService.update(getDb(), user, input)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SELLING — the till
+  //
+  // THE AUDIT CONTRACT (see ipc/audit-contract.test.ts): services/sales.ts AUDITS ITSELF. It writes
+  // sale.discount.over_threshold, sale.price_override, sale.negative_stock, sale.void, sale.reprint and
+  // sale.discard from inside its own transactions, where it has the actor and the before/after. So NOT
+  // ONE handler below logs a second row. A log that records the same act twice is a log nobody trusts.
+  //
+  // The one audit row written HERE is drawer.no_sale — because there is no service behind it. The
+  // drawer is hardware, and printing/printer.ts has no database.
+  //
+  // WRITES take assertWritable(). READS do not — an expired shop can still look up a sale, reprint a
+  // receipt and export its numbers. It simply cannot ring up new ones. (CLAUDE.md §6)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * THE SCANNER. Gated at `sale.create` — the cashier is the one holding the gun.
+   *
+   * A READ: no assertWritable(). An unknown barcode comes back as `null`, not an error.
+   *
+   * Annotated with the SHARED ScannedItem on purpose: `shared/` cannot import from `main/`, so this
+   * line is what ties the service's shape to the one the Sell screen is typed against. If the service
+   * drifts, the build breaks HERE rather than the till quietly showing a blank price.
+   */
+  handle<ScanBarcodeInput, ScannedItem | null>(IPC.saleScan, ScanBarcodeInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.scanBarcode(getDb(), input.barcode, {
+      ...(input.tier === undefined ? {} : { tier: input.tier }),
+      ...(input.customerId === undefined ? {} : { customerId: input.customerId })
+    })
+  })
+
+  // ── The cart: PURE. No database, no clock, not one row written. ────────────
+  //
+  // These are here — rather than in the renderer — because `addLine` carries a BUSINESS RULE: scanning
+  // the same tin twice bumps the quantity instead of stacking a second row, unless the line carries a
+  // discount, an override, a batch or a serial, which are paperwork that must not be folded together.
+  // One rule, one place. No assertWritable(): changing an array in memory is not a write, and a cashier
+  // at an expired shop may still build a cart — they simply cannot ring it up.
+
+  handle<CartAddLineInput, SaleLineInput[]>(IPC.saleAddLine, CartAddLineInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.addLine(input.cart, input.line)
+  })
+
+  handle<CartUpdateLineInput, SaleLineInput[]>(IPC.saleUpdateLine, CartUpdateLineInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.updateLine(input.cart, input.index, input.changes)
+  })
+
+  handle<CartRemoveLineInput, SaleLineInput[]>(IPC.saleRemoveLine, CartRemoveLineInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.removeLine(input.cart, input.index)
+  })
+
+  // ── Hold, quote, resume, discard ───────────────────────────────────────────
+
+  handle(IPC.saleHold, HoldSaleInput, (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    assertWritable()
+    // No invoice number, no stock movement, no journal. Nothing has happened yet — which is exactly
+    // what keeps the numbering gapless.
+    return salesService.hold(getDb(), user, input)
+  })
+
+  handle(IPC.saleSaveQuote, SaveQuoteInput, (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    assertWritable()
+    return salesService.saveQuote(getDb(), user, input)
+  })
+
+  /**
+   * Pick a parked cart back up — as CART LINES, ready to ring up.
+   *
+   * It deliberately does NOT come back as a priced sale. `complete()` RE-PRICES it from the catalog, so
+   * a cart parked before this morning's price change is sold at this morning's price. Handing the screen
+   * yesterday's frozen prices would be handing it a lie it would then try to charge.
+   */
+  handle<ResumeSaleInput, SaleLineInput[]>(IPC.saleResume, ResumeSaleInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.toCartLines(salesService.resume(getDb(), input))
+  })
+
+  handle(IPC.saleListHeld, ListHeldInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.listHeld(getDb(), input.status)
+  })
+
+  handle(IPC.saleDiscard, DiscardSaleInput, (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    assertWritable()
+    // The service audits sale.discard itself — it has the actor and the cart it threw away.
+    salesService.discard(getDb(), user, input)
+    return true
+  })
+
+  /**
+   * ═══ RING IT UP ═══════════════════════════════════════════════════════════
+   *
+   * THE ORDER OF THESE THREE STEPS IS THE WHOLE POINT, AND IT IS NOT NEGOTIABLE.
+   *
+   *   1. THE SALE COMMITS.  One transaction: the number is drawn, every price/tax/cost is frozen, the
+   *      stock moves, the journal balances, the payments are written. If ANY of it fails, ALL of it
+   *      rolls back — including the invoice number, which the next sale then takes. There are no gaps.
+   *
+   *   2. THE RECEIPT PRINTS — or it does not.  The money is already in the books. A jam, an empty
+   *      paper roll, a printer someone unplugged: none of them may undo step 1. So printing CANNOT
+   *      throw from here. It returns an outcome, and the outcome travels back to the screen as DATA on
+   *      a SUCCESSFUL call.
+   *
+   *   3. THE DRAWER OPENS — on a cash sale, if the shop has it switched on. Same rule: it cannot fail
+   *      the sale.
+   *
+   * The cashier therefore sees "Sale saved — the receipt did not print. [Print again]" and NEVER a red
+   * error box, because a red box after a customer has handed over Rs 5000 makes a cashier take the
+   * money back out of the till and ring it up a second time.
+   */
+  handle<CompleteSaleInput, CompleteSaleResponse>(
+    IPC.saleComplete,
+    CompleteSaleInput,
+    async (input) => {
+      const user = session.requirePermissionOf('sale.create')
+      assertWritable()
+
+      const db = getDb()
+
+      // 1. THE SALE. Everything that can refuse this sale refuses it in here — the discount threshold,
+      // the negative-stock rule, the credit limit, the price-override role, a locked period. The
+      // service also writes every audit row this sale needs. If it throws, nothing happened.
+      const result = salesService.complete(db, user, input)
+
+      log.info(
+        `[sale] ${result.sale.invoiceNo} completed by ${user.username} (${user.role}): ` +
+          `${result.sale.lines.length} line(s) total=${result.sale.grandTotal} ` +
+          `paid=${result.sale.paidTotal} change=${result.sale.changeDue} ` +
+          `journal=${result.journalId}` +
+          (result.sale.hadNegativeStock ? ' — SOLD BELOW ZERO STOCK' : '')
+      )
+
+      // 2. and 3. Hardware. FROM HERE NOTHING MAY THROW — the sale is in the books.
+      const print = await printer.printReceipt(result.receipt, printOptions(db))
+      const drawer = await kickDrawerForSale(db, result.sale)
+
+      return { sale: result.sale, journalId: result.journalId, print, drawer }
+    }
+  )
+
+  /**
+   * VOID. SUPERVISOR ONLY — and the check is here, in MAIN, not in a hidden button.
+   *
+   * `requirePermissionOf('sale.void')` asks about the user who is SIGNED IN. A cashier who needs a void
+   * gets a supervisor to sign in (PIN quick-switch), which is the same act as a supervisor turning the
+   * key — and it puts the supervisor's own name and role on the audit row, which is the entire point of
+   * requiring one. The service re-checks the role independently; the two agree.
+   *
+   * The service posts the reversing journal, puts the stock back at the cost it left at, and audits
+   * `sale.void` with the reason. The sale KEEPS its invoice number, forever.
+   */
+  handle(IPC.saleVoid, VoidSaleInput, (input) => {
+    const user = session.requirePermissionOf('sale.void')
+    assertWritable()
+    return salesService.voidSale(getDb(), user, input)
+  })
+
+  // ── Reading sales ─────────────────────────────────────────────────────────
+  // All READS. No assertWritable(): an expired shop can still look up every sale it ever made and get
+  // its numbers out. We warn them; we do not hold their books hostage. (CLAUDE.md §6)
+
+  /**
+   * The whole shop's takings, paginated. `report.view` — a MANAGER's view.
+   *
+   * Deliberately a wider gate than the two lookups below it: browsing every sale in the shop, by every
+   * cashier, with totals, is a report. Opening a gate later is safe; shipping one too wide is not.
+   */
+  handle(IPC.saleList, SaleListInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return salesService.list(getDb(), input)
+  })
+
+  /**
+   * ONE sale. `sale.create` — a CASHIER's gate, and deliberately so: this and `getByInvoiceNo` are what
+   * the returns desk and the reprint button are built on. A cashier holding a customer's receipt must be
+   * able to look that sale up. They still cannot browse the shop's takings — that is `saleList` above.
+   */
+  handle(IPC.saleGet, SaleGetInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.getById(getDb(), input)
+  })
+
+  handle(IPC.saleGetByInvoiceNo, SaleByInvoiceNoInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.getByInvoiceNo(getDb(), input)
+  })
+
+  /** The customer's udhaar, read BEFORE a credit sale is taken — so the cashier sees it first. */
+  handle(IPC.saleOutstandingCredit, OutstandingCreditInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.outstandingCredit(getDb(), input.customerId)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRINTING & THE CASH DRAWER
+  //
+  // NEITHER OF THESE CALLS assertWritable(), and that is a decision, not an oversight.
+  //
+  // The line between a "read" and a "write" in this app is whether it changes THE BOOKS — money, stock,
+  // the ledger. It is not "does it touch any table at all": a reprint writes an audit row, and a reprint
+  // is manifestly an export, which read-only mode exists to PROTECT (CLAUDE.md §6).
+  //
+  //   printReceipt   Reprinting a receipt for the customer in front of you is an export of a sale that
+  //                  already happened. Blocking it would hold their own records hostage.
+  //   openDrawer     Opens a physical box with the shop's OWN CASH in it. It posts no journal, moves no
+  //                  stock and changes no total. Refusing to let a shopkeeper open his till because his
+  //                  licence lapsed is the hostage behaviour §6 forbids, in its most literal form — and
+  //                  the drawer has a key on the front anyway. It stays supervisor-gated and audited.
+  //
+  // On an expired licence no sale can complete, so the automatic cash-sale kick never fires. The only
+  // remaining door into the drawer is the supervisor-authorised, audited no-sale — which is exactly the
+  // control we want.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * PRINT, OR REPRINT, THE RECEIPT FOR A SALE.
+   *
+   * IT TAKES A SALE ID, NOT A RECEIPT. Main reads the sale from the database and builds the paper from
+   * the FROZEN line columns. A "print this ReceiptData" endpoint would let a tampered renderer print a
+   * receipt for a sale that never happened, with any total it liked, on the shop's own paper.
+   *
+   * `isDuplicate` (the default) stamps it DUPLICATE and writes the `sale.reprint` audit row inside the
+   * service — because "just print it again" is how one sale's receipt ends up in two customers' hands.
+   *
+   * A failure comes back as `{ ok: true, data: { printed: false, problem } }`. The sale is not at stake.
+   */
+  handle<PrintReceiptInput, PrintOutcome>(IPC.printReceipt, PrintReceiptInput, async (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    // ALWAYS a duplicate. The renderer cannot ask for an un-stamped, un-audited original — see
+    // PrintReceiptInput. The only original is the one sale:complete prints as it creates the sale.
+    return printSaleReceipt(getDb(), user, input.id, true)
+  })
+
+  /**
+   * OPENING THE TILL WITH NO SALE BEHIND IT.
+   *
+   * A CLASSIC THEFT VECTOR (PLAN.md §4), and it is treated as one:
+   *
+   *   the `drawer.no_sale` permission  — SUPERVISOR and above. A cashier cannot do this alone.
+   *   a reason code from the lookups   — checked against the ACTIVE `no_sale_reason` rows.
+   *   an audit row, ALWAYS             — who, when, and why.
+   *
+   * THE AUDIT ROW IS WRITTEN BEFORE THE DRAWER IS ASKED TO OPEN, and it is written even if the drawer
+   * then does not open. The event being recorded is that a supervisor AUTHORISED the till to be opened
+   * with no sale — that is the thing an owner reads this log to find. Whether the solenoid fired is a
+   * hardware detail, and a drawer that "did not open" is not an alibi.
+   */
+  handle<OpenDrawerInput, DrawerOutcome>(IPC.printOpenDrawer, OpenDrawerInput, async (input) => {
+    const user = session.requirePermissionOf('drawer.no_sale')
+    const db = getDb()
+
+    assertNoSaleReason(db, input.reasonCode)
+
+    auditService.record(db, user, {
+      action: 'drawer.no_sale',
+      entity: 'drawer',
+      reasonCode: input.reasonCode,
+      ...(input.reasonText == null ? {} : { reasonText: input.reasonText })
+    })
+
+    log.warn(
+      `[drawer] NO-SALE open by ${user.username} (${user.role}) — reason: ${input.reasonCode}`
+    )
+
+    return printer.openCashDrawer({
+      kickCode: settingsService.get<string>(db, 'drawer.kickCode', ''),
+      printerName: settingsService.get<string>(db, 'printer.name', '')
+    })
+  })
+
+  /** The Settings dropdown, so the owner PICKS their printer rather than mistyping its name. */
+  handle<void, PrinterInfo[]>(IPC.printListPrinters, null, () => {
+    session.requirePermissionOf('settings.manage')
+    return printer.listPrinters()
   })
 }

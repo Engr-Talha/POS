@@ -1490,10 +1490,19 @@ export function findBySerial(db: DB, rawSerial: string): SerialMatch | null {
  * Sell one specific physical unit. A serial can only be sold once — selling it twice would mean the
  * shop has two of a handset it has one of, and the second customer is walking out with somebody
  * else's phone.
+ *
+ * `productId` IS REQUIRED, AND IT IS CHECKED. The caller must say WHICH item it believes it is selling,
+ * and the serial has to actually belong to it.
+ *
+ * Without that check this function would happily mark an IMEI sold against a line for a completely
+ * different product: the phone on the line leaves the shop with no serial recorded against it, while
+ * some OTHER handset — still sitting in the cabinet — is marked sold and can never be sold again. Both
+ * halves of that are silent. The renderer names the serials, and the renderer is not a security
+ * boundary (CLAUDE.md §4), so the ownership check belongs here, where it cannot be skipped.
  */
 export function markSold(
   db: DB,
-  input: { serial: string; saleId?: number | null | undefined },
+  input: { productId: number; serial: string; saleId?: number | null | undefined },
   now = new Date()
 ): SerialNumber {
   const serial = normalizeCode(input.serial, 'serial number')
@@ -1515,6 +1524,15 @@ export function markSold(
       ErrorCode.VALIDATION,
       `Serial number ${serial} has already been sold.`,
       `serial ${serial} is already sold (sale_id=${row.sale_id})`
+    )
+  }
+
+  if (row.product_id !== input.productId) {
+    const owner = productRow(db, row.product_id)
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `Serial number ${serial} belongs to "${owner.name}", not to the item on this line. Please scan the serial from the item you are selling.`,
+      `serial ${serial} belongs to product ${row.product_id}, not ${input.productId}`
     )
   }
 

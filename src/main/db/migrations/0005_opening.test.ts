@@ -100,6 +100,18 @@ function addStockLine(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * What a database sitting at v0.4 still has to catch up on.
+ *
+ * DERIVED from `MIGRATIONS`, never hardcoded — the same reasoning upgrade.test.ts spells out. A
+ * hardcoded `[5, 6]` means the next person to add a migration "fixes" this test by editing a number,
+ * and stops reading what it actually says. What it SAYS is the rule: a v4 database runs EVERYTHING
+ * above 4 and NOTHING at or below it. That must stay true at 7 migrations and at 30.
+ */
+const PENDING_FROM_V4 = MIGRATIONS.map((migration) => migration.version)
+  .filter((version) => version > 4)
+  .sort((a, b) => a - b)
+
 describe('0005 — the upgrade path: a shop already running v0.4 gets the opening setup', () => {
   let t: TestDb
 
@@ -169,7 +181,7 @@ describe('0005 — the upgrade path: a shop already running v0.4 gets the openin
     }
 
     const result = runMigrations(t.db)
-    expect(result.applied).toEqual([5, 6])
+    expect(result.applied).toEqual(PENDING_FROM_V4)
 
     const after = {
       products: t.db.prepare('SELECT COUNT(*) FROM products').pluck().get(),

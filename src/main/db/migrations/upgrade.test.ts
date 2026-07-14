@@ -4,6 +4,7 @@ import { MIGRATIONS, runMigrations } from './index'
 import { seed } from '../seed'
 import { ACC } from '../chart-of-accounts'
 import * as ledger from '../../services/ledger'
+import * as sales from '../../services/sales'
 import * as stock from '../../services/stock'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
@@ -221,6 +222,215 @@ describe('the upgrade path — a shop already running v0.2 installs the catalog'
   })
 })
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ * 0006 → 0007 — THE UPGRADE EVERY SHOP RUNNING THIS APP TAKES *NEXT*.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * The suite above starts at v2 and runs 3, 4, 5, 6 and 7 in one batch. That is an ANCIENT install
+ * catching up, and it is worth testing — but it is not the path anybody is actually about to take.
+ *
+ * Every shop with this app on its counter today is sitting at 0006: Phase 4 shipped. It has a real
+ * catalogue, real stock movements carrying the `value_minor` that 0006 froze onto them, a committed
+ * opening balance, and a ledger that balances. On upgrade day it runs 0007 — AND ONLY 0007 — against
+ * that live book, and then the first thing it does is ring up a sale.
+ *
+ * So this proves the whole seam, in the order a shop meets it:
+ *
+ *   1. only [7] runs; 1-6 are SHIPPED and are not touched again;
+ *   2. not one row of what was already there moves, and the books still balance;
+ *   3. the shop can SELL immediately — and on the upgraded database the trial balance still balances,
+ *      GL Inventory still equals the stock valuation, and the invoice numbers are gapless;
+ *   4. a VOIDED invoice keeps its number, and the next sale does NOT reuse it.
+ */
+describe('the upgrade path — a shop at 0006 (Phase 4) installs SELLING', () => {
+  let t: TestDb
+
+  const COST_RS_60 = 600_000 // 4-dp cost
+  const PRICE_RS_100 = 10_000 // 2-dp money
+
+  beforeEach(() => {
+    t = makeTestDb({ migrate: false })
+    migrateTo(t, 6)
+    seed(t.db)
+  })
+
+  afterEach(() => t.cleanup())
+
+  /** A product with stock on the shelf, exactly as a Phase-4 shop already has. */
+  function shopWithStock(actor: User): number {
+    const now = new Date().toISOString()
+    const uomId = t.db
+      .prepare("SELECT id FROM lookups WHERE list_key = 'uom' AND code = 'pcs'")
+      .pluck()
+      .get() as number
+
+    const productId = Number(
+      t.db
+        .prepare(
+          `INSERT INTO products (sku, name, sale_uom_id, cost_price, retail_price, wholesale_price,
+                                 tax_rate_bp, price_entry_mode, min_stock_m, item_type, is_active,
+                                 created_at, updated_at)
+           VALUES ('UPG-6', 'Cooking Oil 5L', ?, 0, ?, 0, 0, 'exclusive', 0, 'inventory', 1, ?, ?)`
+        )
+        .run(uomId, PRICE_RS_100, now, now).lastInsertRowid
+    )
+
+    // Through the REAL service — so the movement carries its frozen value_minor and the books balance,
+    // which is precisely the state a live 0006 database is in.
+    stock.adjust(t.db, actor, {
+      productId,
+      type: 'opening',
+      qtyM: 10 * ONE_UNIT,
+      unitCost: COST_RS_60,
+      reasonCode: 'stock_take'
+    })
+
+    return productId
+  }
+
+  function cashMethodId(): number {
+    return t.db
+      .prepare("SELECT id FROM lookups WHERE list_key = 'payment_method' AND code = 'cash'")
+      .pluck()
+      .get() as number
+  }
+
+  it('a database at version 6 has NO sales tables yet — the premise of this file', () => {
+    const tables = t.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .pluck()
+      .all() as string[]
+
+    expect(tables).toContain('stock_movements') // 0006 IS there...
+    expect(tables).not.toContain('sales') // ...and 0007 is not.
+    expect(tables).not.toContain('sale_lines')
+    expect(tables).not.toContain('invoice_counters')
+    expect(t.db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get()).toBe(6)
+  })
+
+  it('applies ONLY 0007 — the six shipped migrations are not re-run against live data', () => {
+    const result = runMigrations(t.db)
+
+    expect(result.applied).toEqual([7])
+    expect(result.alreadyAt).toBe(LATEST_VERSION)
+  })
+
+  it('does not move ONE ROW of the shop it upgraded — stock, cost and books all unchanged', () => {
+    const actor = makeUser(t)
+    const productId = shopWithStock(actor)
+
+    const before = {
+      onHand: stock.onHand(t.db, productId),
+      avgCost: stock.averageCost(t.db, productId),
+      stockValue: t.db
+        .prepare('SELECT COALESCE(SUM(value_minor), 0) FROM stock_movements')
+        .pluck()
+        .get(),
+      movements: t.db.prepare('SELECT COUNT(*) FROM stock_movements').pluck().get(),
+      journals: t.db.prepare('SELECT COUNT(*) FROM journals').pluck().get(),
+      inventoryGl: ledger.accountBalance(t.db, ACC.INVENTORY),
+      trialBalance: ledger.trialBalance(t.db)
+    }
+
+    runMigrations(t.db)
+
+    const after = {
+      onHand: stock.onHand(t.db, productId),
+      avgCost: stock.averageCost(t.db, productId),
+      stockValue: t.db
+        .prepare('SELECT COALESCE(SUM(value_minor), 0) FROM stock_movements')
+        .pluck()
+        .get(),
+      movements: t.db.prepare('SELECT COUNT(*) FROM stock_movements').pluck().get(),
+      journals: t.db.prepare('SELECT COUNT(*) FROM journals').pluck().get(),
+      inventoryGl: ledger.accountBalance(t.db, ACC.INVENTORY),
+      trialBalance: ledger.trialBalance(t.db)
+    }
+
+    expect(after).toEqual(before)
+    expect(after.trialBalance.balanced).toBe(true)
+  })
+
+  /**
+   * THE ONE THAT MATTERS. The upgrade finishes and the shop opens. Everything CLAUDE.md calls an
+   * invariant has to hold on a database that was NOT created by today's migrations in one go.
+   */
+  it('sells the moment the upgrade finishes — books balance, GL Inventory === the stock valuation', () => {
+    const actor = makeUser(t)
+    const productId = shopWithStock(actor)
+
+    runMigrations(t.db)
+
+    const { sale } = sales.complete(t.db, actor, {
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cashMethodId(), amount: 2 * PRICE_RS_100 }]
+    })
+
+    expect(sale.grandTotal).toBe(2 * PRICE_RS_100)
+    expect(stock.onHand(t.db, productId)).toBe(8 * ONE_UNIT) // 10 − 2, derived from the movements
+
+    // THE STANDING TEST (CLAUDE.md §4).
+    const tb = ledger.trialBalance(t.db)
+    expect(tb.balanced, 'THE TRIAL BALANCE DOES NOT BALANCE AFTER AN UPGRADE').toBe(true)
+
+    // The books and the shelf agree — on an upgraded database, exactly as on a fresh one.
+    const valuation = t.db
+      .prepare('SELECT COALESCE(SUM(value_minor), 0) FROM stock_movements')
+      .pluck()
+      .get() as number
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(valuation)
+    expect(stock.stockLevel(t.db, productId).stockValueMinor).toBe(valuation)
+  })
+
+  it('numbers the first invoices after the upgrade 1, 2, 3 — gapless, and a VOID keeps its number', () => {
+    const actor = makeUser(t)
+    const productId = shopWithStock(actor)
+
+    runMigrations(t.db)
+
+    const ring = (): string => {
+      const { sale } = sales.complete(t.db, actor, {
+        lines: [{ productId, qtyM: ONE_UNIT }],
+        payments: [{ methodLookupId: cashMethodId(), amount: PRICE_RS_100 }]
+      })
+      return sale.invoiceNo!
+    }
+
+    const first = ring()
+    const second = ring()
+
+    // The counter starts at 1 on a shop that has never sold anything, and it does not skip.
+    const seqs = t.db
+      .prepare('SELECT invoice_seq FROM sales ORDER BY invoice_seq')
+      .pluck()
+      .all() as number[]
+    expect(seqs).toEqual([1, 2])
+
+    // Cancel the SECOND one. It keeps its number — 2 is not released and is never reused.
+    const saleTwo = sales.getByInvoiceNo(t.db, { invoiceNo: second })
+    const voided = sales.voidSale(t.db, actor, { id: saleTwo.id, reasonCode: 'wrong_item' })
+
+    expect(voided.status).toBe('voided')
+    expect(voided.invoiceNo).toBe(second) // IT KEEPS ITS NUMBER
+
+    // ...and the next sale takes 3. A book that renumbers around a cancellation cannot be audited.
+    const third = ring()
+    expect(third).not.toBe(second)
+
+    const after = t.db
+      .prepare('SELECT invoice_seq FROM sales ORDER BY invoice_seq')
+      .pluck()
+      .all() as number[]
+    expect(after).toEqual([1, 2, 3])
+    expect(first).not.toBe(second)
+
+    // A void reverses; it does not erase. The books still balance, and the stock came back.
+    expect(ledger.trialBalance(t.db).balanced).toBe(true)
+    expect(stock.onHand(t.db, productId)).toBe(8 * ONE_UNIT) // 10 − 1 − 1 + 1 (void) − 1
+  })
+})
+
 describe('schema invariants — asserted against the WHOLE database, not one table at a time', () => {
   let t: TestDb
 
@@ -261,7 +471,13 @@ describe('schema invariants — asserted against the WHOLE database, not one tab
     // stock figure, the figure on the screen and the history that produced it can disagree — and then
     // nobody can tell which one lied. The only quantity columns allowed are the re-order LEVEL, the
     // signed movement itself, and pack sizes.
-    const ALLOWED = new Set(['min_stock_m', 'qty_m', 'pack_size'])
+    //
+    // `had_negative_stock` (migration 0007) is NOT a quantity and is not stock. It is the 0/1 FLAG
+    // PLAN.md §1 requires — "warn, allow, FLAG" — recording THAT a sale went out against stock the
+    // shop did not have, never HOW MUCH. It is caught here only because the rule above matches on the
+    // NAME, and the name ends in "_stock". The exemption is EARNED, not asserted: the assertion below
+    // proves the column cannot hold a quantity even if someone later tried to make it.
+    const ALLOWED = new Set(['min_stock_m', 'qty_m', 'pack_size', 'had_negative_stock'])
 
     const stockish = allColumns().filter(
       (column) =>
@@ -275,6 +491,20 @@ describe('schema invariants — asserted against the WHOLE database, not one tab
       stockish,
       `a column that looks like stored stock appeared: ${JSON.stringify(stockish)}`
     ).toEqual([])
+
+    // THE FLAG IS A BOOLEAN, AND THE DATABASE SAYS SO. This is what pays for its place in ALLOWED
+    // above: a CHECK constrains it to 0 or 1, so no future write path can quietly start storing "how
+    // many units short we were" in a column the stock rule has been told to ignore.
+    const actor = makeUser(t)
+    const now = '2026-01-01T00:00:00.000Z'
+    const insertSale = t.db.prepare(
+      `INSERT INTO sales (at, user_id, status, had_negative_stock, created_at)
+       VALUES (?, ?, 'held', ?, ?)`
+    )
+
+    insertSale.run(now, actor.id, 1, now) // a FLAG is fine
+    expect(() => insertSale.run(now, actor.id, 5, now)) // a QUANTITY is not
+      .toThrow(/CHECK constraint failed/i)
 
     // And specifically, on the table the legacy form let people type a balance into.
     const productColumns = (

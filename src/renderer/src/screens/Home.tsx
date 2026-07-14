@@ -30,6 +30,7 @@ import {
   ListChecks,
   Settings as SettingsIcon,
   Scale,
+  ScanLine,
   CircleCheck,
   Package,
   Boxes,
@@ -44,17 +45,23 @@ import { Books } from './sections/Books'
 import { Lists } from './sections/Lists'
 import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
+import { Sell } from './sections/Sell'
 import { SettingsSection } from './sections/SettingsSection'
 import { Stock } from './sections/Stock'
 
-type Section = 'overview' | 'products' | 'stock' | 'opening' | 'books' | 'lists' | 'settings'
+type Section = 'sell' | 'overview' | 'products' | 'stock' | 'opening' | 'books' | 'lists' | 'settings'
 
 /**
  * `permission` hides an entry the user could not use anyway. That is a COURTESY, not a control —
  * main refuses the call whether or not the button was ever drawn (CLAUDE.md §4). Opening setup is
  * Owner-only, and a nav item that greets a cashier with a red refusal is worse than no nav item.
+ *
+ * SELL IS FIRST, AND IT IS WHERE THE APP OPENS. A cashier signs in with a queue already forming; the
+ * screen they need is the one that is already in front of them. Everything else on this list is
+ * something a shopkeeper does between customers.
  */
 const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?: Permission }> = [
+  { key: 'sell', label: 'Sell', icon: ScanLine, permission: 'sale.create' },
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'products', label: 'Items', icon: Package },
   { key: 'stock', label: 'Stock', icon: Boxes },
@@ -78,7 +85,8 @@ export function Home({
   const { setColorScheme } = useMantineColorScheme()
   const dark = useComputedColorScheme('light') === 'dark'
 
-  const [section, setSection] = useState<Section>('overview')
+  // THE TILL IS THE APP. It is what the shop opens in the morning and what it stares at all day.
+  const [section, setSection] = useState<Section>('sell')
   const [version, setVersion] = useState<string | null>(null)
   const [currencySymbol, setCurrencySymbol] = useState('Rs')
 
@@ -208,7 +216,21 @@ export function Home({
         </nav>
 
         {/* ── Content ──────────────────────────────────────────────────────── */}
-        <main style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+        {/*
+          The Sell screen manages its OWN height — the cart scrolls inside its card so the totals and the
+          Pay button never leave the screen, and the barcode field never scrolls out from under the
+          cashier. Every other section is an ordinary scrolling page.
+        */}
+        <main
+          style={
+            section === 'sell'
+              ? { flex: 1, overflow: 'hidden', padding: 16 }
+              : { flex: 1, overflowY: 'auto', padding: 24 }
+          }
+        >
+          {section === 'sell' && user && (
+            <Sell readOnly={state.readOnly} userRole={user.role} />
+          )}
           {section === 'overview' && (
             <Overview state={state} onSignOutNeeded={onStateChange} />
           )}

@@ -820,7 +820,7 @@ describe('serial / IMEI numbers', () => {
     const id = makeProduct(t.db, { trackSerials: true })
     catalog.addSerials(t.db, { productId: id, serials: ['IMEI-1', 'IMEI-2'] })
 
-    const sold = catalog.markSold(t.db, { serial: 'IMEI-1', saleId: 42 })
+    const sold = catalog.markSold(t.db, { productId: id, serial: 'IMEI-1', saleId: 42 })
 
     expect(sold.status).toBe('sold')
     expect(sold.saleId).toBe(42)
@@ -828,7 +828,7 @@ describe('serial / IMEI numbers', () => {
 
     // Selling it twice would mean two customers walk out with the same phone.
     expectUserMessage(
-      () => catalog.markSold(t.db, { serial: 'IMEI-1', saleId: 43 }),
+      () => catalog.markSold(t.db, { productId: id, serial: 'IMEI-1', saleId: 43 }),
       /already been sold/i
     )
 
@@ -837,9 +837,30 @@ describe('serial / IMEI numbers', () => {
   })
 
   it('refuses to sell a serial the shop has never seen', () => {
+    const id = makeProduct(t.db, { trackSerials: true })
     expectUserMessage(
-      () => catalog.markSold(t.db, { serial: 'GHOST-IMEI' }),
+      () => catalog.markSold(t.db, { productId: id, serial: 'GHOST-IMEI' }),
       /is not in stock/i
     )
+  })
+
+  /**
+   * REGRESSION. markSold took a serial and a sale id and never asked WHICH ITEM was being sold, so an
+   * IMEI could be marked sold against a line for a completely different product: the phone on the line
+   * left the shop untracked, while another handset still in the cabinet was marked sold and could never
+   * be sold again. Both halves silent. The caller must now say what it thinks it is selling.
+   */
+  it('refuses a serial that belongs to a DIFFERENT product', () => {
+    const phone = makeProduct(t.db, { trackSerials: true })
+    const tablet = makeProduct(t.db, { trackSerials: true })
+    catalog.addSerials(t.db, { productId: phone, serials: ['PHONE-IMEI'] })
+
+    expectUserMessage(
+      () => catalog.markSold(t.db, { productId: tablet, serial: 'PHONE-IMEI', saleId: 7 }),
+      /does not belong|belongs to/i
+    )
+
+    // And it is STILL in stock — the wrong line did not quietly consume it.
+    expect(catalog.findBySerial(t.db, 'PHONE-IMEI')!.serial.status).toBe('in_stock')
   })
 })
