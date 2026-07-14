@@ -556,11 +556,22 @@ export function Sell({
   const changeTier = useCallback(
     async (next: PriceTier): Promise<void> => {
       setTier(next)
+
+      // FOCUS GOES BACK TO THE SCANNER IMMEDIATELY — before the empty-cart early return.
+      //
+      // Clicking the tier control moves focus onto its radio button. If the cart is empty we used to
+      // return here without refocusing, so the barcode field never got focus back and EVERY
+      // subsequent scan typed into nothing — the cashier scanning into a dead field with a customer
+      // waiting. The very first thing this function does now is hand focus back.
+      refocus()
       if (cartRef.current.length === 0) return
 
       setRetiering(true)
-      const updated = new Map(infos)
 
+      // Re-price each existing line at the new tier. Collect the results and merge them FUNCTIONALLY
+      // at the end — never replace the map from a snapshot taken before these awaits, or an item
+      // scanned DURING the re-pricing round trips would be silently discarded.
+      const rescanned: Array<[string, ReturnType<typeof infoFromScan>]> = []
       for (const [key, info] of infos) {
         if (info.barcode == null) continue
         const result = await window.pos.sales.scan({
@@ -569,11 +580,15 @@ export function Sell({
           customerId: customer?.id
         })
         if (result.ok && result.data != null) {
-          updated.set(key, infoFromScan(result.data, info.barcode))
+          rescanned.push([key, infoFromScan(result.data, info.barcode)])
         }
       }
 
-      setInfos(updated)
+      setInfos((current) => {
+        const merged = new Map(current)
+        for (const [key, info] of rescanned) merged.set(key, info)
+        return merged
+      })
       setRetiering(false)
       refocus()
     },
@@ -749,8 +764,15 @@ export function Sell({
     if (settings == null) return
 
     const target = event.target as HTMLElement | null
+    // "Editing" means a field that swallows TEXT — not a radio or a checkbox. The tier control is a
+    // group of radio inputs; treating those as editable let focus get stuck on them, so the scanner
+    // field never took typing back. A radio/checkbox holds no text, so it is not editing.
+    const nonTextInput = ['radio', 'checkbox', 'button', 'submit', 'range', 'color'].includes(
+      (target as HTMLInputElement | null)?.type ?? ''
+    )
     const editing =
       target != null &&
+      !nonTextInput &&
       (target.tagName === 'INPUT' ||
         target.tagName === 'TEXTAREA' ||
         target.tagName === 'SELECT' ||
@@ -1748,6 +1770,7 @@ function QtyModal({
   const packSize = line.packId != null ? info?.packSizeM ?? null : null
   // A pack is sold in WHOLE packs. Show the cashier cartons, and convert back to base units on the way in.
   const [qtyM, setQtyM] = useState(packSize != null && packSize > 0 ? (line.qtyM / packSize) * ONE_UNIT : line.qtyM)
+  const [error, setError] = useState<string | null>(null)
 
   const name = line.openItem?.name ?? info?.name ?? 'Item'
   const unit = packSize != null ? (info?.packLabel ?? 'packs') : (info?.uom ?? 'units')
@@ -1771,14 +1794,34 @@ function QtyModal({
           onSubmit={(event) => {
             event.preventDefault()
             if (qtyM <= 0) return
-            onConfirm(packSize != null && packSize > 0 ? (qtyM / ONE_UNIT) * packSize : qtyM)
+
+            if (packSize != null && packSize > 0) {
+              // You cannot sell 2.007 cartons. A pack is bought and sold whole, and main refuses a
+              // fractional-pack movement anyway — so let the cashier fix it here, at the field,
+              // rather than build an impossible cart and hit a wall at Pay.
+              const packs = qtyM / ONE_UNIT
+              if (!Number.isInteger(packs)) {
+                setError('A pack is sold whole — please enter a whole number of packs.')
+                return
+              }
+              // Integer arithmetic: packs (whole) x packSize (qty_m). Never (qtyM/1000)*packSize as a
+              // float, which produced non-round quantities that later rendered a blank screen.
+              onConfirm(packs * packSize)
+              return
+            }
+
+            onConfirm(qtyM)
           }}
         >
           <Stack gap="md">
             <QtyInput
               label={`Quantity (${unit})`}
               value={qtyM}
-              onChange={setQtyM}
+              onChange={(next) => {
+                setError(null)
+                setQtyM(next)
+              }}
+              error={error ?? undefined}
               required
             />
             <Group justify="flex-end">

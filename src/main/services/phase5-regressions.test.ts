@@ -195,3 +195,35 @@ describe('CRITICAL: supervisor approval was unauthenticated', () => {
     expect(r.sale.grandTotal).toBe(100)
   })
 })
+
+describe('HIGH: FEFO put the whole line on one batch', () => {
+  it('splits a sale across batches in expiry order instead of driving one negative', () => {
+    const uomId = t.db.prepare("SELECT id FROM lookups WHERE list_key='uom' AND code='pcs'").pluck().get() as number
+    const milk = products.create(t.db, owner, {
+      sku: 'MILK', name: 'Milk', saleUomId: uomId, retailPrice: 10_000, wholesalePrice: 9_000,
+      taxRateBp: 0, priceEntryMode: 'exclusive', itemType: 'inventory', trackBatches: true
+    } as never) as { product: { id: number } }
+    const mid = milk.product.id
+
+    // Two batches: SOON expires first with 2 units, LATER with 10.
+    const soon = t.db.prepare("INSERT INTO batches (product_id, batch_no, expiry_date, cost, created_at) VALUES (?, 'SOON', '2026-08-01', 500000, 'x')").run(mid).lastInsertRowid as number
+    const later = t.db.prepare("INSERT INTO batches (product_id, batch_no, expiry_date, cost, created_at) VALUES (?, 'LATER', '2027-08-01', 500000, 'x')").run(mid).lastInsertRowid as number
+    stock.record(t.db, { productId: mid, type: 'opening', qtyM: 2_000, unitCost: 500_000, batchId: soon })
+    stock.record(t.db, { productId: mid, type: 'opening', qtyM: 10_000, unitCost: 500_000, batchId: later })
+
+    // Sell 5 — more than SOON holds.
+    sales.complete(t.db, owner, {
+      lines: [{ productId: mid, qtyM: 5_000 }],
+      payments: [{ methodLookupId: cash(), amount: 50_000 }]
+    } as never)
+
+    const byBatch = stock.onHandByBatch(t.db, mid)
+    const soonLeft = byBatch.find((b) => b.batchId === soon)?.onHandM ?? 0
+    const laterLeft = byBatch.find((b) => b.batchId === later)?.onHandM ?? 0
+
+    // SOON is emptied first (2 gone -> 0), the remaining 3 come off LATER (10 -> 7). NOT SOON -> -3.
+    expect(soonLeft).toBe(0)
+    expect(laterLeft).toBe(7_000)
+    expect(stock.onHand(t.db, mid)).toBe(7_000) // total still right
+  })
+})

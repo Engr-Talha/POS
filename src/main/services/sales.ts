@@ -950,6 +950,44 @@ function pickBatchFefo(db: DB, productId: number): number | null {
   return stock.onHandByBatch(db, productId).find((batch) => batch.onHandM > 0)?.batchId ?? null
 }
 
+/**
+ * Allocate a sale quantity ACROSS batches, first-expiry-first-out.
+ *
+ * Walk the batches in expiry order, taking min(remaining, what the batch holds) from each, until the
+ * quantity is met. One entry per batch touched. If the shop is oversold (the quantity exceeds every
+ * batch combined — allowed, warned and flagged elsewhere), the shortfall is booked against the
+ * soonest-expiry batch, which is the one the cashier was reaching for; that batch simply goes
+ * negative, honestly. The sum of the allocations always equals the quantity asked for.
+ */
+function allocateFefo(
+  db: DB,
+  productId: number,
+  neededM: number
+): Array<{ batchId: number | null; qtyM: number }> {
+  const batches = stock.onHandByBatch(db, productId)
+  const allocations: Array<{ batchId: number | null; qtyM: number }> = []
+
+  let remaining = neededM
+  for (const batch of batches) {
+    if (remaining <= 0) break
+    if (batch.onHandM <= 0) continue
+    const take = Math.min(remaining, batch.onHandM)
+    allocations.push({ batchId: batch.batchId, qtyM: take })
+    remaining -= take
+  }
+
+  if (remaining > 0) {
+    // Oversold. Put the rest on the soonest-expiry batch (the first with any allocation, else the
+    // first batch that exists, else no batch at all).
+    const fallback = allocations[0]?.batchId ?? batches[0]?.batchId ?? null
+    const existing = allocations.find((a) => a.batchId === fallback)
+    if (existing) existing.qtyM += remaining
+    else allocations.push({ batchId: fallback, qtyM: remaining })
+  }
+
+  return allocations.length > 0 ? allocations : [{ batchId: null, qtyM: neededM }]
+}
+
 function assertBatchBelongsToProduct(
   db: DB,
   batchId: number,
@@ -1303,19 +1341,35 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
     for (const line of priced.lines) {
       if (!line.movesStock || line.productId == null) continue
 
-      const movement = stock.record(db, {
-        productId: line.productId,
-        type: 'sale',
-        qtyM: -line.stockQtyM, // NEGATIVE: stock leaves the shop. A carton takes its 24 pieces out.
-        unitCost: line.unitCost,
-        batchId: line.batchId,
-        refType: SALE_REF_TYPE,
-        refId: saleId,
-        userId: actor.id,
-        at: now
-      })
+      // FEFO ACROSS BATCHES — not all onto one.
+      //
+      // A batch-tracked sale used to take its WHOLE quantity off the single soonest-expiry batch,
+      // even when that batch did not hold enough: 5 units of milk against a 2-unit batch drove that
+      // batch to −3 while a later batch still held 10. Total stock and the ledger stayed right, but
+      // the per-batch figures — the whole reason batches exist (expiry, batch valuation) — were
+      // nonsense. So the quantity is now allocated across batches in expiry order, soonest first, and
+      // ONE movement is written per batch consumed. A non-batch line is a single allocation, exactly
+      // as before.
+      const allocations =
+        line.batchId != null
+          ? allocateFefo(db, line.productId, line.stockQtyM)
+          : [{ batchId: line.batchId, qtyM: line.stockQtyM }]
 
-      cogs += Math.abs(movementValue(db, movement.id))
+      for (const allocation of allocations) {
+        const movement = stock.record(db, {
+          productId: line.productId,
+          type: 'sale',
+          qtyM: -allocation.qtyM, // NEGATIVE: stock leaves the shop. A carton takes its 24 pieces out.
+          unitCost: line.unitCost,
+          batchId: allocation.batchId,
+          refType: SALE_REF_TYPE,
+          refId: saleId,
+          userId: actor.id,
+          at: now
+        })
+
+        cogs += Math.abs(movementValue(db, movement.id))
+      }
 
       // A serialised item (a phone) sells ONE PHYSICAL UNIT AT A TIME. `assertSerials` has already
       // counted them and proved every one of them belongs to THIS product and is still in stock.
