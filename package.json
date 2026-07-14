@@ -12,6 +12,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "make:icon": "electron scripts/make-icon.cjs",
     "rebuild:node": "npm rebuild better-sqlite3 --build-from-source",
     "rebuild:electron": "electron-builder install-app-deps",
     "test": "npm run rebuild:node && vitest run",
