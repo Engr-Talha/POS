@@ -186,6 +186,23 @@ export function movementValueCost(qtyM: number, unitCost: number): number {
 }
 
 /**
+ * THE MONEY A MOVEMENT MOVED — SIGNED, in minor units (2 dp). Rounded ONCE, here, and nowhere else.
+ *
+ * This is THE number. The journal posts it. The stock report sums it. They are therefore equal by
+ * construction, and no future phase can reintroduce the drift by rounding differently.
+ *
+ * WHY IT EXISTS: the ledger used to round once PER MOVEMENT while the stock report rounded once on
+ * the TOTAL (on_hand x average). Sum-of-rounded != round-of-sum, so two batches of 3 pcs at
+ * Rs 91.0417 gave a GL of Rs 546.26 against a stock report of Rs 546.25 — a paisa of inventory that
+ * existed in the books and nowhere on the shelf, with every journal internally balanced and the
+ * trial balance still green. Exactly the failure CLAUDE.md warns about by name.
+ */
+export function movementValueMinor(qtyM: number, unitCost: number): number {
+  const magnitude = costToPriceMinor(movementValueCost(qtyM, unitCost))
+  return qtyM < 0 ? -magnitude : magnitude
+}
+
+/**
  * THE WEIGHTED AVERAGE. All integer, all at 4-dp cost scale.
  *
  *      newAvg = (existingQty x existingAvg + incomingQty x incomingCost) / (existingQty + incomingQty)
@@ -251,6 +268,40 @@ export function weightedAverage(
     )
   }
   return result
+}
+
+/**
+ * REBUILD every movement's stored money value from its own quantity and cost.
+ *
+ * `value_minor` is a CACHE — the movement's value, frozen when it happened, so that the ledger and
+ * the stock report read the same number instead of each rounding their own way (migration 0006).
+ * CLAUDE.md permits a cache on exactly one condition: it must be REBUILDABLE from the source of
+ * truth, and a test must assert the two agree. This is the rebuild. `assertMovementValuesAreHonest`
+ * in the tests is the assertion.
+ *
+ * Available to a maintenance screen, and used by the migration. If a movement ever appears with a
+ * value of 0 that should not be 0 — a bad restore, a hand-edited database — this repairs it.
+ */
+export function recomputeMovementValues(db: DB): number {
+  const rows = db
+    .prepare('SELECT id, qty_m, unit_cost, value_minor FROM stock_movements')
+    .all() as Array<{ id: number; qty_m: number; unit_cost: number; value_minor: number }>
+
+  const update = db.prepare('UPDATE stock_movements SET value_minor = ? WHERE id = ?')
+  let repaired = 0
+
+  const run = db.transaction(() => {
+    for (const row of rows) {
+      const correct = movementValueMinor(row.qty_m, row.unit_cost)
+      if (correct !== row.value_minor) {
+        update.run(correct, row.id)
+        repaired++
+      }
+    }
+  })
+
+  run()
+  return repaired
 }
 
 // ── On hand — DERIVED, always ────────────────────────────────────────────────
@@ -438,14 +489,17 @@ export function record(db: DB, input: RecordMovementInput): StockMovement {
     const id = Number(
       db
         .prepare(
+          // value_minor is frozen onto the movement, exactly like a sale line freezes its own tax:
+          // valued once, at the moment it happened, and never recomputed from today's numbers.
           `INSERT INTO stock_movements
-             (at, type, product_id, batch_id, qty_m, unit_cost,
+             (at, type, product_id, batch_id, qty_m, unit_cost, value_minor,
               ref_type, ref_id, reason_code, note, user_id, created_at)
            VALUES
-             (@at, @type, @productId, @batchId, @qtyM, @unitCost,
+             (@at, @type, @productId, @batchId, @qtyM, @unitCost, @valueMinor,
               @refType, @refId, @reasonCode, @note, @userId, @createdAt)`
         )
         .run({
+          valueMinor: movementValueMinor(input.qtyM, unitCost),
           at: at.toISOString(),
           type: input.type,
           productId: input.productId,
@@ -669,7 +723,9 @@ export function adjust(
     })
 
     // Cost scale (4 dp) -> money scale (2 dp). The ledger is money, and only money.
-    const valueMinor = costToPriceMinor(movementValueCost(input.qtyM, unitCost))
+    // The journal posts the movement's OWN frozen value. Recomputing it here would be a second
+    // implementation of the same sum — and a second chance to round it differently.
+    const valueMinor = Math.abs(movementValueMinor(input.qtyM, unitCost))
 
     let journalId: number | null = null
     if (valueMinor > 0) {
@@ -812,6 +868,12 @@ export function stockLevels(db: DB, input: StockLevelsInput = {}): PagedResult<S
 
   const onHandSql = '(SELECT COALESCE(SUM(m.qty_m), 0) FROM stock_movements m WHERE m.product_id = p.id)'
 
+  // Stock value is the SUM of what each movement actually moved — the very numbers the ledger posted.
+  // It is NOT on_hand x average: sum-of-rounded != round-of-sum, and that difference is how the GL
+  // and the stock report used to drift a paisa apart while the trial balance stayed green.
+  const stockValueSql =
+    '(SELECT COALESCE(SUM(m.value_minor), 0) FROM stock_movements m WHERE m.product_id = p.id)'
+
   const where: string[] = ["p.item_type = 'inventory'"]
   const params: Record<string, unknown> = {}
 
@@ -847,7 +909,8 @@ export function stockLevels(db: DB, input: StockLevelsInput = {}): PagedResult<S
               p.item_type   AS item_type,
               p.min_stock_m AS min_stock_m,
               p.cost_price  AS cost_price,
-              ${onHandSql}  AS on_hand
+              ${onHandSql}     AS on_hand,
+              ${stockValueSql} AS stock_value
        FROM products p
        ${whereSql}
        ORDER BY ${sortColumn} ${sortDir}, p.id
@@ -861,6 +924,7 @@ export function stockLevels(db: DB, input: StockLevelsInput = {}): PagedResult<S
     cost_price: number
     item_type: string
     on_hand: number
+    stock_value: number
   }>
 
   return {
@@ -879,6 +943,7 @@ function toStockLevel(row: {
   min_stock_m: number
   cost_price: number
   on_hand: number
+  stock_value: number
 }): StockLevel {
   return {
     productId: row.id,
@@ -892,9 +957,10 @@ function toStockLevel(row: {
     isBelowReorder:
       (row.item_type ?? 'inventory') === 'inventory' && row.on_hand <= row.min_stock_m,
     avgCost: row.cost_price,
-    // Stock value crosses from cost scale (4 dp) into money scale (2 dp) — exactly once, here.
-    stockValueMinor: costToPriceMinor(movementValueCost(row.on_hand, row.cost_price)) *
-      (row.on_hand < 0 ? -1 : 1)
+    // THE SAME NUMBER THE LEDGER POSTED. Summed from the movements, not recomputed from
+    // on_hand x average — see migration 0006. This is what makes GL Inventory and the stock
+    // valuation report equal by construction rather than by luck.
+    stockValueMinor: row.stock_value
   }
 }
 
@@ -914,7 +980,15 @@ export function stockLevel(db: DB, productId: number): StockLevel {
     )
   }
 
-  return toStockLevel({ ...product, on_hand: onHand(db, productId) })
+  // Value from the movements' own frozen values — the same numbers the ledger posted.
+  const stockValue = db
+    .prepare(
+      'SELECT COALESCE(SUM(value_minor), 0) FROM stock_movements WHERE product_id = ?'
+    )
+    .pluck()
+    .get(productId) as number
+
+  return toStockLevel({ ...product, on_hand: onHand(db, productId), stock_value: stockValue })
 }
 
 /**

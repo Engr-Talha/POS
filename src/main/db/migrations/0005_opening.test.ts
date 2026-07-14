@@ -129,13 +129,33 @@ describe('0005 — the upgrade path: a shop already running v0.4 gets the openin
     const actor = makeUser(t)
 
     // A year of trading, in miniature: a product with stock, and a balanced journal behind it.
+    //
+    // Seeded with RAW SQL shaped like v0.4, NOT through today's stock.adjust(). A real v0.4 shop ran
+    // v0.4 code against a v0.4 schema — it had never heard of stock_movements.value_minor, which
+    // arrives in 0006. Using today's services to build yesterday's database would be testing an
+    // upgrade path no shop has ever walked.
     const productId = makeProduct(t, 'OLD-1')
-    stock.adjust(t.db, actor, {
-      productId,
-      type: 'adjustment',
-      qtyM: 5 * ONE_UNIT,
-      unitCost: 50 * RS_COST,
-      reasonCode: 'stock_take'
+
+    t.db
+      .prepare(
+        `INSERT INTO stock_movements (at, type, product_id, qty_m, unit_cost, reason_code, created_at)
+         VALUES (?, 'adjustment', ?, ?, ?, 'stock_take', ?)`
+      )
+      .run(new Date().toISOString(), productId, 5 * ONE_UNIT, 50 * RS_COST, new Date().toISOString())
+
+    t.db
+      .prepare('UPDATE products SET cost_price = ? WHERE id = ?')
+      .run(50 * RS_COST, productId)
+
+    ledger.post(t.db, {
+      refType: 'stock_adjustment',
+      refId: productId,
+      memo: 'Opening count',
+      userId: actor.id,
+      lines: [
+        { account: ACC.INVENTORY, debit: 25_000 },
+        { account: ACC.STOCK_ADJUSTMENT, credit: 25_000 }
+      ]
     })
 
     const before = {
@@ -149,7 +169,7 @@ describe('0005 — the upgrade path: a shop already running v0.4 gets the openin
     }
 
     const result = runMigrations(t.db)
-    expect(result.applied).toEqual([5])
+    expect(result.applied).toEqual([5, 6])
 
     const after = {
       products: t.db.prepare('SELECT COUNT(*) FROM products').pluck().get(),

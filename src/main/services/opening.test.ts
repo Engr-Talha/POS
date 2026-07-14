@@ -912,25 +912,46 @@ describe('opening — the door only opens once', () => {
     assertEverythingHolds(t)
   })
 
-  it('a shop that started selling BEFORE opening its books cannot back-date an opening balance', () => {
+  it('a shop that has started selling can no longer EDIT the worksheet — but it can still COMMIT it', () => {
     const productId = makeProduct(t, { sku: 'OIL-5L' })
 
-    // Never opened the wizard. Straight to selling.
+    // The owner typed the opening balances but had not pressed Commit yet...
+    opening.setCashAndBank(t.db, owner, { openingCash: 5_000 * RS })
+    opening.addStockLine(t.db, owner, { productId, qtyM: 10 * ONE_UNIT, unitCost: RS_COST })
+
+    // ...and a cashier rang something up.
     makeSale(t, productId)
 
     const traded = /already made sales or purchases/i
 
-    expectUserMessage(() => opening.setCashAndBank(t.db, owner, { openingCash: 5_000 * RS }), traded)
+    // EDITING the worksheet is frozen, and that is the safety we want: a figure that has already been
+    // sold against must not change quietly a month later.
+    expectUserMessage(() => opening.setCashAndBank(t.db, owner, { openingCash: 9_999 * RS }), traded)
     expectUserMessage(
-      () => opening.addStockLine(t.db, owner, { productId, qtyM: 10 * ONE_UNIT }),
+      () => opening.addStockLine(t.db, owner, { productId, qtyM: 1 * ONE_UNIT }),
       traded
     )
-    // And the commit is no exception. It is the biggest write of all: posting a backdated opening
-    // balance behind a month of real sales would re-seed the average cost those sales were costed
-    // against, and the owner's profit reports would change underneath them.
-    expectUserMessage(() => opening.commit(t.db, owner), traded)
 
-    expect(opening.getSummary(t.db).status).toBe('draft')
+    // But COMMITTING is NOT. This test used to assert the opposite, and that was a trap with no way
+    // out: one premature sale would strand the shop's opening balances FOREVER. The cash in the till,
+    // the money in the bank, the udhaar customers owed and the dues owed to suppliers have no other
+    // screen in this app — they could never have reached the books at all, and every report the shop
+    // ever ran would be missing its own starting position, permanently.
+    //
+    // The old reasoning was that a backdated opening would "re-seed the average cost those sales were
+    // costed against". It does move the CURRENT average — but it cannot rewrite the past, because
+    // every sale FREEZES its own cost onto its movement when it happens. Those sales keep the COGS
+    // they were posted with. What changes is only what the shop carries going forward, which is the
+    // whole point of entering the opening stock in the first place.
+    //
+    // Being unable to EDIT after trading is the safety. Being unable to COMMIT is just a locked door.
+    // The sale already put its own money in the till, so measure what the COMMIT added.
+    const cashBefore = ledger.accountBalance(t.db, ACC.CASH)
+
+    expect(() => opening.commit(t.db, owner)).not.toThrow()
+
+    expect(opening.getSummary(t.db).status).toBe('committed')
+    expect(ledger.accountBalance(t.db, ACC.CASH) - cashBefore).toBe(5_000 * RS)
     assertBooksBalance(t)
   })
 

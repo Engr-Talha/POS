@@ -58,12 +58,31 @@ function legacyItem(overrides: Record<string, unknown> = {}) {
  * do not have one either — they post movements exactly like the stock service will.
  */
 function move(productId: number, qtyM: number, type = 'adjustment', unitCost = 0): void {
+  // Mirror what stock.record() actually does, so the fixture is a state the app can really produce:
+  //
+  //  - a movement OUT (a sale, damage) goes out at the product's AVERAGE cost — that is its COGS.
+  //    Left at 0 it would relieve NO inventory value, and the shelf would still be carrying the money
+  //    for stock that has already left the shop.
+  //  - value_minor is the money the movement moved, frozen when it happens (migration 0006). A real
+  //    movement always carries it: the ledger posts that number and the stock report sums it.
+  const cost =
+    unitCost ||
+    (t.db.prepare('SELECT cost_price FROM products WHERE id = ?').pluck().get(productId) as number)
+
   t.db
     .prepare(
-      `INSERT INTO stock_movements (at, type, product_id, qty_m, unit_cost, reason_code, created_at)
-       VALUES (?, ?, ?, ?, ?, 'data_entry', ?)`
+      `INSERT INTO stock_movements (at, type, product_id, qty_m, unit_cost, value_minor, reason_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'data_entry', ?)`
     )
-    .run(new Date().toISOString(), type, productId, qtyM, unitCost, new Date().toISOString())
+    .run(
+      new Date().toISOString(),
+      type,
+      productId,
+      qtyM,
+      cost,
+      stock.movementValueMinor(qtyM, cost),
+      new Date().toISOString()
+    )
 }
 
 beforeEach(() => {

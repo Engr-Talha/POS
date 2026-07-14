@@ -143,7 +143,7 @@ export function hasTraded(db: DB): boolean {
  * cost of stock those sales were already costed against, and the profit reports the owner has been
  * reading would quietly change underneath them.
  */
-function assertEditable(db: DB): void {
+function assertNotCommitted(db: DB): void {
   if (readSetup(db).status === 'committed') {
     throw new AppError(
       ErrorCode.VALIDATION,
@@ -151,6 +151,11 @@ function assertEditable(db: DB): void {
       'opening_setup.status = committed'
     )
   }
+}
+
+/** Editing the WORKSHEET. Frozen once the shop has traded — see the comment above. */
+function assertEditable(db: DB): void {
+  assertNotCommitted(db)
 
   if (hasTraded(db)) {
     throw new AppError(
@@ -159,6 +164,25 @@ function assertEditable(db: DB): void {
       'a sale or purchase already exists: the opening balances are frozen'
     )
   }
+}
+
+/**
+ * COMMITTING a draft. Deliberately NOT gated on hasTraded().
+ *
+ * This used to share the guard above, and that was a trap with no way out: a cashier ringing up one
+ * sale before the owner had finished pressing Commit would STRAND the shop's opening balances
+ * forever. The cash in the till, the money in the bank, the udhaar customers owed and the dues owed
+ * to suppliers could then never reach the books AT ALL — the shop would be permanently missing its
+ * own starting position, and no screen in the app would let it in.
+ *
+ * Being unable to EDIT after trading is the safety. Being unable to COMMIT is just a locked door.
+ *
+ * The journals are dated to the go-live date, which is before those sales, and a backdated stock
+ * movement makes stock.record() rebuild the weighted average from history — so the books land in the
+ * right period and the averages come out right anyway.
+ */
+function assertCommittable(db: DB): void {
+  assertNotCommitted(db)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1028,7 +1052,10 @@ export function commit(
   const run = db.transaction((): OpeningSummary => {
     // Inside the transaction, and FIRST. Two owners clicking Save at the same moment is not the
     // scenario this defends against — a retry, a double-click and a re-sent IPC message all are.
-    assertEditable(db)
+    //
+    // assertCommittable, NOT assertEditable: a sale rung up before the owner finished pressing
+    // Commit must not strand the shop's opening balances forever. See assertCommittable.
+    assertCommittable(db)
     ensureSetup(db, now)
 
     const setup = readSetup(db, now)
@@ -1052,12 +1079,16 @@ export function commit(
       )
     }
 
-    const reasonCode = openingReasonCode(db)
-
     // ── 1. The stock. stock.adjust() does the movement, the journal AND the weighted average. ──
     const lines = db
       .prepare('SELECT * FROM opening_stock_lines ORDER BY id')
       .all() as StockLineRow[]
+
+    // Resolve the reason code ONLY if there is stock to post. A shop that opens with no stock at all
+    // — a service business, or one that simply has an empty shelf on day one — must still be able to
+    // record its cash and its debts. Demanding a stock-adjustment reason from a shop with no stock
+    // would lock it out of its own books over a list it never needed.
+    const reasonCode = lines.length > 0 ? openingReasonCode(db) : ''
 
     for (const line of lines) {
       const batchId = resolveBatchId(db, line, at)
@@ -1196,7 +1227,24 @@ function resolveBatchId(db: DB, line: StockLineRow, at: Date): number | null {
     .pluck()
     .get(line.product_id, line.batch_no) as number | undefined
 
-  if (existing != null) return existing
+  if (existing != null) {
+    // The batch already exists — the owner created it on the product screen before typing the
+    // opening line. It was created with NO cost (there was nothing to cost it at), and the opening
+    // line is the first and only thing that ever knows what that batch was worth. Backfill it.
+    //
+    // Left at 0, the batch valuation report would price this batch at nothing forever, while the GL
+    // and the product's average cost both knew better — a third number disagreeing with the other two.
+    const current = db
+      .prepare('SELECT cost FROM batches WHERE id = ?')
+      .pluck()
+      .get(existing) as number | undefined
+
+    if ((current ?? 0) === 0 && line.unit_cost > 0) {
+      db.prepare('UPDATE batches SET cost = ? WHERE id = ?').run(line.unit_cost, existing)
+    }
+
+    return existing
+  }
 
   // catalog.addBatch refuses a batch on a product that is not flagged track_batches — the same rule
   // assertLineIsPossible() applied when the line was typed. Checked twice, deliberately: the flag can
