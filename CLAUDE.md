@@ -29,6 +29,12 @@ Anything that would require the end user to type a command is a bug.
 - **better-sqlite3**, one DB file, WAL mode (backup = copy the file)
 - **zod** validation, **vitest** tests
 - **electron-updater** — wired in from v0.1.0
+- **exceljs** — the ONLY spreadsheet library. Added in Phase 4 for the opening-balance import, and it
+  also does the Excel export every report needs in Phase 8. Works fully offline.
+  **NEVER let a spreadsheet number reach the ledger as a float.** Excel hands you `2185.0000` as a
+  float. Read every numeric cell as TEXT and run it through `parseMoney` / `parseCost` / `parseQty`,
+  and REJECT a cell that will not convert exactly — with its row number. Rounding it instead would
+  quietly undo the integer discipline the whole app rests on.
 
 ### Process boundary (non-negotiable)
 
@@ -123,6 +129,22 @@ tools/           maintainer-only scripts (keygen). NOT shipped in the installer.
   Settings → Manage Lists, and every select has an inline "+ add new".
 - This includes: payment methods, categories, units, reason codes (void/refund/discount/adjustment),
   expense categories, customer types, supplier types.
+
+- **IF A NUMBER OR A BEHAVIOUR COULD REASONABLY DIFFER BETWEEN TWO SHOPS, IT IS A SETTING — NOT A
+  CONSTANT IN THE CODE.** Owner's standing instruction. Before you write a literal, ask: would another
+  shop want this different? If yes, it goes in the settings registry.
+  - Every setting is declared ONCE in `src/shared/settings-registry.ts`: key, type, default, label,
+    help text, group, validation. The Settings screen RENDERS ITSELF from that registry — adding a
+    setting must never mean hand-writing another form field.
+  - The registry is the single source of truth for defaults. `DEFAULT_SETTINGS` is derived from it.
+  - Examples that MUST be settings, not constants: the discount threshold that needs supervisor
+    approval; whether negative stock warns or blocks; near-expiry warning days; auto-logout minutes;
+    loyalty points per rupee and redemption rate; credit-limit enforcement (warn vs block); scanner
+    prefix/suffix/terminator/min-length; printer width and cash-drawer kick code; backup reminder
+    days; PIN length; low-stock defaults; date format; language.
+  - The exceptions are the INVARIANTS, and they are deliberately NOT configurable, because making
+    them so would let a shop turn correctness off: money is integer 2dp, cost is 4dp, quantity is
+    thousandths, no cash rounding, stock is derived, every journal balances.
 
 ### Lists
 - **Pagination + an index on every list.** Assume 100k+ rows. No unbounded `SELECT *`.

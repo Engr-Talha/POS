@@ -32,24 +32,33 @@ import {
   Scale,
   CircleCheck,
   Package,
-  Boxes
+  Boxes,
+  ClipboardList
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
-import { ROLE_LABEL } from '@shared/rbac'
+import type { Permission } from '@shared/rbac'
+import { ROLE_LABEL, roleCan } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
 import { Books } from './sections/Books'
 import { Lists } from './sections/Lists'
+import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
 import { SettingsSection } from './sections/SettingsSection'
 import { Stock } from './sections/Stock'
 
-type Section = 'overview' | 'products' | 'stock' | 'books' | 'lists' | 'settings'
+type Section = 'overview' | 'products' | 'stock' | 'opening' | 'books' | 'lists' | 'settings'
 
-const NAV: Array<{ key: Section; label: string; icon: typeof Store }> = [
+/**
+ * `permission` hides an entry the user could not use anyway. That is a COURTESY, not a control —
+ * main refuses the call whether or not the button was ever drawn (CLAUDE.md §4). Opening setup is
+ * Owner-only, and a nav item that greets a cashier with a red refusal is worse than no nav item.
+ */
+const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?: Permission }> = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'products', label: 'Items', icon: Package },
   { key: 'stock', label: 'Stock', icon: Boxes },
+  { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
   { key: 'lists', label: 'Manage lists', icon: ListChecks },
   { key: 'settings', label: 'Settings', icon: SettingsIcon }
@@ -171,7 +180,9 @@ export function Home({
           }}
         >
           <Stack gap={4}>
-            {NAV.map((item) => {
+            {NAV.filter(
+              (item) => !item.permission || (user != null && roleCan(user.role, item.permission))
+            ).map((item) => {
               const Icon = item.icon
               const active = section === item.key
               return (
@@ -206,6 +217,9 @@ export function Home({
           )}
           {section === 'stock' && (
             <Stock readOnly={state.readOnly} currencySymbol={currencySymbol} />
+          )}
+          {section === 'opening' && (
+            <OpeningSetup readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'books' && <Books currencySymbol={currencySymbol} />}
           {section === 'lists' && <Lists readOnly={state.readOnly} />}

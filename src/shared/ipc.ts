@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { StockMovement } from './catalog'
+import type { OpeningSummary } from './opening'
 
 /**
  * THE IPC CONTRACT. The one place the renderer and the main process agree on.
@@ -85,7 +86,38 @@ export const IPC = {
 
   // ── Catalog: batches ───────────────────────────────────────────────────────
   catalogListBatches: 'catalog:listBatches',
-  catalogAddBatch: 'catalog:addBatch'
+  catalogAddBatch: 'catalog:addBatch',
+
+  // ── Opening Setup — what the shop ALREADY HAD on day one ───────────────────
+  // Every WRITE below is OWNER-ONLY ('settings.manage'). The reads are 'report.view'.
+  openingGetSummary: 'opening:getSummary',
+  openingSetCashAndBank: 'opening:setCashAndBank',
+
+  openingListStockLines: 'opening:listStockLines',
+  openingAddStockLine: 'opening:addStockLine',
+  openingUpdateStockLine: 'opening:updateStockLine',
+  openingRemoveStockLine: 'opening:removeStockLine',
+
+  openingListReceivables: 'opening:listReceivables',
+  openingAddReceivable: 'opening:addReceivable',
+  openingUpdateReceivable: 'opening:updateReceivable',
+  openingRemoveReceivable: 'opening:removeReceivable',
+
+  openingListPayables: 'opening:listPayables',
+  openingAddPayable: 'opening:addPayable',
+  openingUpdatePayable: 'opening:updatePayable',
+  openingRemovePayable: 'opening:removePayable',
+
+  /** THE ONE-WAY DOOR. Posts every opening journal and movement, in one transaction. */
+  openingCommit: 'opening:commit',
+
+  // ── Customers ──────────────────────────────────────────────────────────────
+  // They exist now because opening udhaar has to be owed BY SOMEBODY. Note what is missing: any way
+  // to write a balance. What a customer owes is DERIVED from the ledger, exactly as stock is derived
+  // from the movements.
+  customersList: 'customers:list',
+  customersCreate: 'customers:create',
+  customersUpdate: 'customers:update'
 } as const
 
 export type SystemInfo = {
@@ -226,6 +258,36 @@ export const NearExpiryInput = z.object({
   pageSize: PageSize
 })
 
+// ── Opening Setup: the one input that had no home in shared/opening.ts ───────
+// Everything else the opening handlers validate with — OpeningCashInput, UpdateOpeningStockLineInput,
+// CommitOpeningInput and the rest — is imported straight from '@shared/opening', as are the customer
+// schemas. This is the leftover: `opening.listReceivables` / `listPayables` take a plain TS type
+// (`PartyListArgs`), and an IPC input MUST be a schema — the renderer is not trusted.
+
+export const OpeningPartyListInput = z.object({
+  page: Page,
+  pageSize: PageSize
+})
+
+// ── Opening Setup result type that crosses the boundary ──────────────────────
+
+/**
+ * WHAT THE WIZARD RENDERS: the summary, plus whether it may still be TOUCHED.
+ *
+ * `opening.getSummary()` in main returns exactly `OpeningSummary` — the figures. But the figures alone
+ * do not tell the screen whether it is a form or a receipt. The freeze rule (services/opening.ts) locks
+ * the opening balances the moment the shop makes its first real sale or purchase, and a wizard that
+ * cannot see that lets the owner type for an hour and only then be told "no". So the handler composes
+ * the two reads — `getSummary()` and `hasTraded()` — into one payload, and the screen never has to
+ * work the rule out for itself. (Neither is a security boundary: main refuses the write regardless.)
+ */
+export type OpeningWizardState = OpeningSummary & {
+  /** True once a real sale or purchase exists. An opening entry or an adjustment is not trading. */
+  hasTraded: boolean
+  /** May the worksheet still be changed? False once committed, OR once the shop has traded. */
+  canEdit: boolean
+}
+
 // ── Catalog result types that cross the boundary ─────────────────────────────
 // `shared/` cannot import from `main/`, so the two service result shapes that had no row type in
 // shared/catalog.ts are declared here. The handlers annotate their return types with these, so if a
@@ -277,3 +339,4 @@ export type SupplierGetInput = z.infer<typeof SupplierGetInput>
 export type StockLevelsInput = z.infer<typeof StockLevelsInput>
 export type LowStockInput = z.infer<typeof LowStockInput>
 export type NearExpiryInput = z.infer<typeof NearExpiryInput>
+export type OpeningPartyListInput = z.infer<typeof OpeningPartyListInput>

@@ -31,6 +31,20 @@ import type { User } from '@shared/types'
 
 const RS_100 = 1_000_000 // 4-dp cost
 
+/**
+ * The versions that a database sitting at v2 still has to catch up on, and the version it lands on.
+ *
+ * DERIVED FROM `MIGRATIONS`, never hardcoded — the same reasoning as in lookups.test.ts. A hardcoded
+ * [3, 4] means the next person to add a migration "fixes" this test by editing a number, and stops
+ * reading what it actually says. What it says is the RULE: a v2 database runs EVERYTHING above 2 and
+ * NOTHING at or below it. That must stay true at 5 migrations and at 30.
+ */
+const PENDING_FROM_V2 = MIGRATIONS.map((m) => m.version)
+  .filter((version) => version > 2)
+  .sort((a, b) => a - b)
+
+const LATEST_VERSION = Math.max(...MIGRATIONS.map((m) => m.version))
+
 /** A database at EXACTLY the schema a shipped v0.2 install has: migrations 1 and 2, and no more. */
 function migrateTo(t: TestDb, upTo: number): void {
   t.db.exec(`
@@ -98,14 +112,14 @@ describe('the upgrade path — a shop already running v0.2 installs the catalog'
     ).toBe(2)
   })
 
-  it('applies ONLY 0003 — it does not re-run the two migrations that already ran', () => {
+  it('applies ONLY the migrations above 2 — it does not re-run the two that already ran', () => {
     const result = runMigrations(t.db)
 
     // The whole promise of forward-only, in one assertion: 1 and 2 are SHIPPED and are never touched
     // again. Re-running 0001 against a live database would try to recreate tables that hold the
     // shop's users and its books.
-    expect(result.applied).toEqual([3, 4])
-    expect(result.alreadyAt).toBe(4)
+    expect(result.applied).toEqual(PENDING_FROM_V2)
+    expect(result.alreadyAt).toBe(LATEST_VERSION)
   })
 
   it('does not lose ONE ROW of what was already there — users, lookups, settings, journals', () => {
@@ -200,10 +214,10 @@ describe('the upgrade path — a shop already running v0.2 installs the catalog'
   })
 
   it('is idempotent — the app runs migrations on EVERY launch, not just on upgrade day', () => {
-    expect(runMigrations(t.db).applied).toEqual([3, 4])
+    expect(runMigrations(t.db).applied).toEqual(PENDING_FROM_V2)
     expect(runMigrations(t.db).applied).toEqual([])
     expect(runMigrations(t.db).applied).toEqual([])
-    expect(runMigrations(t.db).alreadyAt).toBe(4)
+    expect(runMigrations(t.db).alreadyAt).toBe(LATEST_VERSION)
   })
 })
 

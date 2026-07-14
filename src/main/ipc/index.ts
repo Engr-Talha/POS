@@ -20,10 +20,29 @@ import {
   StockLevelsInput,
   LowStockInput,
   NearExpiryInput,
+  OpeningPartyListInput,
   type StockAdjustResult,
   type NearExpiryItem,
-  type SystemInfo
+  type SystemInfo,
+  type OpeningWizardState
 } from '@shared/ipc'
+import {
+  CommitOpeningInput,
+  CreateCustomerInput,
+  CustomerListInput,
+  DeleteOpeningPayableInput,
+  DeleteOpeningReceivableInput,
+  DeleteOpeningStockLineInput,
+  OpeningCashInput,
+  OpeningPayableInput,
+  OpeningReceivableInput,
+  OpeningStockLineInput,
+  OpeningStockListInput,
+  UpdateOpeningPayableInput,
+  UpdateOpeningReceivableInput,
+  UpdateOpeningStockLineInput,
+  UpdateCustomerInput
+} from '@shared/opening'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -65,6 +84,8 @@ import * as ledgerService from '../services/ledger'
 import * as productsService from '../services/products'
 import * as stockService from '../services/stock'
 import * as catalogService from '../services/catalog'
+import * as openingService from '../services/opening'
+import * as customersService from '../services/customers'
 import log from '../logger'
 
 /**
@@ -644,5 +665,187 @@ export function registerIpcHandlers(): void {
     })
 
     return batch
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OPENING SETUP — what the shop ALREADY HAD on day one
+  //
+  // Without this the books believe the shop began life with nothing, and every report is wrong from
+  // the first day: the first tin sold — a tin bought last year — shows 100% profit, because as far as
+  // the ledger knows it cost nothing.
+  //
+  // OWNER ONLY. Every write below is gated on 'settings.manage', which only an Owner has. This is not
+  // a "products" screen a manager keeps tidy; it is the shop's day-one balance sheet, and `commit`
+  // posts the lot into the general ledger. The reads are 'report.view' and never call assertWritable()
+  // — an expired shop can still SEE its opening balances and export them. (CLAUDE.md §6.)
+  //
+  // NOTHING here is in the books until `commit`. The opening_* tables are a WORKSHEET: the owner can
+  // come back to it over three evenings with a stock sheet in their hand. That is why the add/update/
+  // remove handlers below do not each write an audit row — they change no money, no stock and no
+  // ledger. The single audit row that matters is written by `commit`, and it freezes the entire
+  // day-one balance sheet with a name and a time against it.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The review screen — and the wizard's own state.
+   *
+   * TWO reads composed into one payload: the figures (`getSummary`) and whether the sheet may still be
+   * touched (`hasTraded`). The freeze rule locks the opening balances the moment the shop makes its
+   * first real sale or purchase; a wizard that could not see that would let the owner type for an hour
+   * and only then be told no. `canEdit` is a COURTESY to the screen — main refuses the write anyway.
+   */
+  handle<void, OpeningWizardState>(IPC.openingGetSummary, null, () => {
+    session.requirePermissionOf('report.view')
+    const db = getDb()
+
+    const summary = openingService.getSummary(db)
+    const hasTraded = openingService.hasTraded(db)
+
+    return { ...summary, hasTraded, canEdit: summary.status !== 'committed' && !hasTraded }
+  })
+
+  handle(IPC.openingSetCashAndBank, OpeningCashInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    // Only the fields the step actually sent are written — see OpeningCashInput. (Trap #18.)
+    return openingService.setCashAndBank(getDb(), user, input)
+  })
+
+  // ── The stock sheet ────────────────────────────────────────────────────────
+  handle(IPC.openingListStockLines, OpeningStockListInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return openingService.listStockLines(getDb(), input)
+  })
+
+  handle(IPC.openingAddStockLine, OpeningStockLineInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.addStockLine(getDb(), user, input)
+  })
+
+  handle(IPC.openingUpdateStockLine, UpdateOpeningStockLineInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.updateStockLine(getDb(), user, input)
+  })
+
+  handle(IPC.openingRemoveStockLine, DeleteOpeningStockLineInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    openingService.removeStockLine(getDb(), user, input)
+    return true
+  })
+
+  // ── Customer udhaar (receivables) ──────────────────────────────────────────
+  handle(IPC.openingListReceivables, OpeningPartyListInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return openingService.listReceivables(getDb(), input)
+  })
+
+  handle(IPC.openingAddReceivable, OpeningReceivableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.addReceivable(getDb(), user, input)
+  })
+
+  handle(IPC.openingUpdateReceivable, UpdateOpeningReceivableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.updateReceivable(getDb(), user, input)
+  })
+
+  handle(IPC.openingRemoveReceivable, DeleteOpeningReceivableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    openingService.removeReceivable(getDb(), user, input)
+    return true
+  })
+
+  // ── Supplier dues (payables) ───────────────────────────────────────────────
+  handle(IPC.openingListPayables, OpeningPartyListInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return openingService.listPayables(getDb(), input)
+  })
+
+  handle(IPC.openingAddPayable, OpeningPayableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.addPayable(getDb(), user, input)
+  })
+
+  handle(IPC.openingUpdatePayable, UpdateOpeningPayableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    return openingService.updatePayable(getDb(), user, input)
+  })
+
+  handle(IPC.openingRemovePayable, DeleteOpeningPayableInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    openingService.removePayable(getDb(), user, input)
+    return true
+  })
+
+  /**
+   * COMMIT — the one-way door, and the most consequential write in this app after a restore.
+   *
+   * Posts every opening stock movement and every opening journal, balanced against Opening Balance
+   * Equity, in ONE transaction. If a single line fails, the whole thing rolls back and the shop still
+   * has its draft — a half-posted opening balance would be an inventory that does not match the ledger,
+   * with no way to tell which half was real.
+   *
+   * A SECOND COMMIT WOULD NOT FAIL LOUDLY. It would succeed, posting the entire opening balance again —
+   * double the stock, double the cash, double the equity — with the trial balance still balancing
+   * perfectly, because two balanced journals balance. The service refuses it on `status`, inside the
+   * transaction, which is what makes a double-click or a re-sent IPC message safe.
+   *
+   * The AUDIT ROW IS WRITTEN BY THE SERVICE (`opening.commit`, with the whole day-one balance sheet in
+   * it). It is not written again here: a log that records the same act twice is a log nobody trusts.
+   */
+  handle<CommitOpeningInput, OpeningWizardState>(IPC.openingCommit, CommitOpeningInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+
+    const summary = openingService.commit(getDb(), user, input)
+    log.info(
+      `[opening] committed by ${user.username} (${user.role}): ` +
+        `stock=${summary.stockValueMinor} cash=${summary.openingCashMinor} bank=${summary.openingBankMinor} ` +
+        `udhaar=${summary.receivablesMinor} dues=${summary.payablesMinor} obe=${summary.openingBalanceEquityMinor}`
+    )
+
+    // The door is shut now, and it does not reopen. Say so, in the same shape the wizard already reads.
+    return { ...summary, hasTraded: openingService.hasTraded(getDb()), canEdit: false }
+  })
+
+  // ── Customers ─────────────────────────────────────────────────────────────
+  // Minimal on purpose: the customer ledger, loyalty and per-customer pricing are Phase 7. Customers
+  // exist NOW because opening udhaar has to be owed BY SOMEBODY.
+  //
+  // THERE IS NO ENDPOINT HERE THAT WRITES A BALANCE, and there never will be. What a customer owes is
+  // DERIVED from the ledger, exactly as stock is derived from the movements. `creditLimit` is a
+  // different thing: how much udhaar they are ALLOWED to run up. A limit, not a debt.
+  //
+  // Writes are gated on 'settings.manage' — the ONLY screen that creates a customer today is the
+  // owner-only opening wizard, so this is the honest gate for what actually exists. Phase 7 puts a
+  // customer in front of a cashier at the till, and that needs its own 'customer.manage' permission in
+  // shared/rbac.ts. Opening a gate later is safe; shipping one too wide is not.
+  handle(IPC.customersList, CustomerListInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return customersService.list(getDb(), input)
+  })
+
+  handle(IPC.customersCreate, CreateCustomerInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    // The service audits customer.create itself — it has the actor. Do not log it twice here.
+    return customersService.create(getDb(), user, input)
+  })
+
+  handle(IPC.customersUpdate, UpdateCustomerInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    // Only the fields the form sent arrive here. The service audits customer.update, with a before/after
+    // of exactly the fields that were touched.
+    return customersService.update(getDb(), user, input)
   })
 }

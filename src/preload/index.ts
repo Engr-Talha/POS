@@ -113,6 +113,39 @@ const api: PosApi = {
 
     listBatches: (input) => ipcRenderer.invoke(IPC.catalogListBatches, input),
     addBatch: (input) => ipcRenderer.invoke(IPC.catalogAddBatch, input)
+  },
+
+  // THE OPENING SETUP — what the shop already had on day one. Every write here is OWNER ONLY, and that
+  // is enforced in MAIN, not by this file and not by the screen. `commit` posts the shop's entire
+  // day-one balance sheet into the ledger in one transaction, and it only ever runs once.
+  opening: {
+    getSummary: () => ipcRenderer.invoke(IPC.openingGetSummary),
+    setCashAndBank: (input) => ipcRenderer.invoke(IPC.openingSetCashAndBank, input),
+
+    listStockLines: (input) => ipcRenderer.invoke(IPC.openingListStockLines, input),
+    addStockLine: (input) => ipcRenderer.invoke(IPC.openingAddStockLine, input),
+    updateStockLine: (input) => ipcRenderer.invoke(IPC.openingUpdateStockLine, input),
+    removeStockLine: (input) => ipcRenderer.invoke(IPC.openingRemoveStockLine, input),
+
+    listReceivables: (input) => ipcRenderer.invoke(IPC.openingListReceivables, input),
+    addReceivable: (input) => ipcRenderer.invoke(IPC.openingAddReceivable, input),
+    updateReceivable: (input) => ipcRenderer.invoke(IPC.openingUpdateReceivable, input),
+    removeReceivable: (input) => ipcRenderer.invoke(IPC.openingRemoveReceivable, input),
+
+    listPayables: (input) => ipcRenderer.invoke(IPC.openingListPayables, input),
+    addPayable: (input) => ipcRenderer.invoke(IPC.openingAddPayable, input),
+    updatePayable: (input) => ipcRenderer.invoke(IPC.openingUpdatePayable, input),
+    removePayable: (input) => ipcRenderer.invoke(IPC.openingRemovePayable, input),
+
+    commit: (input) => ipcRenderer.invoke(IPC.openingCommit, input)
+  },
+
+  // Note what is NOT here: any way to set what a customer owes. That figure is DERIVED from the
+  // ledger, exactly as stock is derived from the movements. `creditLimit` is a limit, not a balance.
+  customers: {
+    list: (input) => ipcRenderer.invoke(IPC.customersList, input),
+    create: (input) => ipcRenderer.invoke(IPC.customersCreate, input),
+    update: (input) => ipcRenderer.invoke(IPC.customersUpdate, input)
   }
 }
 

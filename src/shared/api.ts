@@ -22,8 +22,32 @@ import type {
   LowStockInput,
   NearExpiryInput,
   StockAdjustResult,
-  NearExpiryItem
+  NearExpiryItem,
+  OpeningPartyListInput,
+  OpeningWizardState
 } from './ipc'
+import type {
+  CommitOpeningInput,
+  CreateCustomerInput,
+  Customer,
+  CustomerListInput,
+  DeleteOpeningPayableInput,
+  DeleteOpeningReceivableInput,
+  DeleteOpeningStockLineInput,
+  OpeningCashInput,
+  OpeningPayable,
+  OpeningPayableInput,
+  OpeningReceivable,
+  OpeningReceivableInput,
+  OpeningSetup,
+  OpeningStockLine,
+  OpeningStockLineInput,
+  OpeningStockListInput,
+  UpdateOpeningPayableInput,
+  UpdateOpeningReceivableInput,
+  UpdateOpeningStockLineInput,
+  UpdateCustomerInput
+} from './opening'
 import type {
   AddBarcodeInput,
   AdjustStockInput,
@@ -212,5 +236,82 @@ export interface PosApi {
 
     listBatches: (input: BatchListInput) => Promise<Result<PagedResult<Batch>>>
     addBatch: (input: CreateBatchInput) => Promise<Result<Batch>>
+  }
+
+  /**
+   * THE OPENING SETUP WIZARD — what the shop ALREADY HAD on the day it started using this app.
+   *
+   * Without it the books believe the shop began with nothing, and the first tin sold — a tin bought
+   * last year — shows 100% profit, because as far as the ledger knows it cost nothing.
+   *
+   * OWNER ONLY. Every write below is gated on `settings.manage` in MAIN, not here. Everything except
+   * the three reads changes the shop's books, and `commit` posts all of them at once.
+   *
+   * ADD / UPDATE / REMOVE are worksheet edits. NOTHING is in the books until `commit`, and after
+   * `commit` nothing on this list can be changed at all — see `OpeningWizardState.canEdit`.
+   */
+  opening: {
+    /**
+     * The review screen, and the wizard's own state. A READ: it keeps working on an expired licence.
+     * `canEdit` is composed in main from the freeze rule — see OpeningWizardState.
+     */
+    getSummary: () => Promise<Result<OpeningWizardState>>
+
+    /**
+     * Cash in the till, money in the bank, and the date the balances are AS AT.
+     * Send ONLY the fields the step actually edited — a whole object posted back with `openingBank: 0`
+     * because the form never loaded it is how a bank balance gets wiped. (Trap #18.)
+     */
+    setCashAndBank: (input: OpeningCashInput) => Promise<Result<OpeningSetup>>
+
+    /** The stock sheet, paginated — a shop may open with thousands of lines. */
+    listStockLines: (input: OpeningStockListInput) => Promise<Result<PagedResult<OpeningStockLine>>>
+    /**
+     * One line: "I have 40 of these and they cost me 91.0417 each."
+     * `unitCost` is the 4-dp COST — what the shop PAID. A retail price here would state the cost a
+     * hundred times too low and quietly falsify every profit report the shop ever runs.
+     * Batch and expiry are OPTIONAL, and only for a product flagged `track_batches`.
+     */
+    addStockLine: (input: OpeningStockLineInput) => Promise<Result<OpeningStockLine>>
+    updateStockLine: (input: UpdateOpeningStockLineInput) => Promise<Result<OpeningStockLine>>
+    removeStockLine: (input: DeleteOpeningStockLineInput) => Promise<Result<boolean>>
+
+    /** CUSTOMER UDHAAR: what customers already owe the shop. One row per customer. */
+    listReceivables: (
+      input: OpeningPartyListInput
+    ) => Promise<Result<PagedResult<OpeningReceivable>>>
+    addReceivable: (input: OpeningReceivableInput) => Promise<Result<OpeningReceivable>>
+    updateReceivable: (input: UpdateOpeningReceivableInput) => Promise<Result<OpeningReceivable>>
+    removeReceivable: (input: DeleteOpeningReceivableInput) => Promise<Result<boolean>>
+
+    /** SUPPLIER DUES: what the shop already owes suppliers. One row per supplier. */
+    listPayables: (input: OpeningPartyListInput) => Promise<Result<PagedResult<OpeningPayable>>>
+    addPayable: (input: OpeningPayableInput) => Promise<Result<OpeningPayable>>
+    updatePayable: (input: UpdateOpeningPayableInput) => Promise<Result<OpeningPayable>>
+    removePayable: (input: DeleteOpeningPayableInput) => Promise<Result<boolean>>
+
+    /**
+     * THE ONE-WAY DOOR. Posts every opening stock movement and every opening journal — balanced,
+     * against Opening Balance Equity — in ONE transaction. It cannot be undone and it cannot be run
+     * twice: a second commit would post the whole opening balance AGAIN, with the trial balance still
+     * balancing perfectly, and nothing downstream would ever catch it. Main refuses it on `status`.
+     */
+    commit: (input: CommitOpeningInput) => Promise<Result<OpeningWizardState>>
+  }
+
+  /**
+   * CUSTOMERS — minimal on purpose. The customer ledger, loyalty and per-customer pricing are Phase 7.
+   * This exists now because opening udhaar has to be owed BY SOMEBODY.
+   *
+   * NOTE WHAT IS ABSENT: a balance. There is no field to type one into and no endpoint that writes
+   * one. What a customer owes is DERIVED from the ledger, exactly as stock is derived from movements.
+   * `creditLimit` is a different thing entirely: how much udhaar they are ALLOWED to run up.
+   */
+  customers: {
+    /** Paginated. Searches name AND phone — two customers really are both called Muhammad Rashid. */
+    list: (input: CustomerListInput) => Promise<Result<PagedResult<Customer>>>
+    create: (input: CreateCustomerInput) => Promise<Result<Customer>>
+    /** Send ONLY the fields the form edited. (Trap #18.) */
+    update: (input: UpdateCustomerInput) => Promise<Result<Customer>>
   }
 }

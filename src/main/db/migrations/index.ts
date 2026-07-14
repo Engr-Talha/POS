@@ -22,13 +22,15 @@ import { migration0001 } from './0001_platform'
 import { migration0002 } from './0002_ledger'
 import { migration0003 } from './0003_catalog'
 import { migration0004 } from './0004_pack_barcodes'
+import { migration0005 } from './0005_opening'
 
 /** Applied in ascending version order. Never renumber, never reorder, never edit a shipped one. */
 export const MIGRATIONS: Migration[] = [
   migration0001,
   migration0002,
   migration0003,
-  migration0004
+  migration0004,
+  migration0005
 ]
 
 export function runMigrations(db: DB): { applied: number[]; alreadyAt: number } {
