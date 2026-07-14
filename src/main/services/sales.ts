@@ -36,6 +36,7 @@ import {
   type SaleStatus
 } from '@shared/sales'
 import * as audit from './audit'
+import * as auth from './auth'
 import * as catalog from './catalog'
 import * as ledger from './ledger'
 import * as settings from './settings'
@@ -990,7 +991,7 @@ function assertMayOverridePrice(
 
   if (!roleAtLeast(actor, required) && !(approver != null && roleAtLeast(approver, required))) {
     throw new AppError(
-      ErrorCode.FORBIDDEN,
+      ErrorCode.NEEDS_APPROVAL,
       `Changing the price of "${productName}" needs approval. Please ask a supervisor.`,
       `price override needs role >= ${required}; actor=${actor.role}, approver=${approver?.role ?? 'none'} (catalog ${catalogPrice}, tried ${override})`
     )
@@ -1188,10 +1189,17 @@ export type CompleteSaleResult = {
 export function complete(db: DB, actor: User, raw: unknown, now = new Date()): CompleteSaleResult {
   const input = parseOrThrow(CompleteSaleInput, raw, 'sale.complete')
 
-  const approver =
-    input.approvedByUserId != null
-      ? loadUser(db, input.approvedByUserId, 'The supervisor who approved this')
-      : null
+  // THE APPROVER IS PROVEN, NOT CLAIMED.
+  //
+  // It used to be `loadUser(db, input.approvedByUserId)` — a plain fetch by an integer the renderer
+  // sent. That is no authentication at all: a cashier passes the owner's id (usually 1), the role
+  // check passes against the fetched owner, and a Rs 1 television walks out the door — with the audit
+  // log naming a supervisor who was never at the till. The supervisor's own id is not a secret.
+  //
+  // So the approver is now whoever the APPROVAL PIN resolves to, established here in main. The
+  // renderer cannot forge a PIN it does not know. No PIN → no approver → the over-threshold action is
+  // refused, exactly as if no supervisor had come over. (The claimed id is ignored.)
+  const approver = input.approverPin ? auth.verifyPin(db, input.approverPin) : null
 
   assertMayUseTier(db, actor, approver, input.priceTier)
 
@@ -1408,40 +1416,53 @@ type DrawnInvoice = { invoiceNo: string; seq: number; year: number }
  */
 function drawInvoiceNumber(db: DB, now: Date): DrawnInvoice {
   const year = now.getFullYear()
-  // A shop that numbers straight through the years keeps ONE counter, under a key no real year can
-  // collide with (NO_YEAR_RESET = 0).
-  const counterYear = setting<boolean>(db, 'invoice.resetYearly') ? year : NO_YEAR_RESET
+  const resetYearly = setting<boolean>(db, 'invoice.resetYearly')
+
+  // COUPLING — this is what stops New Year's Day from bricking the till.
+  //
+  // If the sequence RESETS each year, the year MUST appear in the printed number, or 2027 re-issues
+  // INV-000001 on top of 2026's, hits `sales.invoice_no UNIQUE`, and every sale from then on throws.
+  // So `resetYearly` forces the year into the number, regardless of the cosmetic `includeYear`.
+  // (A shop can still SHOW the year without resetting — includeYear on, resetYearly off — which is
+  // safe, because the sequence then runs straight through and never repeats.)
+  const includeYear = resetYearly || setting<boolean>(db, 'invoice.includeYear')
+
+  // The counter resets per year ONLY when asked to; otherwise one continuous counter under a key no
+  // real year collides with (NO_YEAR_RESET = 0).
+  const counterYear = resetYearly ? year : NO_YEAR_RESET
+
+  const prefix = setting<string>(db, 'invoice.prefix')
+  const padding = setting<number>(db, 'invoice.padding')
 
   const current = db
     .prepare('SELECT next_seq FROM invoice_counters WHERE series = ? AND year = ?')
     .pluck()
     .get(SALE_SERIES, counterYear) as number | undefined
 
-  const seq = current ?? 1
+  let seq = current ?? 1
+
+  // A NUMBER IS NEVER REUSED. Full stop.
+  //
+  // The counter is the fast path, but it is not trusted to be right after a settings toggle, a
+  // restore, or a clock change. So before a number is used it is checked against the book, and if it
+  // is somehow already there the sequence advances until it is free. A skipped number is a gap the
+  // owner can see and explain; a DUPLICATE hits the UNIQUE constraint, rolls the sale back, takes the
+  // counter bump with it, and bricks the till forever. A gap is recoverable. A brick is not.
+  const exists = db.prepare('SELECT 1 FROM sales WHERE invoice_no = ?').pluck()
+  let invoiceNo = formatInvoiceNo({ prefix, padding, includeYear, year, seq })
+  while (exists.get(invoiceNo) != null) {
+    seq += 1
+    invoiceNo = formatInvoiceNo({ prefix, padding, includeYear, year, seq })
+  }
+
   const at = now.toISOString()
+  db.prepare(
+    `INSERT INTO invoice_counters (series, year, next_seq, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (series, year) DO UPDATE SET next_seq = excluded.next_seq, updated_at = excluded.updated_at`
+  ).run(SALE_SERIES, counterYear, seq + 1, at, at)
 
-  if (current == null) {
-    db.prepare(
-      `INSERT INTO invoice_counters (series, year, next_seq, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(SALE_SERIES, counterYear, seq + 1, at, at)
-  } else {
-    db.prepare(
-      'UPDATE invoice_counters SET next_seq = ?, updated_at = ? WHERE series = ? AND year = ?'
-    ).run(seq + 1, at, SALE_SERIES, counterYear)
-  }
-
-  return {
-    invoiceNo: formatInvoiceNo({
-      prefix: setting<string>(db, 'invoice.prefix'),
-      padding: setting<number>(db, 'invoice.padding'),
-      includeYear: setting<boolean>(db, 'invoice.includeYear'),
-      year,
-      seq
-    }),
-    seq,
-    year
-  }
+  return { invoiceNo, seq, year }
 }
 
 // ── Discount approval ────────────────────────────────────────────────────────
@@ -1490,7 +1511,7 @@ function checkDiscountApproval(
 
   if (approver == null || !roleCan(approver.role, 'sale.discount.over_threshold')) {
     throw new AppError(
-      ErrorCode.FORBIDDEN,
+      ErrorCode.NEEDS_APPROVAL,
       `A discount of ${money(db, discount)} is more than a cashier may give on their own. Please ask a supervisor to approve it.`,
       `discount ${discount} (${percentBp}bp of ${priced.listGross}) is over the limits (percent=${limitPercent}bp, amount=${limitAmount}); approver=${approver?.role ?? 'none'}`
     )
@@ -1548,7 +1569,7 @@ function assertMayUseTier(db: DB, actor: User, approver: User | null, tier: Pric
   if (roleAtLeast(actor, required) || (approver != null && roleAtLeast(approver, required))) return
 
   throw new AppError(
-    ErrorCode.FORBIDDEN,
+    ErrorCode.NEEDS_APPROVAL,
     'Selling at wholesale prices needs approval. Please ask a supervisor.',
     `price tier "${tier}" needs role >= ${required}; actor=${actor.role}, approver=${approver?.role ?? 'none'}`
   )

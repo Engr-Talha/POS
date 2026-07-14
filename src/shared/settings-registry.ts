@@ -159,13 +159,20 @@ export const SETTINGS: SettingDef[] = [
     min: 1,
     max: 12
   },
-  { key: 'invoice.includeYear', type: 'boolean', default: true, label: 'Include the year', group: 'invoice' },
+  {
+    key: 'invoice.includeYear',
+    type: 'boolean',
+    default: false,
+    label: 'Show the year in the number',
+    help: 'INV-2026-000123 instead of INV-000123. Turned on automatically when you restart numbering each year, so the numbers stay unique.',
+    group: 'invoice'
+  },
   {
     key: 'invoice.resetYearly',
     type: 'boolean',
-    default: true,
+    default: false,
     label: 'Restart numbering each year',
-    help: 'Numbers are always sequential with no gaps. A cancelled invoice keeps its number — it is never reused.',
+    help: 'Off: numbers run straight through, INV-000001, INV-000002, forever. On: they restart at 1 each January (and the year is shown, so last year’s numbers are never repeated). Either way they are sequential with no gaps, and a cancelled invoice keeps its number.',
     group: 'invoice'
   },
   {

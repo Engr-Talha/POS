@@ -48,6 +48,13 @@ export const ErrorCode = {
   VALIDATION: 'VALIDATION',
   NOT_FOUND: 'NOT_FOUND',
   FORBIDDEN: 'FORBIDDEN',
+  /**
+   * The action is allowed, but only with a supervisor's approval — a discount over the threshold, a
+   * price override, a wholesale tier. Distinct from FORBIDDEN so the till can respond by asking the
+   * supervisor for their PIN and retrying, rather than just refusing. The approval is authenticated
+   * in MAIN by that PIN; the renderer never names the approver.
+   */
+  NEEDS_APPROVAL: 'NEEDS_APPROVAL',
   LICENSE_EXPIRED: 'LICENSE_EXPIRED',
   LICENSE_INVALID: 'LICENSE_INVALID',
   READ_ONLY: 'READ_ONLY',

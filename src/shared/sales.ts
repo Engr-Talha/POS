@@ -523,7 +523,13 @@ export const CompleteSaleInput = z.object({
    * a renderer that simply omits the field must not be able to skip the check. It is recorded in the
    * audit log with the approver's name and role. (CLAUDE.md §4.)
    */
-  approvedByUserId: RowId.nullish(),
+  /**
+   * The SUPERVISOR'S PIN, typed on the approval prompt when a discount, price override or wholesale
+   * tier crosses the threshold. MAIN verifies it and derives the approver FROM it — the renderer
+   * never says who approved. An unverified id would let a cashier self-approve and frame a
+   * supervisor. (CLAUDE.md §4 — the renderer is not a security boundary.)
+   */
+  approverPin: z.string().trim().min(4).max(12).nullish(),
 
   /**
    * The cashier has SEEN the negative-stock warning and chosen to continue. Meaningful only when the

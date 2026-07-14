@@ -10,6 +10,7 @@ import {
   Kbd,
   Loader,
   Menu,
+  PasswordInput,
   Modal,
   Pagination,
   ScrollArea,
@@ -2357,6 +2358,12 @@ function PaymentModal({
   const [error, setError] = useState<string | null>(null)
   const [accepted, setAccepted] = useState(false)
 
+  // The supervisor-approval prompt. Non-null when main has said this sale needs approval; it holds
+  // the reason to show, and the PIN the supervisor types. The PIN never leaves this component except
+  // as the argument to complete() — it is not stored, not logged, not put in the payload state.
+  const [approval, setApproval] = useState<{ message: string } | null>(null)
+  const [approverPin, setApproverPin] = useState('')
+
   const byId = useMemo(() => new Map(methods.map((m) => [m.id, m])), [methods])
   const codeOf = (tender: Tender): string | null =>
     tender.methodLookupId == null ? null : (byId.get(tender.methodLookupId)?.code ?? null)
@@ -2403,7 +2410,7 @@ function PaymentModal({
     shortages.length > 0 && settings.negativeStock === 'warn' && !accepted
   const needsCreditConfirm = overCreditLimit && settings.creditLimit === 'warn' && !accepted
 
-  async function pay(force = false): Promise<void> {
+  async function pay(force = false, approverPin?: string): Promise<void> {
     setBusy(true)
     setError(null)
 
@@ -2416,7 +2423,10 @@ function PaymentModal({
         chequeDate: tender.chequeDate.trim() === '' ? null : tender.chequeDate.trim(),
         walletRef: tender.walletRef.trim() === '' ? null : tender.walletRef.trim()
       })),
-      approvedByUserId: null,
+      // The supervisor's PIN — present only when one has come over to approve an over-threshold
+      // discount, a price override or a wholesale tier. MAIN verifies it and derives WHO approved
+      // from it. We never send a user id: a claimed id is not proof anyone was here. (CLAUDE.md §4)
+      approverPin: approverPin ?? null,
       // The cashier has SEEN the warning and chosen to go ahead. Main flags and audits the sale either
       // way — and refuses outright if the shop's policy is 'block', whatever we send.
       acceptNegativeStock: accepted || force,
@@ -2426,6 +2436,12 @@ function PaymentModal({
     setBusy(false)
 
     if (!result.ok) {
+      // The sale is allowed, but a supervisor has to approve it. Ask for the PIN and retry — don't
+      // just refuse. Without this branch the over-threshold discount could never be completed at all.
+      if (result.error.code === 'NEEDS_APPROVAL') {
+        setApproval({ message: result.error.userMessage })
+        return
+      }
       setError(result.error.userMessage)
       return
     }
@@ -2446,6 +2462,57 @@ function PaymentModal({
 
   return (
     <Modal opened onClose={onClose} title="Payment" centered size="lg">
+      {/* ── SUPERVISOR APPROVAL ──────────────────────────────────────────────
+          Main refused the sale as NEEDS_APPROVAL — an over-threshold discount, a price override, a
+          wholesale tier. A supervisor comes over and enters THEIR PIN. Main verifies it and records
+          who approved. We send the PIN, never a user id: a claimed id is not proof anyone was here. */}
+      <Modal
+        opened={approval != null}
+        onClose={() => {
+          setApproval(null)
+          setApproverPin('')
+        }}
+        title="Supervisor approval needed"
+        centered
+        size="sm"
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            const pin = approverPin
+            setApproval(null)
+            setApproverPin('')
+            void pay(true, pin)
+          }}
+        >
+          <Stack gap="md">
+            <Text size="sm">{approval?.message}</Text>
+            <PasswordInput
+              label="Supervisor PIN"
+              description="A supervisor must enter their own PIN to approve this."
+              value={approverPin}
+              onChange={(event) => setApproverPin(event.currentTarget.value)}
+              data-autofocus
+              autoFocus
+            />
+            <Group justify="flex-end">
+              <Button
+                variant="default"
+                onClick={() => {
+                  setApproval(null)
+                  setApproverPin('')
+                }}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={approverPin.trim().length < 4}>
+                Approve
+              </Button>
+            </Group>
+          </Stack>
+        </form>
+      </Modal>
+
       <form
         onSubmit={(event) => {
           event.preventDefault()

@@ -129,6 +129,33 @@ export function signInWithPin(db: DB, pin: string, now = new Date()): User {
   throw new AppError(ErrorCode.FORBIDDEN, 'That PIN is not recognised.', 'failed PIN sign-in')
 }
 
+/**
+ * VERIFY A PIN, returning the person it belongs to — with NO sign-in and NO audit row of its own.
+ *
+ * This is the honest way to authenticate a SUPERVISOR APPROVAL at the till. The dangerous version is
+ * to let the renderer say "user 2 approved this": the id is an unverified integer, a cashier passes
+ * the owner's id (usually 1), self-approves a Rs 1 television, and the audit log then frames a
+ * supervisor who was never there. The renderer cannot forge a PIN it does not know — so the approver
+ * is whoever the PIN resolves to, established HERE, in main, never claimed by the caller.
+ *
+ * Throws if the PIN matches nobody, so the caller can turn it into "a supervisor's PIN is required".
+ */
+export function verifyPin(db: DB, pin: string): User {
+  const rows = db
+    .prepare('SELECT * FROM users WHERE is_active = 1 AND pin_hash IS NOT NULL')
+    .all() as UserRow[]
+
+  for (const row of rows) {
+    if (row.pin_hash && verifySecret(pin, row.pin_hash)) return toUser(row)
+  }
+
+  throw new AppError(
+    ErrorCode.FORBIDDEN,
+    'That PIN was not recognised. Ask a supervisor to enter their PIN to approve this.',
+    'approval PIN matched no active user'
+  )
+}
+
 // ── The check that actually matters ──────────────────────────────────────────
 
 export function can(user: User, permission: Permission): boolean {

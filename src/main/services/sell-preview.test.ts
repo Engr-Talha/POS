@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { hashSecret } from '../security/password'
 import { makeTestDb, type TestDb } from '../db/testkit'
 import * as sales from './sales'
 import * as stock from './stock'
@@ -45,17 +46,23 @@ let cashier: User
 /** A discount over the threshold needs a supervisor standing at the till. Main enforces it; so be it. */
 let supervisor: User
 
+function pinOf(username: string): string {
+  let hash = 0
+  for (const ch of username) hash = (hash * 31 + ch.charCodeAt(0)) % 900000
+  return String(100000 + hash)
+}
+
 function makeUser(role: User['role'], username: string): User {
   const now = new Date().toISOString()
   const id = Number(
     t.db
       .prepare(
-        `INSERT INTO users (username, full_name, role, password_hash, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, 'x', 1, ?, ?)`
+        `INSERT INTO users (username, full_name, role, password_hash, pin_hash, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, 'x', ?, 1, ?, ?)`
       )
-      .run(username, username, role, now, now).lastInsertRowid
+      .run(username, username, role, hashSecret(pinOf(username)), now, now).lastInsertRowid
   )
-  return { id, username, fullName: username, role, hasPin: false, isActive: true }
+  return { id, username, fullName: username, role, hasPin: true, isActive: true }
 }
 
 function lookupId(listKey: string, code: string): number {
@@ -170,7 +177,7 @@ function expectPreviewMatchesTheSale(
     // A supervisor is standing at the till. Some of these carts discount hard enough to need one, and
     // main is right to insist — the point of this file is the ARITHMETIC, not the approval rules, which
     // sales.test.ts already covers.
-    approvedByUserId: supervisor.id,
+    approverPin: pinOf(supervisor.username),
     acceptNegativeStock: true,
     acceptOverCreditLimit: true
   })

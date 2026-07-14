@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { hashSecret } from '../security/password'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import { openDatabase, closeDatabase } from '../db'
 import * as sales from './sales'
@@ -144,17 +145,28 @@ let cashier: User
 let supervisor: User
 let owner: User
 
+/**
+ * A supervisor approves an over-threshold action by PIN — main derives WHO from the PIN, never from
+ * a claimed id. So every fixture user gets a real PIN, and the tests approve by passing it, exactly
+ * as the till does. pinOf() is the deterministic PIN for a username.
+ */
+function pinOf(username: string): string {
+  let hash = 0
+  for (const ch of username) hash = (hash * 31 + ch.charCodeAt(0)) % 900000
+  return String(100000 + hash) // a stable 6-digit PIN
+}
+
 function makeUser(role: User['role'], username: string, fullName: string): User {
   const now = new Date().toISOString()
   const id = Number(
     t.db
       .prepare(
-        `INSERT INTO users (username, full_name, role, password_hash, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, 'x', 1, ?, ?)`
+        `INSERT INTO users (username, full_name, role, password_hash, pin_hash, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, 'x', ?, 1, ?, ?)`
       )
-      .run(username, fullName, role, now, now).lastInsertRowid
+      .run(username, fullName, role, hashSecret(pinOf(username)), now, now).lastInsertRowid
   )
-  return { id, username, fullName, role, hasPin: false, isActive: true }
+  return { id, username, fullName, role, hasPin: true, isActive: true }
 }
 
 function lookupId(listKey: string, code: string): number {
@@ -580,7 +592,7 @@ describe('the cart discount', () => {
       lines,
       cartDiscount: 10_000, // Rs 100 off the whole cart
       cartDiscountReasonCode: 'regular_customer',
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 60_200 }]
     })
 
@@ -626,7 +638,7 @@ describe('the cart discount', () => {
       lines: [{ productId, qtyM: 10 * ONE_UNIT }], // Rs 1000 net, Rs 1170 gross
       cartDiscount: 11_700, // Rs 117 off — exactly one unit's worth
       cartDiscountReasonCode: 'bulk',
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 105_300 }]
     })
 
@@ -690,7 +702,7 @@ describe('the cart discount', () => {
         sales.complete(t.db, cashier, {
           lines: [{ productId, qtyM: ONE_UNIT }],
           cartDiscount: 999_999,
-          approvedByUserId: supervisor.id,
+          approverPin: pinOf(supervisor.username),
           cartDiscountReasonCode: 'bulk',
           payments: [{ methodLookupId: cash(), amount: 100 }]
         }),
@@ -733,7 +745,7 @@ describe('a discount above the threshold', () => {
       lines: [{ productId, qtyM: ONE_UNIT }],
       cartDiscount: 5_000,
       cartDiscountReasonCode: 'regular_customer',
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 6_700 }]
     })
 
@@ -763,7 +775,7 @@ describe('a discount above the threshold', () => {
           lines: [{ productId, qtyM: ONE_UNIT }],
           cartDiscount: 5_000,
           cartDiscountReasonCode: 'bulk',
-          approvedByUserId: other.id, // a cashier cannot approve a cashier
+          approverPin: pinOf(other.username), // a cashier cannot approve a cashier
           payments: [{ methodLookupId: cash(), amount: 6_700 }]
         }),
       /ask a supervisor/
@@ -782,7 +794,7 @@ describe('a discount above the threshold', () => {
           lines: [{ productId, qtyM: ONE_UNIT }],
           cartDiscount: 5_000,
           cartDiscountReasonCode: 'because_i_felt_like_it',
-          approvedByUserId: supervisor.id,
+          approverPin: pinOf(supervisor.username),
           payments: [{ methodLookupId: cash(), amount: 6_700 }]
         }),
       /choose a reason for this discount from the list/
@@ -1525,7 +1537,7 @@ describe('reprinting a receipt', () => {
       lines: [{ productId, qtyM: 7 * ONE_UNIT }],
       cartDiscount: 3_333, // an awkward number, so any drift shows up
       cartDiscountReasonCode: 'damaged_packaging',
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 78_567 }]
     })
 
@@ -1571,7 +1583,7 @@ describe('reprinting a receipt', () => {
       ],
       cartDiscount: 10_000,
       cartDiscountReasonCode: 'bulk',
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 60_200 }]
     })
 
@@ -1655,7 +1667,7 @@ describe('price tiers and overrides', () => {
     // With a supervisor at the till, it goes through — and it is stamped and logged.
     const { sale } = sales.complete(t.db, cashier, {
       lines: [{ productId, qtyM: ONE_UNIT, priceOverride: 5_000 }],
-      approvedByUserId: supervisor.id,
+      approverPin: pinOf(supervisor.username),
       payments: [{ methodLookupId: cash(), amount: 5_000 }]
     })
 
