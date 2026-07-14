@@ -17,15 +17,26 @@ npm test             # runs `npm rebuild better-sqlite3 --build-from-source` fir
 ```
 
 **The better-sqlite3 ABI trap (#10).** electron-builder rebuilds better-sqlite3 against Electron's ABI,
-which then breaks vitest (Node ABI). The `test` script rebuilds it from source first. If you see
+which then breaks vitest (Node ABI). The `test` script rebuilds it for Node first. If you see
 `NODE_MODULE_VERSION` / "was compiled against a different Node.js version":
 
 ```bash
-npm rebuild better-sqlite3 --build-from-source   # to run tests
-npm run build:mac                                # rebuilds it for Electron again
+npm rebuild better-sqlite3   # Node ABI — to run tests
+npm run build:mac            # rebuilds it for Electron again
 ```
 
 They fight each other. That is expected. Rebuild for whichever you're about to run.
+
+**Never add `--build-from-source`.** The project path has SPACES in it ("POS Insha Desktop") and
+node-gyp emits a Makefile that chokes on them — the giveaway is `/bin/sh: Insha: command not found`.
+Plain `npm rebuild` uses prebuild-install, which downloads the right Node-ABI binary and never runs
+the compiler at all. If a real source build is ever needed, move the project to a path with no spaces
+first.
+
+If a rebuild leaves a broken half-state, clear it and try again:
+```bash
+rm -rf node_modules/better-sqlite3/build && npm rebuild better-sqlite3
+```
 
 ## The packaged build — this is the one that matters
 

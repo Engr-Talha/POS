@@ -52,7 +52,19 @@ const api: PosApi = {
 
   lookups: {
     list: (input) => ipcRenderer.invoke(IPC.lookupsList, input),
-    add: (input) => ipcRenderer.invoke(IPC.lookupsAdd, input)
+    add: (input) => ipcRenderer.invoke(IPC.lookupsAdd, input),
+    update: (input) => ipcRenderer.invoke(IPC.lookupsUpdate, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.lookupsDeactivate, input)
+  },
+
+  settings: {
+    getAll: () => ipcRenderer.invoke(IPC.settingsGetAll),
+    set: (input) => ipcRenderer.invoke(IPC.settingsSet, input)
+  },
+
+  ledger: {
+    trialBalance: () => ipcRenderer.invoke(IPC.ledgerTrialBalance),
+    accounts: () => ipcRenderer.invoke(IPC.accountsList)
   },
 
   audit: {

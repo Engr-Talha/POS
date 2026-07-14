@@ -1,7 +1,7 @@
 {
   "name": "pos-insha-desktop",
   "productName": "Insha POS",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Offline Point of Sale",
   "main": "./out/main/index.js",
   "author": "Insha",
@@ -16,7 +16,7 @@
     "make:icon": "electron scripts/make-icon.cjs",
     "make:keypair": "tsx --tsconfig tsconfig.node.json tools/make-keypair.ts",
     "keygen": "tsx --tsconfig tsconfig.node.json tools/keygen.ts",
-    "rebuild:node": "npm rebuild better-sqlite3 --build-from-source",
+    "rebuild:node": "npm rebuild better-sqlite3",
     "rebuild:electron": "electron-builder install-app-deps",
     "test": "npm run rebuild:node && vitest run",
     "test:watch": "vitest",

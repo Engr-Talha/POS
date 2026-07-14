@@ -75,12 +75,12 @@ describe('migrations', () => {
     const t = makeTestDb({ migrate: false })
 
     const first = runMigrations(t.db)
-    expect(first.applied).toEqual([1])
+    expect(first.applied).toEqual([1, 2])
 
     // Running again applies nothing — the app runs this on EVERY launch.
     const second = runMigrations(t.db)
     expect(second.applied).toEqual([])
-    expect(second.alreadyAt).toBe(1)
+    expect(second.alreadyAt).toBe(2)
 
     t.cleanup()
   })

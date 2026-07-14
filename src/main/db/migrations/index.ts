@@ -19,9 +19,10 @@ export type Migration = {
 }
 
 import { migration0001 } from './0001_platform'
+import { migration0002 } from './0002_ledger'
 
 /** Applied in ascending version order. Never renumber, never reorder, never edit a shipped one. */
-export const MIGRATIONS: Migration[] = [migration0001]
+export const MIGRATIONS: Migration[] = [migration0001, migration0002]
 
 export function runMigrations(db: DB): { applied: number[]; alreadyAt: number } {
   db.exec(`

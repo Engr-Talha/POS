@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
   ActionIcon,
-  Alert,
   Badge,
   Button,
   Card,
@@ -12,6 +11,7 @@ import {
   Table,
   Text,
   Title,
+  UnstyledButton,
   useComputedColorScheme,
   useMantineColorScheme
 } from '@mantine/core'
@@ -26,17 +26,32 @@ import {
   ShieldAlert,
   Clock,
   ScrollText,
+  LayoutDashboard,
   ListChecks,
+  Settings as SettingsIcon,
+  Scale,
   CircleCheck
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
-import type { AuditEntry, Lookup } from '@shared/types'
+import type { AuditEntry } from '@shared/types'
 import { ROLE_LABEL } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
+import { Books } from './sections/Books'
+import { Lists } from './sections/Lists'
+import { SettingsSection } from './sections/SettingsSection'
+
+type Section = 'overview' | 'books' | 'lists' | 'settings'
+
+const NAV: Array<{ key: Section; label: string; icon: typeof Store }> = [
+  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'books', label: 'Books', icon: Scale },
+  { key: 'lists', label: 'Manage lists', icon: ListChecks },
+  { key: 'settings', label: 'Settings', icon: SettingsIcon }
+]
 
 /**
  * PLAIN FLEX LAYOUT — NOT Mantine `AppShell`, which rendered a BLANK SCREEN in the packaged build
- * while working perfectly in dev (trap #9). A header div and a content div cannot break.
+ * while working perfectly in dev (trap #9). A header div, a nav div and a content div cannot break.
  */
 export function Home({
   state,
@@ -48,32 +63,23 @@ export function Home({
   const { setColorScheme } = useMantineColorScheme()
   const dark = useComputedColorScheme('light') === 'dark'
 
+  const [section, setSection] = useState<Section>('overview')
   const [version, setVersion] = useState<string | null>(null)
-  const [audit, setAudit] = useState<AuditEntry[] | null>(null)
-  const [paymentMethods, setPaymentMethods] = useState<Lookup[] | null>(null)
-  const [backingUp, setBackingUp] = useState(false)
+  const [currencySymbol, setCurrencySymbol] = useState('Rs')
 
   const user = state.session?.user
 
-  // Runs once. Nothing in here feeds back into its own dependencies (trap #19).
   useEffect(() => {
     let cancelled = false
-
     void (async () => {
-      const [info, auditResult, methods] = await Promise.all([
+      const [info, settings] = await Promise.all([
         window.pos.system.getInfo(),
-        window.pos.audit.list({ page: 1, pageSize: 10 }),
-        window.pos.lookups.list({ listKey: 'payment_method' })
+        window.pos.settings.getAll()
       ])
       if (cancelled) return
-
       if (info.ok) setVersion(info.data.appVersion)
-      // A Cashier is not allowed to read the audit log. That is a refusal, not an error — show an
-      // empty list rather than shouting at someone for a button they were shown.
-      setAudit(auditResult.ok ? auditResult.data.rows : [])
-      setPaymentMethods(methods.ok ? methods.data : [])
+      if (settings.ok) setCurrencySymbol((settings.data['currency.symbol'] as string) ?? 'Rs')
     })()
-
     return () => {
       cancelled = true
     }
@@ -84,39 +90,9 @@ export function Home({
     if (result.ok) onStateChange(result.data)
   }
 
-  async function runBackup(): Promise<void> {
-    setBackingUp(true)
-    const result = await window.pos.backup.run()
-    setBackingUp(false)
-
-    if (result.ok) {
-      notifications.show({
-        color: 'teal',
-        icon: <CircleCheck size={18} />,
-        title: 'Backup saved and verified',
-        message: result.data.path,
-        autoClose: 6000
-      })
-    } else {
-      notifications.show({
-        color: 'red',
-        title: 'Backup failed',
-        message: result.error.userMessage // never a stack trace
-      })
-    }
-  }
-
-  async function chooseFolder(): Promise<void> {
-    const result = await window.pos.backup.chooseFolder()
-    if (result.ok && result.data) {
-      notifications.show({ title: 'Backup folder set', message: result.data })
-    } else if (!result.ok) {
-      notifications.show({ color: 'red', title: 'Could not set folder', message: result.error.userMessage })
-    }
-  }
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header
         style={{
           display: 'flex',
@@ -133,7 +109,6 @@ export function Home({
           Insha POS
         </Text>
 
-        {/* The version is ALWAYS visible, so we can tell which build a shop is on without asking. */}
         {version ? (
           <Badge variant="light" size="sm">
             v{version}
@@ -178,129 +153,205 @@ export function Home({
         )}
       </header>
 
-      <main style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
-        <Stack gap="lg" maw={860}>
-          <LicenseBanner license={state.license} />
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        {/* ── Nav ──────────────────────────────────────────────────────────── */}
+        <nav
+          style={{
+            width: 210,
+            flexShrink: 0,
+            padding: 12,
+            borderRight: '1px solid var(--mantine-color-default-border)',
+            overflowY: 'auto'
+          }}
+        >
+          <Stack gap={4}>
+            {NAV.map((item) => {
+              const Icon = item.icon
+              const active = section === item.key
+              return (
+                <UnstyledButton
+                  key={item.key}
+                  onClick={() => setSection(item.key)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    fontWeight: active ? 600 : 400,
+                    background: active ? 'var(--mantine-color-default-hover)' : 'transparent'
+                  }}
+                >
+                  <Icon size={17} />
+                  <Text size="sm">{item.label}</Text>
+                </UnstyledButton>
+              )
+            })}
+          </Stack>
+        </nav>
 
-          <div>
-            <Title order={2}>Phase 1 — Foundation</Title>
-            <Text c="dimmed" size="sm" mt={4}>
-              Database, migrations, backup, users and roles, audit log, and the licence. The sell
-              screen comes next.
-            </Text>
-          </div>
-
-          {/* ── Backup ─────────────────────────────────────────────────────── */}
-          <Card withBorder padding="lg">
-            <Group gap="sm" mb="xs">
-              <Save size={18} />
-              <Text fw={600}>Backup</Text>
-            </Group>
-
-            <Text size="sm" c="dimmed" mb="md">
-              One click. The backup is written and then <strong>opened and verified</strong> — an
-              unchecked backup is a rumour. Save it to a USB drive: a backup on the same failing disk
-              is not a backup.
-              {state.readOnly && ' Backups keep working even though the licence has expired.'}
-            </Text>
-
-            <Group>
-              <Button leftSection={<Save size={16} />} loading={backingUp} onClick={() => void runBackup()}>
-                Back up now
-              </Button>
-              <Button
-                variant="default"
-                leftSection={<FolderOpen size={16} />}
-                onClick={() => void chooseFolder()}
-              >
-                Choose folder
-              </Button>
-            </Group>
-          </Card>
-
-          {/* ── Lookups ────────────────────────────────────────────────────── */}
-          <Card withBorder padding="lg">
-            <Group gap="sm" mb="xs">
-              <ListChecks size={18} />
-              <Text fw={600}>Payment methods</Text>
-            </Group>
-
-            <Text size="sm" c="dimmed" mb="md">
-              Every dropdown in this app is data-driven — nothing is hardcoded. The shop can add its
-              own, and rename the built-in ones (&ldquo;Cash&rdquo; → &ldquo;Naqad&rdquo;).
-            </Text>
-
-            {!paymentMethods ? (
-              <Skeleton height={32} />
-            ) : (
-              <Group gap="xs">
-                {paymentMethods.map((method) => (
-                  <Badge key={method.id} variant="light" size="lg">
-                    {method.label}
-                  </Badge>
-                ))}
-              </Group>
-            )}
-          </Card>
-
-          {/* ── Audit log ──────────────────────────────────────────────────── */}
-          <Card withBorder padding="lg">
-            <Group gap="sm" mb="xs">
-              <ScrollText size={18} />
-              <Text fw={600}>Audit log</Text>
-            </Group>
-
-            <Text size="sm" c="dimmed" mb="md">
-              Who did what, and when — with the role they held <em>at the time</em>. Append-only.
-            </Text>
-
-            {!audit ? (
-              <Stack gap={8}>
-                <Skeleton height={14} />
-                <Skeleton height={14} width="80%" />
-              </Stack>
-            ) : audit.length === 0 ? (
-              <Text size="sm" c="dimmed">
-                Nothing recorded yet.
-              </Text>
-            ) : (
-              <Table striped withTableBorder>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>When</Table.Th>
-                    <Table.Th>Who</Table.Th>
-                    <Table.Th>Role</Table.Th>
-                    <Table.Th>Action</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {audit.map((entry) => (
-                    <Table.Tr key={entry.id}>
-                      <Table.Td>
-                        <Group gap={6} wrap="nowrap">
-                          <Clock size={13} />
-                          <Text size="sm">{new Date(entry.at).toLocaleString()}</Text>
-                        </Group>
-                      </Table.Td>
-                      <Table.Td>{entry.userName}</Table.Td>
-                      <Table.Td>
-                        <Badge size="sm" variant="light">
-                          {entry.userRole}
-                        </Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text ff="monospace" size="sm">
-                          {entry.action}
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Card>
-        </Stack>
-      </main>
+        {/* ── Content ──────────────────────────────────────────────────────── */}
+        <main style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+          {section === 'overview' && (
+            <Overview state={state} onSignOutNeeded={onStateChange} />
+          )}
+          {section === 'books' && <Books currencySymbol={currencySymbol} />}
+          {section === 'lists' && <Lists readOnly={state.readOnly} />}
+          {section === 'settings' && <SettingsSection readOnly={state.readOnly} />}
+        </main>
+      </div>
     </div>
+  )
+}
+
+function Overview({
+  state
+}: {
+  state: AppState
+  onSignOutNeeded: (state: AppState) => void
+}): React.JSX.Element {
+  const [audit, setAudit] = useState<AuditEntry[] | null>(null)
+  const [backingUp, setBackingUp] = useState(false)
+
+  async function loadAudit(): Promise<void> {
+    const result = await window.pos.audit.list({ page: 1, pageSize: 10 })
+    // A Cashier may not read the audit log. That is a refusal, not an error — show an empty list
+    // rather than shouting at someone about a screen they were shown.
+    setAudit(result.ok ? result.data.rows : [])
+  }
+
+  useEffect(() => {
+    void loadAudit()
+  }, [])
+
+  async function runBackup(): Promise<void> {
+    setBackingUp(true)
+    const result = await window.pos.backup.run()
+    setBackingUp(false)
+
+    if (result.ok) {
+      notifications.show({
+        color: 'teal',
+        icon: <CircleCheck size={18} />,
+        title: 'Backup saved and verified',
+        message: result.data.path,
+        autoClose: 6000
+      })
+      void loadAudit()
+    } else {
+      notifications.show({
+        color: 'red',
+        title: 'Backup failed',
+        message: result.error.userMessage
+      })
+    }
+  }
+
+  async function chooseFolder(): Promise<void> {
+    const result = await window.pos.backup.chooseFolder()
+    if (result.ok && result.data) {
+      notifications.show({ title: 'Backup folder set', message: result.data })
+    }
+  }
+
+  return (
+    <Stack gap="lg" maw={860}>
+      <LicenseBanner license={state.license} />
+
+      <div>
+        <Title order={2}>Overview</Title>
+        <Text c="dimmed" size="sm" mt={4}>
+          The foundation is in: database, backup, users and roles, audit log, licence, and the
+          double-entry ledger. Products and the sell screen come next.
+        </Text>
+      </div>
+
+      <Card withBorder padding="lg">
+        <Group gap="sm" mb="xs">
+          <Save size={18} />
+          <Text fw={600}>Backup</Text>
+        </Group>
+
+        <Text size="sm" c="dimmed" mb="md">
+          One click. The backup is written and then <strong>opened and verified</strong> — an
+          unchecked backup is a rumour. Save it to a USB drive: a backup on the same failing disk is
+          not a backup.
+          {state.readOnly && ' Backups keep working even though the licence has expired.'}
+        </Text>
+
+        <Group>
+          <Button
+            leftSection={<Save size={16} />}
+            loading={backingUp}
+            onClick={() => void runBackup()}
+          >
+            Back up now
+          </Button>
+          <Button
+            variant="default"
+            leftSection={<FolderOpen size={16} />}
+            onClick={() => void chooseFolder()}
+          >
+            Choose folder
+          </Button>
+        </Group>
+      </Card>
+
+      <Card withBorder padding="lg">
+        <Group gap="sm" mb="xs">
+          <ScrollText size={18} />
+          <Text fw={600}>Audit log</Text>
+        </Group>
+
+        <Text size="sm" c="dimmed" mb="md">
+          Who did what, and when — with the role they held <em>at the time</em>. Append-only.
+        </Text>
+
+        {!audit ? (
+          <Stack gap={8}>
+            <Skeleton height={14} />
+            <Skeleton height={14} width="80%" />
+          </Stack>
+        ) : audit.length === 0 ? (
+          <Text size="sm" c="dimmed">
+            Nothing recorded yet.
+          </Text>
+        ) : (
+          <Table striped withTableBorder>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>When</Table.Th>
+                <Table.Th>Who</Table.Th>
+                <Table.Th>Role</Table.Th>
+                <Table.Th>Action</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {audit.map((entry) => (
+                <Table.Tr key={entry.id}>
+                  <Table.Td>
+                    <Group gap={6} wrap="nowrap">
+                      <Clock size={13} />
+                      <Text size="sm">{new Date(entry.at).toLocaleString()}</Text>
+                    </Group>
+                  </Table.Td>
+                  <Table.Td>{entry.userName}</Table.Td>
+                  <Table.Td>
+                    <Badge size="sm" variant="light">
+                      {entry.userRole}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    <Text ff="monospace" size="sm">
+                      {entry.action}
+                    </Text>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        )}
+      </Card>
+    </Stack>
   )
 }

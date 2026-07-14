@@ -70,6 +70,11 @@ export const DEFAULT_SETTINGS: Record<string, unknown> = {
   'invoice.includeYear': true,
   'invoice.resetYearly': true,
 
+  // Fiscal year — configurable, so one build serves shops in any country.
+  // Default 7 = 1 July, which is Pakistan's tax year. Drives the P&L, the year-end period lock,
+  // and the yearly invoice-number reset.
+  'fiscal.yearStartMonth': 7,
+
   'backup.lastRunAt': null,
   'backup.directory': null,
   'backup.promptDaily': true

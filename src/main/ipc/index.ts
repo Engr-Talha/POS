@@ -9,6 +9,9 @@ import {
   RestoreInput,
   LookupsListInput,
   LookupsAddInput,
+  LookupsUpdateInput,
+  LookupsDeactivateInput,
+  SettingsSetInput,
   AuditListInput,
   type SystemInfo
 } from '@shared/ipc'
@@ -26,6 +29,7 @@ import * as backupService from '../services/backup'
 import * as lookupsService from '../services/lookups'
 import * as auditService from '../services/audit'
 import * as settingsService from '../services/settings'
+import * as ledgerService from '../services/ledger'
 import log from '../logger'
 
 /**
@@ -225,6 +229,76 @@ export function registerIpcHandlers(): void {
     })
 
     return added
+  })
+
+  handle(IPC.lookupsUpdate, LookupsUpdateInput, (input) => {
+    const user = session.requirePermissionOf('lookups.manage')
+    assertWritable()
+
+    const { id, ...changes } = input
+    const updated = lookupsService.update(getDb(), id, changes)
+
+    auditService.record(getDb(), user, {
+      action: 'lookup.update',
+      entity: 'lookup',
+      entityId: id,
+      after: updated
+    })
+
+    return updated
+  })
+
+  handle(IPC.lookupsDeactivate, LookupsDeactivateInput, (input) => {
+    const user = session.requirePermissionOf('lookups.manage')
+    assertWritable()
+
+    lookupsService.deactivate(getDb(), input.id)
+    auditService.record(getDb(), user, {
+      action: 'lookup.deactivate',
+      entity: 'lookup',
+      entityId: input.id
+    })
+
+    return true
+  })
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  handle(IPC.settingsGetAll, null, () => settingsService.getAll(getDb()))
+
+  handle(IPC.settingsSet, SettingsSetInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+
+    const before = settingsService.get(getDb(), input.key, null)
+    settingsService.set(getDb(), input.key, input.value)
+
+    // Settings changes are audited: currency, tax rate and invoice numbering all move money.
+    auditService.record(getDb(), user, {
+      action: 'settings.change',
+      entity: 'setting',
+      entityId: input.key,
+      before,
+      after: input.value
+    })
+
+    return settingsService.getAll(getDb())
+  })
+
+  // ── Ledger ────────────────────────────────────────────────────────────────
+  // Reading the books is a READ. It keeps working on an expired licence, deliberately.
+  handle(IPC.ledgerTrialBalance, null, () => {
+    session.requirePermissionOf('report.view')
+    return ledgerService.trialBalance(getDb())
+  })
+
+  handle(IPC.accountsList, null, () => {
+    session.requirePermissionOf('report.view')
+    return getDb()
+      .prepare(
+        `SELECT id, code, name, type, is_contra AS isContra, is_system AS isSystem, is_active AS isActive
+         FROM accounts ORDER BY code`
+      )
+      .all()
   })
 
   // ── Audit log ─────────────────────────────────────────────────────────────

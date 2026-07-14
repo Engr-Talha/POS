@@ -156,7 +156,12 @@ tools/           maintainer-only scripts (keygen). NOT shipped in the installer.
 9. **Always test the PACKAGED build, not just dev.** Things work in dev and break packaged. Mantine
    `AppShell` rendered a blank screen packaged — we use a plain flex layout because of it.
 10. **better-sqlite3 ABI:** electron-builder rebuilds it for Electron, which then breaks vitest. Run
-    `npm rebuild better-sqlite3 --build-from-source` before tests.
+    `npm rebuild better-sqlite3` before tests (this is baked into the `test` script).
+10b. **Do NOT add `--build-from-source` to that rebuild.** The project path contains SPACES
+    ("POS Insha Desktop"), and node-gyp generates a Makefile that breaks on them —
+    `/bin/sh: Insha: command not found`. Plain `npm rebuild` uses prebuild-install, which downloads
+    the correct Node-ABI binary and never invokes the compiler. It is also faster. (If we ever need
+    a genuine source build, the project must first be moved to a path with no spaces.)
 11. Large HTML (e.g. embedded fonts) breaks `loadURL('data:...')`. Write a temp file and `loadFile`.
 
 ### Printing / PDF

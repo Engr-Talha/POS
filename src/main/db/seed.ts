@@ -1,5 +1,6 @@
 import type { DB } from './index'
 import { DEFAULT_SETTINGS } from '../services/settings'
+import { seedChartOfAccounts } from './chart-of-accounts'
 
 /**
  * SEED — the lists a shop needs on day one.
@@ -126,4 +127,7 @@ export function seed(db: DB, now = new Date()): void {
   })
 
   run()
+
+  // The ledger must exist before the first sale can be rung up — every sale posts into it.
+  seedChartOfAccounts(db, now)
 }

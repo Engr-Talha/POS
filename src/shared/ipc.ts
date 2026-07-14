@@ -29,6 +29,14 @@ export const IPC = {
 
   lookupsList: 'lookups:list',
   lookupsAdd: 'lookups:add',
+  lookupsUpdate: 'lookups:update',
+  lookupsDeactivate: 'lookups:deactivate',
+
+  settingsGetAll: 'settings:getAll',
+  settingsSet: 'settings:set',
+
+  ledgerTrialBalance: 'ledger:trialBalance',
+  accountsList: 'accounts:list',
 
   auditList: 'audit:list'
 } as const
@@ -99,6 +107,24 @@ export const LookupsAddInput = z.object({
   label: z.string().trim().min(1, 'Please enter a name.')
 })
 
+export const LookupsUpdateInput = z.object({
+  id: z.number().int().positive(),
+  // Only the fields the form actually edits. We NEVER post the whole object back — that is how the
+  // saved logo and signature got wiped (trap #18). `.nullish()` for anything nullable.
+  label: z.string().trim().min(1).optional(),
+  sortOrder: z.number().int().optional(),
+  isActive: z.boolean().optional()
+})
+
+export const LookupsDeactivateInput = z.object({
+  id: z.number().int().positive()
+})
+
+export const SettingsSetInput = z.object({
+  key: z.string().min(1),
+  value: z.unknown()
+})
+
 export const AuditListInput = z.object({
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().max(200).optional(),
@@ -112,4 +138,7 @@ export type PinInput = z.infer<typeof PinInput>
 export type RestoreInput = z.infer<typeof RestoreInput>
 export type LookupsListInput = z.infer<typeof LookupsListInput>
 export type LookupsAddInput = z.infer<typeof LookupsAddInput>
+export type LookupsUpdateInput = z.infer<typeof LookupsUpdateInput>
+export type LookupsDeactivateInput = z.infer<typeof LookupsDeactivateInput>
+export type SettingsSetInput = z.infer<typeof SettingsSetInput>
 export type AuditListInput = z.infer<typeof AuditListInput>

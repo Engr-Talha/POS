@@ -10,9 +10,13 @@ import type {
   RestoreInput,
   LookupsListInput,
   LookupsAddInput,
+  LookupsUpdateInput,
+  LookupsDeactivateInput,
+  SettingsSetInput,
   AuditListInput
 } from './ipc'
 import type { AuditEntry, BackupResult, Lookup } from './types'
+import type { Account, TrialBalance } from './accounting'
 import type { AppState } from './app-state'
 
 /**
@@ -63,6 +67,19 @@ export interface PosApi {
   lookups: {
     list: (input: LookupsListInput) => Promise<Result<Lookup[]>>
     add: (input: LookupsAddInput) => Promise<Result<Lookup>>
+    update: (input: LookupsUpdateInput) => Promise<Result<Lookup>>
+    deactivate: (input: LookupsDeactivateInput) => Promise<Result<boolean>>
+  }
+
+  settings: {
+    getAll: () => Promise<Result<Record<string, unknown>>>
+    set: (input: SettingsSetInput) => Promise<Result<Record<string, unknown>>>
+  }
+
+  ledger: {
+    /** Reading the books is a READ — it keeps working on an expired licence, deliberately. */
+    trialBalance: () => Promise<Result<TrialBalance>>
+    accounts: () => Promise<Result<Account[]>>
   }
 
   audit: {
