@@ -276,14 +276,32 @@ describe('the upgrade path — a shop at 0006 (Phase 4) installs SELLING', () =>
         .run(uomId, PRICE_RS_100, now, now).lastInsertRowid
     )
 
-    // Through the REAL service — so the movement carries its frozen value_minor and the books balance,
-    // which is precisely the state a live 0006 database is in.
-    stock.adjust(t.db, actor, {
-      productId,
-      type: 'opening',
-      qtyM: 10 * ONE_UNIT,
-      unitCost: COST_RS_60,
-      reasonCode: 'stock_take'
+    // Seeded with RAW SQL, not stock.adjust — deliberately. A real 0006 shop wrote its audit rows
+    // with the v0.5 code, which had never heard of audit_log.approved_by_role (that column arrives in
+    // 0008). Calling today's stock.adjust here would try to write that column into a schema that does
+    // not have it yet — a state no real shop was ever in. So we lay down the exact ROWS a 0006 shop
+    // has (a valued movement, the averaged cost, a balanced opening journal) and touch no audit.
+    const valueMinor = stock.movementValueMinor(10 * ONE_UNIT, COST_RS_60)
+
+    t.db
+      .prepare(
+        `INSERT INTO stock_movements
+           (at, type, product_id, qty_m, unit_cost, value_minor, reason_code, user_id, created_at)
+         VALUES (?, 'opening', ?, ?, ?, ?, 'stock_take', ?, ?)`
+      )
+      .run(now, productId, 10 * ONE_UNIT, COST_RS_60, valueMinor, actor.id, now)
+
+    t.db.prepare('UPDATE products SET cost_price = ? WHERE id = ?').run(COST_RS_60, productId)
+
+    ledger.post(t.db, {
+      refType: 'opening',
+      refId: productId,
+      memo: 'Opening stock',
+      userId: actor.id,
+      lines: [
+        { account: ACC.INVENTORY, debit: valueMinor },
+        { account: ACC.OPENING_BALANCE_EQUITY, credit: valueMinor }
+      ]
     })
 
     return productId
@@ -309,10 +327,14 @@ describe('the upgrade path — a shop at 0006 (Phase 4) installs SELLING', () =>
     expect(t.db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get()).toBe(6)
   })
 
-  it('applies ONLY 0007 — the six shipped migrations are not re-run against live data', () => {
+  it('applies ONLY the migrations after 0006 — the six shipped ones are not re-run against live data', () => {
+    // Derived from the migration list, not hardcoded, so adding a future migration cannot silently
+    // make this assertion wrong: a shop at 0006 runs exactly the ones numbered above 6.
+    const expected = MIGRATIONS.map((m) => m.version).filter((v) => v > 6)
+
     const result = runMigrations(t.db)
 
-    expect(result.applied).toEqual([7])
+    expect(result.applied).toEqual(expected)
     expect(result.alreadyAt).toBe(LATEST_VERSION)
   })
 

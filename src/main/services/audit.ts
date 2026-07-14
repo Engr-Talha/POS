@@ -31,10 +31,10 @@ export function record(db: DB, actor: User, input: AuditInput, now = new Date())
   db.prepare(
     `INSERT INTO audit_log
        (at, user_id, user_name, user_role, action, entity, entity_id,
-        reason_code, reason_text, before_json, after_json, approved_by_user_id, approved_by_name)
+        reason_code, reason_text, before_json, after_json, approved_by_user_id, approved_by_name, approved_by_role)
      VALUES
        (@at, @userId, @userName, @userRole, @action, @entity, @entityId,
-        @reasonCode, @reasonText, @beforeJson, @afterJson, @approvedById, @approvedByName)`
+        @reasonCode, @reasonText, @beforeJson, @afterJson, @approvedById, @approvedByName, @approvedByRole)`
   ).run({
     at: now.toISOString(),
     userId: actor.id,
@@ -48,7 +48,10 @@ export function record(db: DB, actor: User, input: AuditInput, now = new Date())
     beforeJson: input.before === undefined ? null : JSON.stringify(input.before),
     afterJson: input.after === undefined ? null : JSON.stringify(input.after),
     approvedById: input.approvedBy?.id ?? null,
-    approvedByName: input.approvedBy?.fullName ?? null
+    approvedByName: input.approvedBy?.fullName ?? null,
+    // The approver's ROLE, copied in at the time — like the actor's. A supervisor demoted next month
+    // must not have last month's approvals read as a cashier's. (CLAUDE.md §4)
+    approvedByRole: input.approvedBy?.role ?? null
   })
 }
 
@@ -89,7 +92,7 @@ export function list(
   const rows = db
     .prepare(
       `SELECT id, at, user_id, user_name, user_role, action, entity, entity_id,
-              reason_code, reason_text, approved_by_name
+              reason_code, reason_text, approved_by_name, approved_by_role
        FROM audit_log ${whereSql}
        ORDER BY at DESC, id DESC
        LIMIT @limit OFFSET @offset`
@@ -113,7 +116,8 @@ export function list(
       entityId: (row['entity_id'] as string | null) ?? null,
       reasonCode: (row['reason_code'] as string | null) ?? null,
       reasonText: (row['reason_text'] as string | null) ?? null,
-      approvedByName: (row['approved_by_name'] as string | null) ?? null
+      approvedByName: (row['approved_by_name'] as string | null) ?? null,
+      approvedByRole: (row['approved_by_role'] as string | null) ?? null
     }))
   }
 }

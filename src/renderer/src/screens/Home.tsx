@@ -228,8 +228,22 @@ export function Home({
               : { flex: 1, overflowY: 'auto', padding: 24 }
           }
         >
-          {section === 'sell' && user && (
-            <Sell readOnly={state.readOnly} userRole={user.role} />
+          {/* Sell stays MOUNTED for the whole session, and is only HIDDEN when another screen is
+              showing. A customer asks "how much is the 5kg bag?", the cashier clicks Products to
+              check, comes back — and the half-built cart, the selected customer and the discounts are
+              all still there. Unmounting it (the old `section === 'sell' && …`) threw the cart away
+              the moment he looked at anything else. */}
+          {user && (
+            <div
+              style={{
+                display: section === 'sell' ? 'flex' : 'none',
+                flex: 1,
+                minHeight: 0,
+                overflow: 'hidden'
+              }}
+            >
+              <Sell readOnly={state.readOnly} userRole={user.role} />
+            </div>
           )}
           {section === 'overview' && (
             <Overview state={state} onSignOutNeeded={onStateChange} />

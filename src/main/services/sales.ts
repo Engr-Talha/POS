@@ -1150,6 +1150,12 @@ export function toCartLines(sale: SaleDetail): SaleLineInput[] {
       packId: line.packId,
       qtyM: line.qtyM,
       lineDiscount: line.lineDiscount,
+      // Carry the override back. A held cart or a quote froze its unit_price; if we drop it, resuming
+      // re-prices from the catalogue and the customer is charged the FULL price the screen never
+      // showed. complete() will re-run the approval check on the resumed override — which is right: a
+      // cashier picking up a supervisor's parked cart must get it approved again, not have the till
+      // quietly charge a different number.
+      ...(line.priceOverrideByUserId != null ? { priceOverride: line.unitPrice } : {}),
       ...(line.serials.length > 0 ? { serials: line.serials } : {})
     }
   })
@@ -2061,17 +2067,20 @@ function insertLines(db: DB, saleId: number, priced: PricedCart, now: Date): voi
     `INSERT INTO sale_lines
        (sale_id, product_id, name_snapshot, name_other_lang, batch_id, pack_id, qty_m, uom,
         unit_price, line_discount, net, tax_rate_bp, tax_amount, gross, tax_mode, unit_cost,
-        is_open_item, price_override_by, serials_json, created_at)
+        is_open_item, price_override_by, serials_json, priced_qty_m, created_at)
      VALUES
        (@saleId, @productId, @nameSnapshot, @nameOtherLang, @batchId, @packId, @qtyM, @uom,
         @unitPrice, @lineDiscount, @net, @taxRateBp, @taxAmount, @gross, @taxMode, @unitCost,
-        @isOpenItem, @priceOverrideBy, @serialsJson, @createdAt)`
+        @isOpenItem, @priceOverrideBy, @serialsJson, @pricedQtyM, @createdAt)`
   )
 
   for (const line of priced.lines) {
     insert.run({
       saleId,
       productId: line.productId,
+      // FROZEN: the quantity the line was PRICED on (1 carton, not its 24 base units). Frozen so a
+      // later edit to the pack size cannot make a reprint disagree with the original. (migration 0008)
+      pricedQtyM: line.pricedQtyM,
       nameSnapshot: line.name, // FROZEN. A later rename does not rewrite an old receipt.
       nameOtherLang: line.nameOtherLang,
       batchId: line.batchId,
@@ -2419,6 +2428,7 @@ type SaleLineRow = {
   qty_m: number
   uom: string | null
   unit_price: number
+  priced_qty_m: number
   line_discount: number
   net: number
   tax_rate_bp: number
@@ -2460,6 +2470,7 @@ function toSaleLine(row: SaleLineRow): SaleLine {
     qtyM: row.qty_m,
     uom: row.uom,
     unitPrice: row.unit_price,
+    pricedQtyM: row.priced_qty_m,
     lineDiscount: row.line_discount,
     net: row.net,
     taxRateBp: row.tax_rate_bp,
@@ -2797,15 +2808,12 @@ function buildReceipt(db: DB, sale: SaleDetail, isDuplicate: boolean): ReceiptDa
  * A carton of 24 stores `qty_m = 24000` (base units, because that is what left the shelf) and is priced
  * at the CARTON's price. On paper the customer bought ONE carton, so that is what the receipt shows.
  */
-function pricedQtyOf(db: DB, line: SaleLine): number {
-  if (line.packId == null) return line.qtyM
-
-  const packSize =
-    (db.prepare('SELECT pack_size FROM product_packs WHERE id = ?').pluck().get(line.packId) as
-      | number
-      | undefined) ?? ONE_UNIT
-
-  return packSize > 0 ? (line.qtyM / packSize) * ONE_UNIT : line.qtyM
+function pricedQtyOf(_db: DB, line: SaleLine): number {
+  // The quantity FROZEN on the line when it was sold (migration 0008). This used to be recomputed
+  // from product_packs.pack_size read LIVE — so editing a pack's size later made a REPRINT of an old
+  // receipt show a different number of cartons than the original. A receipt is a record; it does not
+  // change because a setting changed. A pre-0008 line has priced_qty_m backfilled, never 0.
+  return line.pricedQtyM > 0 ? line.pricedQtyM : line.qtyM
 }
 
 /**

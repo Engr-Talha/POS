@@ -80,6 +80,7 @@ export type AuditEntry = {
   reasonCode: string | null
   reasonText: string | null
   approvedByName: string | null
+  approvedByRole: string | null
 }
 
 // ── Lookups ──────────────────────────────────────────────────────────────────

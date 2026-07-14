@@ -169,6 +169,8 @@ export type SaleLine = {
 
   /** 2-dp money. */
   unitPrice: number
+  /** The quantity the line was PRICED on — 1 carton, not its 24 base units. Frozen at sale time. */
+  pricedQtyM: number
   lineDiscount: number
 
   /** THE FROZEN TAX. gross === net + taxAmount, always, by construction. */
