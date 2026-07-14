@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { StockMovement } from './catalog'
+import type { ItemType, StockMovement } from './catalog'
 import type { OpeningSummary } from './opening'
 
 /**

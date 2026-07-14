@@ -223,7 +223,12 @@ export function Home({
           )}
           {section === 'books' && <Books currencySymbol={currencySymbol} />}
           {section === 'lists' && <Lists readOnly={state.readOnly} />}
-          {section === 'settings' && <SettingsSection readOnly={state.readOnly} />}
+          {section === 'settings' && (
+            <SettingsSection
+              readOnly={state.readOnly}
+              isOwner={state.session?.user.role === 'owner'}
+            />
+          )}
         </main>
       </div>
     </div>
