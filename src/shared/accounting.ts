@@ -19,8 +19,31 @@ export type TrialBalanceRow = {
 
 export type TrialBalance = {
   rows: TrialBalanceRow[]
+
+  /**
+   * Totals of the rows ABOVE — i.e. the sum of the debit column and of the credit column as they are
+   * actually printed. These are what a report footer must show, or the Total line does not add up to
+   * the numbers directly above it.
+   */
   totalDebit: number
   totalCredit: number
+
+  /**
+   * Every debit and every credit ever posted, summed raw — NOT netted per account.
+   *
+   * These are the conventional trial-balance totals, and they show the true VOLUME of activity: a
+   * shop that took Rs 100,000 in and paid Rs 30,000 out has gross totals of 130,000, while the
+   * printed columns (net positions) only add to 100,000.
+   *
+   * Either pair detects an imbalance equally well — for every row,
+   *     displayed.debit − displayed.credit === raw.debit − raw.credit
+   * so summing gives (totalDebit − totalCredit) === (grossDebit − grossCredit), always. `balanced`
+   * is computed from the gross pair because that is the conventional check, not because the netted
+   * one is weaker.
+   */
+  grossDebit: number
+  grossCredit: number
+
   /** If this is ever false, something wrote to the books without going through the posting engine. */
   balanced: boolean
 }

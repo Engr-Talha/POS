@@ -64,6 +64,15 @@ export function Books({ currencySymbol }: { currencySymbol: string }): React.JSX
             ))}
         </Group>
 
+        {tb && !tb.balanced && (
+          <Alert color="red" icon={<TriangleAlert size={18} />} title="The books do not balance" mb="md">
+            Total debits ({formatMoney(tb.grossDebit, { symbol: currencySymbol })}) do not equal total
+            credits ({formatMoney(tb.grossCredit, { symbol: currencySymbol })}). Something has written
+            to the ledger without going through the posting engine. Please contact support — do not
+            rely on these figures.
+          </Alert>
+        )}
+
         {!tb ? (
           <Stack gap={8}>
             <Skeleton height={14} />
@@ -101,6 +110,9 @@ export function Books({ currencySymbol }: { currencySymbol: string }): React.JSX
                 </Table.Tr>
               ))}
             </Table.Tbody>
+            {/* totalDebit/totalCredit are the sums of the columns ABOVE — not the gross sums of
+                every entry ever posted. Printing the gross figures here made the Total line
+                disagree with its own column, which is the first thing an accountant would spot. */}
             <Table.Tfoot>
               <Table.Tr>
                 <Table.Td colSpan={2}>

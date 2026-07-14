@@ -411,6 +411,120 @@ describe('real shop scenarios — the trial balance balances after every one', (
   })
 })
 
+describe('trial balance — the report must add up to itself', () => {
+  let t: TestDb
+  beforeEach(() => (t = makeTestDb({ withSeed: true })))
+  afterEach(() => t.cleanup())
+
+  /**
+   * REGRESSION — found by an adversarial reviewer, and it was real.
+   *
+   * The rows show each account's NET position, but the footer was summing the RAW debits and
+   * credits. Any account touched on both sides (Cash: sales in, expenses out — i.e. every real
+   * ledger, on day one) made the Total line disagree with the column printed directly above it.
+   */
+  it('the footer equals the sum of the columns it sits under (regression)', () => {
+    // Cash is debited by the opening balance and credited by the rent — hit on BOTH sides.
+    ledger.post(t.db, {
+      refType: 'opening',
+      memo: 'Opening',
+      lines: [
+        { account: ACC.CASH, debit: 100_000 },
+        { account: ACC.OPENING_BALANCE_EQUITY, credit: 100_000 }
+      ]
+    })
+    ledger.post(t.db, {
+      refType: 'expense',
+      memo: 'Rent',
+      lines: [
+        { account: '5200', debit: 30_000 },
+        { account: ACC.CASH, credit: 30_000 }
+      ]
+    })
+
+    const tb = ledger.trialBalance(t.db)
+
+    const columnDebit = tb.rows.reduce((sum, row) => sum + row.debit, 0)
+    const columnCredit = tb.rows.reduce((sum, row) => sum + row.credit, 0)
+
+    // Cash shows its NET position: 100,000 in − 30,000 out = 70,000.
+    expect(tb.rows.find((r) => r.code === ACC.CASH)).toMatchObject({ debit: 70_000, credit: 0 })
+
+    // THE FIX: the footer is the sum of what is printed. Before, this said 130,000 under a column
+    // of 100,000 — a trial balance that did not add up to itself.
+    expect(tb.totalDebit).toBe(columnDebit)
+    expect(tb.totalCredit).toBe(columnCredit)
+    expect(tb.totalDebit).toBe(100_000)
+
+    // ...while the GROSS sums (every debit and credit ever posted) stay available as the real check.
+    expect(tb.grossDebit).toBe(130_000)
+    expect(tb.grossCredit).toBe(130_000)
+    expect(tb.balanced).toBe(true)
+  })
+
+  it('catches a write that went behind the posting engine’s back', () => {
+    // The trial balance exists to catch exactly this: something that wrote to the ledger without
+    // going through post().
+    //
+    // Worth being precise about WHY it works, because it is easy to tell yourself a false story
+    // here (I did). For every row, displayed.debit − displayed.credit === raw.debit − raw.credit,
+    // so (totalDebit − totalCredit) === (grossDebit − grossCredit) ALWAYS. Both pairs therefore
+    // detect an imbalance equally well, and by the same amount. `balanced` uses the gross pair
+    // because that is the conventional trial-balance total — not because the netted one is weaker.
+    ledger.post(t.db, {
+      refType: 'sale',
+      memo: 'a good sale',
+      lines: [
+        { account: ACC.CASH, debit: 10_000 },
+        { account: ACC.SALES, credit: 10_000 }
+      ]
+    })
+
+    // Simulate something writing to the books WITHOUT going through the posting engine — the exact
+    // failure the trial balance exists to catch.
+    const journalId = t.db
+      .prepare(
+        `INSERT INTO journals (at, ref_type, memo, year, month, created_at)
+         VALUES (?, 'rogue', 'written behind the engine''s back', 2026, 7, ?)`
+      )
+      .run(new Date().toISOString(), new Date().toISOString()).lastInsertRowid
+    const cashId = t.db.prepare('SELECT id FROM accounts WHERE code = ?').pluck().get(ACC.CASH)
+    t.db
+      .prepare('INSERT INTO journal_lines (journal_id, account_id, debit, credit) VALUES (?, ?, ?, 0)')
+      .run(journalId, cashId, 5_000) // a debit with no matching credit
+
+    const tb = ledger.trialBalance(t.db)
+
+    // `balanced` correctly screams.
+    expect(tb.balanced).toBe(false)
+    expect(tb.grossDebit).not.toBe(tb.grossCredit)
+
+    // And the two pairs are out by exactly the SAME amount — the identity above, demonstrated.
+    const columnDebit = tb.rows.reduce((sum, row) => sum + row.debit, 0)
+    const columnCredit = tb.rows.reduce((sum, row) => sum + row.credit, 0)
+    expect(columnDebit - columnCredit).toBe(tb.grossDebit - tb.grossCredit)
+    expect(columnDebit - columnCredit).toBe(5_000) // the rogue debit, unmatched
+  })
+
+  it('REFUSES an amount too large for integer arithmetic to be exact (regression)', () => {
+    // Number.isInteger is TRUE above 2^53, where floats can no longer hold consecutive integers, so
+    // the running totals could lose the odd paisa and an unbalanced journal would pass the check.
+    expect(() =>
+      ledger.post(t.db, {
+        refType: 'test',
+        memo: 'beyond safe integers',
+        lines: [
+          { account: ACC.INVENTORY, debit: 9_007_199_254_740_992 },
+          { account: ACC.CASH, debit: 1 },
+          { account: ACC.OPENING_BALANCE_EQUITY, credit: 9_007_199_254_740_992 }
+        ]
+      })
+    ).toThrow(/integer minor units/)
+
+    expect(t.db.prepare('SELECT COUNT(*) FROM journals').pluck().get()).toBe(0)
+  })
+})
+
 describe('period lock', () => {
   let t: TestDb
   let ownerId: number

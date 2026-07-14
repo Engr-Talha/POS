@@ -60,7 +60,15 @@ export function post(db: DB, input: PostInput): number {
     const credit = line.credit ?? 0
 
     // Integers only. A float here is how a ledger drifts a paisa at a time until nothing reconciles.
-    if (!Number.isInteger(debit) || !Number.isInteger(credit)) {
+    //
+    // isSafeInteger, NOT isInteger — and the difference is load-bearing. Above 2^53 a JS float can no
+    // longer represent consecutive integers, yet Number.isInteger still returns true for them. The
+    // running totals below would then add in that lossy range and an out-of-balance journal could
+    // pass the balance check: debits of 9007199254740993 and credits of 9007199254740992 both
+    // collapse to the same float and compare equal. It takes an absurd sum to reach, but this is the
+    // one guard in the app that is not allowed to have a hole. money.ts and cost.ts already use the
+    // strict check; this now matches them.
+    if (!Number.isSafeInteger(debit) || !Number.isSafeInteger(credit)) {
       throw new AppError(
         ErrorCode.DB,
         'Something went wrong recording that in the accounts. Please try again.',
@@ -288,34 +296,52 @@ export function trialBalance(db: DB, options: { upTo?: Date } = {}): TrialBalanc
     credit: number
   }>
 
+  // TWO different pairs of totals, and they are NOT interchangeable.
+  //
+  //   gross*  — every debit and credit ever posted, raw. The INTEGRITY CHECK.
+  //   total*  — the sum of the columns we actually print. The REPORT FOOTER.
+  //
+  // Conflating them was a real bug: the footer showed the gross sums under rows showing net
+  // positions, so a ledger with Cash debited 1000 and credited 300 printed a row of 700 and a
+  // footer of 1000 — a Total line that did not add up to the column above it.
+  let grossDebit = 0
+  let grossCredit = 0
   let totalDebit = 0
   let totalCredit = 0
 
   const result: TrialBalanceRow[] = rows.map((row) => {
-    // The TOTALS use the RAW debits and credits, not each account's net position. That is what makes
-    // this a real check: it proves every journal balanced when it was written. Summing net positions
-    // instead would balance by construction and prove nothing.
-    totalDebit += row.debit
-    totalCredit += row.credit
+    grossDebit += row.debit
+    grossCredit += row.credit
 
     // Each account is shown on ONE side — its net position, on its natural side.
     const debitNatured = isDebitNatured(row.type, Boolean(row.isContra))
     const net = debitNatured ? row.debit - row.credit : row.credit - row.debit
 
-    return {
+    const displayed = {
       code: row.code,
       name: row.name,
       type: row.type,
       debit: debitNatured ? Math.max(net, 0) : Math.max(-net, 0),
       credit: debitNatured ? Math.max(-net, 0) : Math.max(net, 0)
     }
+
+    totalDebit += displayed.debit
+    totalCredit += displayed.credit
+
+    return displayed
   })
 
   return {
     rows: result,
     totalDebit,
     totalCredit,
-    balanced: totalDebit === totalCredit
+    grossDebit,
+    grossCredit,
+    // The gross pair is the conventional trial-balance check. Note that the netted columns would
+    // detect an imbalance just as well — for every row, displayed.debit − displayed.credit equals
+    // raw.debit − raw.credit, so the two differences are identical. Gross is used because that is
+    // what a trial balance traditionally totals, and because it shows the true volume of activity.
+    balanced: grossDebit === grossCredit
   }
 }
 
