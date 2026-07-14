@@ -239,6 +239,30 @@ before the first sale**, or the books never balance and we'd be backfilling jour
 
 After **every** phase: `typecheck` → `vitest` → **build the installer** → an exact click-list to verify.
 
+### Progress (as built)
+
+- **Phase 0 done** (v0.1.0). Installer + updater proven end-to-end via the local `generic` feed.
+- **Phase 1 done** (v0.2.0). DB, migrations, backup/restore, auth, audit, offline Ed25519 licence.
+- **Phase 2 done** (v0.3.1). Double-entry engine + chart of accounts; adversarial audit fixed a
+  paisa-drift the trial balance couldn't see.
+- **Phase 3 done** (v0.4.0). Products, stock (weighted average), barcodes, packs, suppliers, batches,
+  variants, serials. Audit fixed 6 bugs incl. the form rewriting the derived cost.
+- **Phase 4 done** (v0.5.0). Opening Setup wizard **+ Excel import** (exceljs) + **settings registry**
+  (self-rendering Settings screen) + thermal receipts (rendered and looked at). Audit fixed 3
+  critical Excel bugs (formula-cell float bypass, blank-cost zero valuation, import deleting udhaar).
+- **Phase 5 done** (v0.6.1). Sell screen: barcode, cart, split payment, hold/resume, quote, receipt,
+  cash drawer, void. The 50-agent audit found **15 real bugs** (4 critical); **13 fixed**:
+  New Year invoice brick, unauthenticated supervisor approval (now PIN-proven in main), price-tier
+  focus-kill, FEFO whole-line-to-one-batch, held-cart override dropped, reprint pack-qty drift, cart
+  lost on tab switch, approver role now in the audit log, and more.
+
+  **Two Phase-5 findings deliberately deferred (need owner input, low severity):**
+  1. **A price override records no reason code.** The override is already supervisor-PIN-authenticated
+     and audited with the real approver's name and role — the gap is only the *why*. Needs the owner
+     to confirm the reason options before a `price_override_reason` list is seeded and enforced.
+  2. **A cashier is told the wholesale tier is forbidden only at the Pay button**, not when they
+     switch to it. Pure UX; the control itself is enforced in main.
+
 ## 7. Deferred, deliberately
 
 - **FBR real-time invoice reporting** (Pakistan Tier-1 retailers) — needs internet. Schema seams
