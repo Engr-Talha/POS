@@ -897,6 +897,51 @@ describe('stock levels, low stock and near expiry', () => {
     assertEverythingHolds(t)
   })
 
+  /**
+   * REGRESSION (Phase 4b). The near-expiry report valued a batch as round(on_hand x cost) — the
+   * round-of-sum that migration 0006 exists to abolish — while the ledger posts, and the stock report
+   * now sums, the value each movement FROZE when it happened.
+   *
+   * Two receipts of 3 pcs at Rs 91.0417 into one batch:
+   *
+   *     GL Inventory / stock report = round(3 x 91.0417) x 2 = 273.13 + 273.13 = Rs 546.26
+   *     near-expiry (before)        = round(6 x 91.0417)                       = Rs 546.25
+   *
+   * A paisa of stock that the books carry and the report denies. It compounds with every receipt, and
+   * every journal stays internally balanced — so the trial balance never notices. The report must read
+   * the same frozen numbers as everything else.
+   */
+  it('NEAR EXPIRY values a batch from the movements, not round(on_hand x cost) — GL and report agree', () => {
+    const asOf = new Date('2026-07-14T00:00:00Z')
+    const RS_91_0417 = parseCost('91.0417') as number // 910_417 — the 4-dp cost, exactly
+    const THREE_PIECES = 3 * ONE_UNIT
+
+    const id = makeProduct(t, { name: 'Panadol', trackBatches: true })
+    const batch = makeBatch(t, id, 'B-1', '2026-07-20', RS_91_0417)
+
+    // TWO receipts into the SAME batch. One would round identically; two is where the drift appears.
+    stock.record(t.db, { productId: id, type: 'opening', qtyM: THREE_PIECES, unitCost: RS_91_0417, batchId: batch })
+    stock.record(t.db, { productId: id, type: 'opening', qtyM: THREE_PIECES, unitCost: RS_91_0417, batchId: batch })
+
+    const frozen = t.db
+      .prepare('SELECT COALESCE(SUM(value_minor), 0) FROM stock_movements WHERE batch_id = ?')
+      .pluck()
+      .get(batch) as number
+
+    expect(frozen).toBe(54_626) // Rs 546.26 — 273.13 twice, as each movement froze it
+
+    const row = stock.nearExpiry(t.db, { days: 30, asOf }).rows[0]!
+    expect(row.onHandM).toBe(6 * ONE_UNIT)
+
+    // The report reads the frozen value, NOT round(6 x 91.0417) = 54_625.
+    expect(row.valueMinor).toBe(frozen)
+
+    // And it is the same number the whole-product stock report shows, for the same stock.
+    expect(stock.stockLevel(t.db, id).stockValueMinor).toBe(frozen)
+
+    assertEverythingHolds(t)
+  })
+
   it('the item’s history reads back in full', () => {
     const id = makeProduct(t)
     const user = makeUser(t)

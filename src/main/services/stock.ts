@@ -1048,6 +1048,13 @@ export function nearExpiry(db: DB, input: NearExpiryInput = {}): PagedResult<Nea
 
   const onHandSql = '(SELECT COALESCE(SUM(m.qty_m), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
 
+  // What the batch is WORTH: the sum of the values its movements FROZE — the very numbers the ledger
+  // posted. NOT round(on_hand x cost): sum-of-rounded != round-of-sum, and two receipts of 3 pcs at
+  // Rs 91.0417 made this report disagree with the books by a paisa, silently, with the trial balance
+  // still green. Same construction as stockLevels(). See migration 0006.
+  const valueSql =
+    '(SELECT COALESCE(SUM(m.value_minor), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
+
   const where: string[] = ['b.expiry_date IS NOT NULL', 'b.expiry_date <= @cutoff', `${onHandSql} > 0`]
   const params: Record<string, unknown> = { cutoff: cutoffDate }
 
@@ -1068,11 +1075,11 @@ export function nearExpiry(db: DB, input: NearExpiryInput = {}): PagedResult<Nea
       `SELECT b.id          AS batch_id,
               b.batch_no    AS batch_no,
               b.expiry_date AS expiry_date,
-              b.cost        AS cost,
               p.id          AS product_id,
               p.sku         AS sku,
               p.name        AS name,
-              ${onHandSql}  AS on_hand
+              ${onHandSql}  AS on_hand,
+              ${valueSql}   AS value_minor
        FROM batches b
        JOIN products p ON p.id = b.product_id
        ${whereSql}
@@ -1083,11 +1090,11 @@ export function nearExpiry(db: DB, input: NearExpiryInput = {}): PagedResult<Nea
     batch_id: number
     batch_no: string
     expiry_date: string
-    cost: number
     product_id: number
     sku: string
     name: string
     on_hand: number
+    value_minor: number
   }>
 
   return {
@@ -1104,7 +1111,8 @@ export function nearExpiry(db: DB, input: NearExpiryInput = {}): PagedResult<Nea
       daysToExpiry: daysBetween(today, row.expiry_date),
       expired: row.expiry_date < today,
       onHandM: row.on_hand,
-      valueMinor: costToPriceMinor(movementValueCost(row.on_hand, row.cost))
+      // The frozen value the ledger posted — not a fresh multiply. See valueSql above.
+      valueMinor: row.value_minor
     }))
   }
 }

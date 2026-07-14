@@ -61,9 +61,10 @@ function assertAverageCostIsHonest(t: TestDb): void {
 /**
  * THE GL AND THE STOCK REPORT TELL THE SAME STORY.
  *
- * GL Inventory is the sum of what the opening journals debited. The stock valuation is
- * on-hand x weighted-average-cost, product by product. They are computed from completely different
- * tables, and they must come to the same number.
+ * GL Inventory is the sum of what the opening journals debited. The stock valuation is the sum of the
+ * value each movement FROZE when it happened (migration 0006) — NOT a fresh on-hand x average, which
+ * rounds on the total instead of per movement and so drifts a paisa away from what was posted. They
+ * are read from completely different tables, and they must come to the same number.
  */
 function assertInventoryMatchesStockValuation(t: TestDb): void {
   const valuation = stock
