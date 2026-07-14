@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Tests run in plain Node against the services layer — no Electron involved. That is the point of
+  # keeping services transport-agnostic.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # `npm test` rebuilds better-sqlite3 for the NODE abi first (trap #10) — postinstall has just
+      # built it for ELECTRON's abi, and the two are not interchangeable.
+      - run: npm test
+
+  # TRAP: cross-building a Windows .exe from macOS is unreliable. It is built on a real Windows
+  # runner, and published as a workflow ARTIFACT — not a release. Publishing is deferred
+  # (docs/PLAN.md §3), and `--publish never` (trap #6) keeps the build from demanding a token.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:win
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: insha-pos-windows-installer
+          path: |
+            release/*.exe
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 30

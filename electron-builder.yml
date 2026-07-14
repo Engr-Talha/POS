@@ -1,0 +1,67 @@
+appId: com.insha.pos
+productName: Insha POS
+copyright: Copyright © Insha
+
+directories:
+  buildResources: build
+  output: release
+
+# TRAP #7: ad-hoc signs the macOS .app BEFORE the .dmg is built around it, or it will not launch.
+afterPack: scripts/after-pack.cjs
+
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+
+# TRAP #8: native modules MUST be unpacked from the asar or they will not load at runtime.
+# better-sqlite3 is a .node binary — inside app.asar it cannot be dlopen'd.
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**'
+
+# TRAP #2: electron-builder's GitHub publish defaults to a DRAFT release, and the updater
+# CANNOT SEE drafts. releaseType MUST be "release".
+# TRAP #4: the installers go to a SEPARATE PUBLIC repo. No token is ever embedded in the app;
+# the PAT lives only in CI secrets.
+# Publishing itself is DEFERRED (see docs/PLAN.md §3) — but this config, and the updater code,
+# ship inside v0.1.0 anyway. TRAP #1: an app shipped without an updater can never update itself.
+publish:
+  provider: github
+  owner: PLACEHOLDER-OWNER
+  repo: PLACEHOLDER-pos-releases
+  releaseType: release
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-setup.${ext}
+
+# TRAP #5: oneClick + perMachine:false = silent install AND fully silent auto-update.
+# The cashier never sees a wizard. NEVER add allowToChangeInstallationDirectory here —
+# it is invalid with oneClick and electron-builder will reject the config.
+nsis:
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  deleteAppDataOnUninstall: false # NEVER delete the shop's database on uninstall.
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Insha POS
+
+mac:
+  target:
+    # dmg = what a human installs. zip = what the UPDATER downloads — Squirrel.Mac cannot apply an
+    # update from a .dmg, so without the zip there is literally nothing for the updater to fetch.
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  category: public.app-category.business
+  # TRAP #7: real mac auto-update needs a paid Apple cert. macOS is the DEV loop only;
+  # Windows is the real target. scripts/codesign-mac.sh ad-hoc signs after build or the
+  # app will not launch.
+  identity: null
+
+linux:
+  target: []

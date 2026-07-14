@@ -1,0 +1,22 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.DS_Store
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LICENSE PRIVATE KEY — NEVER COMMIT.
+# If this leaks, anyone can mint licenses for the product. It lives OUTSIDE the
+# repo (see .claude/skills/license-keygen). These patterns are a safety net, not
+# the storage location.
+# ─────────────────────────────────────────────────────────────────────────────
+*.private.pem
+*.private.key
+keys/
+secrets/
+.env
+.env.*
+
+# Local auto-update test server (see scripts/serve-updates)
+dev-updates/
