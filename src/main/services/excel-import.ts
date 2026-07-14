@@ -237,6 +237,30 @@ type CellRead = {
 
 const BLANK: CellRead = { text: '', wasNumber: false, isPercent: false }
 
+/**
+ * THE VALUE A CELL REALLY CARRIES.
+ *
+ * exceljs hands back a FORMULA cell as an object — `{ formula: 'B2*0.05', result: 0.05 }` — not as a
+ * number. So `typeof value === 'number'` was FALSE for every formula, and every guard that depended
+ * on knowing "this arrived as a number" was silently disarmed for exactly the cells a shopkeeper is
+ * most likely to produce: the ones he drag-filled down a column.
+ *
+ * What that cost: a DISCOUNT column drag-filled with `=B2*0.05` and formatted as a percentage shows
+ * "5.00%" on screen and holds 0.05 underneath. The percent guard never fired, so it imported as
+ * 5 basis points — 0.05% — instead of 500. Every item's cost came out ~5% too high, the whole opening
+ * inventory was overstated, and that inflated cost then seeded the weighted average every future sale
+ * would be costed against. Nothing caught it: the journals balanced perfectly around the wrong number.
+ *
+ * A formula is judged on the value it actually carries. Nested, because exceljs can wrap a shared
+ * formula's result in another result.
+ */
+function effectiveValue(value: unknown): unknown {
+  if (value !== null && typeof value === 'object' && 'result' in (value as Record<string, unknown>)) {
+    return effectiveValue((value as Record<string, unknown>)['result'])
+  }
+  return value
+}
+
 function readCell(row: Row, column: number | undefined): CellRead {
   if (column === undefined) return BLANK
 
@@ -246,7 +270,8 @@ function readCell(row: Row, column: number | undefined): CellRead {
 
   return {
     text: valueToText(value).trim(),
-    wasNumber: typeof value === 'number',
+    // The formula's RESULT, not the wrapper around it. See effectiveValue.
+    wasNumber: typeof effectiveValue(value) === 'number',
     isPercent: numFmt.includes('%')
   }
 }
@@ -414,7 +439,20 @@ class ErrorSink {
   readonly rows: ImportError[] = []
   private overflowed = false
 
+  /**
+   * How many problems were RAISED — not how many we kept.
+   *
+   * The two used to be the same number, and that was a quiet disaster: past MAX_ERRORS the sink stops
+   * storing, so `rows.length` stops growing, so RowReader.failed (which compared counts) went
+   * permanently FALSE — and every bad row after the 500th was treated as GOOD and imported with
+   * silently defaulted values. A cap on LISTING errors had accidentally become a cap on DETECTING
+   * them, and it only bit on the files most likely to be broken: the big, messy ones.
+   */
+  private attempted = 0
+
   add(sheet: string, row: number, column: string, value: string, message: string): void {
+    this.attempted++
+
     if (this.rows.length >= MAX_ERRORS) {
       if (!this.overflowed) {
         this.overflowed = true
@@ -431,8 +469,9 @@ class ErrorSink {
     this.rows.push({ sheet, row, column, value, message })
   }
 
+  /** Problems RAISED. Use this to decide whether a row is safe — never `rows.length`. */
   get count(): number {
-    return this.rows.length
+    return this.attempted
   }
 }
 
@@ -858,6 +897,20 @@ function parseStock(db: DB, sheet: Worksheet, errors: ErrorSink): StockRow[] {
     const batchNo = reader.text('batchNo', 100)
     const expiryDate = reader.date('expiry')
 
+    // AN EXPIRY DATE WITH NO BATCH NUMBER IS A ROW THAT CANNOT BE IMPORTED.
+    //
+    // The opening service needs a batch to hang an expiry on, and it says so — but it said so from
+    // deep inside applyImport's transaction, long AFTER the preview had told the owner the file was
+    // clean. The whole import then died on one row, at the moment he pressed Import, with a message
+    // that named no row he could go and fix. Everything a row cannot survive belongs in the PREVIEW,
+    // beside its row number, while he still has the spreadsheet open.
+    if (expiryDate && !batchNo) {
+      reader.reject(
+        'expiry',
+        'This row has an expiry date but no batch number. An expiry belongs to a batch — add the batch number, or clear the expiry date.'
+      )
+    }
+
     for (const barcode of barcodes) {
       const claimedOn = seenBarcode.get(barcode)
       if (claimedOn !== undefined) {
@@ -896,6 +949,26 @@ function parseStock(db: DB, sheet: Worksheet, errors: ErrorSink): StockRow[] {
     const packCost = products.costFromSupplier(supplierPrice ?? 0, discountBp ?? 0)
     const unitCost = products.unitCostFromPack(packCost, packSizeM)
     const quantity = qtyM ?? 0
+
+    // STOCK WITH NO COST IS NOT "FREE STOCK" — IT IS A MISSING NUMBER.
+    //
+    // `supplierPrice ?? 0` was silently valuing an opening stock line at ZERO whenever the SUPPLIER
+    // PRICE cell was left blank — and a blank column is the single most likely thing to be missing
+    // from a spreadsheet exported out of an old system.
+    //
+    // What it cost: the opening movement books Rs 0 of Inventory, the weighted average is seeded at
+    // Rs 0, and every subsequent sale of that item posts COGS of ZERO — so the shop reports a 100%
+    // profit margin on it, forever. The GL and the stock report agree (both are 0), every journal
+    // balances, and the trial balance stays green. Nothing in the app would ever have noticed.
+    //
+    // The whole reason Opening Setup exists is to stop exactly that. So: a quantity with no cost is
+    // an ERROR, named, with its row number — never a silent zero.
+    if (quantity > 0 && (supplierPrice ?? 0) <= 0) {
+      reader.reject(
+        'supplierPrice',
+        'This item has an opening quantity but no supplier price, so there is nothing to value the stock at. Enter what you paid for it — otherwise the shop would report 100% profit on every one you sell.'
+      )
+    }
 
     rows.push({
       row: rowNumber,
@@ -1254,7 +1327,7 @@ export async function applyImport(
     const customerIds = writeParties(db, actor, 'customer', preview.udhaar.rows, now)
     const supplierIds = writeParties(db, actor, 'supplier', preview.dues.rows, now)
 
-    clearDraft(db)
+    clearDraft(db, preview)
 
     for (const row of preview.stock.rows) {
       if (row.qtyM <= 0) continue // a catalogue row: the item exists, it just has nothing on the shelf
@@ -1351,10 +1424,21 @@ export async function applyImport(
  * books yet. These three tables are a WORKSHEET, not the ledger. If the transaction rolls back, the
  * owner's previous draft is still there, untouched.
  */
-function clearDraft(db: DB): void {
-  db.prepare('DELETE FROM opening_stock_lines').run()
-  db.prepare('DELETE FROM opening_receivables').run()
-  db.prepare('DELETE FROM opening_payables').run()
+function clearDraft(db: DB, preview: ImportPreview): void {
+  // REPLACE ONLY WHAT THE FILE ACTUALLY CARRIED.
+  //
+  // This used to delete all three worksheets unconditionally. So an owner who had hand-typed twenty
+  // udhaar customers in the wizard, and then uploaded a spreadsheet of STOCK, lost all twenty — the
+  // workbook never mentioned them, and the import wiped them anyway. The preview screen could not
+  // even warn him: it reported what the FILE contained, not what the import was about to destroy.
+  //
+  // "Re-uploading replaces the draft" has to mean it replaces the part of the draft the file is
+  // about. A file that says nothing about udhaar is not an instruction to delete the udhaar.
+  //
+  // (To clear a section deliberately, the wizard's own Remove button is right there.)
+  if (preview.stock.rows.length > 0) db.prepare('DELETE FROM opening_stock_lines').run()
+  if (preview.udhaar.rows.length > 0) db.prepare('DELETE FROM opening_receivables').run()
+  if (preview.dues.rows.length > 0) db.prepare('DELETE FROM opening_payables').run()
 }
 
 // ── Lookups ──────────────────────────────────────────────────────────────────

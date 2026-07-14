@@ -705,7 +705,11 @@ export function getBySku(db: DB, sku: string): ProductDetail {
 
 /** Null when there is no such stock code — what the "is this SKU taken?" check on the form asks. */
 export function findBySku(db: DB, sku: string): Product | null {
-  const row = db.prepare('SELECT * FROM products WHERE sku = ?').get(sku.trim()) as
+  // COLLATE NOCASE. A stock code is an IDENTIFIER, and to the shopkeeper who typed it "abc" and
+  // "ABC" are the same item — but SQLite's `=` is case-sensitive, so the Excel importer looked up
+  // "abc", found nothing, and created a SECOND product alongside the existing "ABC". The opening
+  // stock then landed on the new, empty duplicate while the real item stayed at zero.
+  const row = db.prepare('SELECT * FROM products WHERE sku = ? COLLATE NOCASE').get(sku.trim()) as
     | ProductRow
     | undefined
 
@@ -1084,7 +1088,12 @@ function listBatches(db: DB, productId: number): Batch[] {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 function assertSkuFree(db: DB, sku: string): void {
-  const existing = db.prepare('SELECT id FROM products WHERE sku = ?').pluck().get(sku) as
+  // Case-insensitive, to match findBySku — otherwise "ABC" could be created alongside "abc" and the
+  // scanner, the reports and the shopkeeper would each disagree about which one is the real item.
+  const existing = db
+    .prepare('SELECT id FROM products WHERE sku = ? COLLATE NOCASE')
+    .pluck()
+    .get(sku) as
     | number
     | undefined
 

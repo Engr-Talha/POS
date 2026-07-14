@@ -431,9 +431,9 @@ describe('rejecting a row, in words a shopkeeper can act on', () => {
   it('REFUSES a duplicate stock code rather than silently letting one row win', async () => {
     const buffer = await makeWorkbook({
       stock: [
-        { 'STOCK CODE': 'RICE-5KG', 'ITEM NAME': 'Rice 5kg', 'BALANCE QUANTITY': 10 },
+        { 'STOCK CODE': 'RICE-5KG', 'ITEM NAME': 'Rice 5kg', 'BALANCE QUANTITY': 10, 'SUPPLIER PRICE': 100 },
         { 'STOCK CODE': 'SUGAR', 'ITEM NAME': 'Sugar' },
-        { 'STOCK CODE': 'rice-5kg', 'ITEM NAME': 'Rice 5kg again', 'BALANCE QUANTITY': 25 }
+        { 'STOCK CODE': 'rice-5kg', 'ITEM NAME': 'Rice 5kg again', 'BALANCE QUANTITY': 25, 'SUPPLIER PRICE': 100 }
       ]
     })
 
@@ -845,8 +845,8 @@ describe('what an import must never do', () => {
   it('writes NOTHING AT ALL when a later row is broken', async () => {
     const buffer = await makeWorkbook({
       stock: [
-        { 'STOCK CODE': 'GOOD-1', 'ITEM NAME': 'Perfectly fine', DEPARTMENT: 'Grocery', 'BALANCE QUANTITY': 5 },
-        { 'STOCK CODE': 'GOOD-2', 'ITEM NAME': 'Also fine', 'BALANCE QUANTITY': 5 },
+        { 'STOCK CODE': 'GOOD-1', 'ITEM NAME': 'Perfectly fine', DEPARTMENT: 'Grocery', 'BALANCE QUANTITY': 5, 'SUPPLIER PRICE': 100 },
+        { 'STOCK CODE': 'GOOD-2', 'ITEM NAME': 'Also fine', 'BALANCE QUANTITY': 5, 'SUPPLIER PRICE': 100 },
         { 'STOCK CODE': 'BAD', 'ITEM NAME': 'Broken', 'RETAIL PRICE': 1.234 }
       ],
       udhaar: [{ NAME: 'Rashid', 'AMOUNT OWED': '12400.00' }]
@@ -864,7 +864,7 @@ describe('what an import must never do', () => {
     opening.commit(t.db, actor) // an empty but committed opening
 
     const buffer = await makeWorkbook({
-      stock: [{ 'STOCK CODE': 'X', 'ITEM NAME': 'X', 'BALANCE QUANTITY': 5 }]
+      stock: [{ 'STOCK CODE': 'X', 'ITEM NAME': 'X', 'BALANCE QUANTITY': 5, 'SUPPLIER PRICE': 100 }]
     })
 
     await expectRefusal(() => excel.parseWorkbook(t.db, buffer), /already been saved to the books/i)
@@ -884,7 +884,7 @@ describe('what an import must never do', () => {
       .run(new Date().toISOString(), id, new Date().toISOString())
 
     const buffer = await makeWorkbook({
-      stock: [{ 'STOCK CODE': 'SUGAR', 'BALANCE QUANTITY': 5 }]
+      stock: [{ 'STOCK CODE': 'SUGAR', 'BALANCE QUANTITY': 5, 'SUPPLIER PRICE': 100 }]
     })
 
     await expectRefusal(() => excel.applyImport(t.db, actor, buffer), /already made sales or purchases/i)
@@ -1067,12 +1067,13 @@ describe('batch and expiry', () => {
 
     const workbook = new Workbook()
     const sheet = workbook.addWorksheet(SHEET_STOCK)
-    sheet.addRow(['STOCK CODE', 'BALANCE QUANTITY', 'BATCH NO', 'EXPIRY'])
+    sheet.addRow(['STOCK CODE', 'BALANCE QUANTITY', 'BATCH NO', 'EXPIRY', 'SUPPLIER PRICE'])
     const row = sheet.addRow([])
     row.getCell(1).value = 'MED-1'
     row.getCell(2).value = 100
     row.getCell(3).value = 'B-2231'
     row.getCell(4).value = new Date(Date.UTC(2027, 2, 1)) // a Date, as Excel's date picker gives it
+    row.getCell(5).value = 50 // stock has to be worth something — see the zero-cost regression
     const buffer = (await workbook.xlsx.writeBuffer()) as unknown as Buffer
 
     const preview = await excel.parseWorkbook(t.db, buffer)
@@ -1100,7 +1101,7 @@ describe('batch and expiry', () => {
     existingProduct({ sku: 'BEANS', name: 'Baked Beans', trackBatches: false })
 
     const buffer = await makeWorkbook({
-      stock: [{ 'STOCK CODE': 'BEANS', 'BALANCE QUANTITY': 10, 'BATCH NO': 'B-1', EXPIRY: '2027-03-01' }]
+      stock: [{ 'STOCK CODE': 'BEANS', 'BALANCE QUANTITY': 10, 'BATCH NO': 'B-1', EXPIRY: '2027-03-01', 'SUPPLIER PRICE': 100 }]
     })
 
     const preview = await excel.parseWorkbook(t.db, buffer)
@@ -1163,10 +1164,10 @@ describe('matching the headers', () => {
   it('ignores blank rows and columns it does not know', async () => {
     const workbook = new Workbook()
     const sheet = workbook.addWorksheet(SHEET_STOCK)
-    sheet.addRow(['STOCK CODE', 'ITEM NAME', 'SOME LEGACY COLUMN', 'BALANCE QUANTITY'])
-    sheet.addRow(['OIL-5L', 'Cooking Oil 5L', 'who knows', 40])
+    sheet.addRow(['STOCK CODE', 'ITEM NAME', 'SOME LEGACY COLUMN', 'BALANCE QUANTITY', 'SUPPLIER PRICE'])
+    sheet.addRow(['OIL-5L', 'Cooking Oil 5L', 'who knows', 40, 100])
     sheet.addRow([])
-    sheet.addRow(['SUGAR', 'Sugar 1kg', '', 12])
+    sheet.addRow(['SUGAR', 'Sugar 1kg', '', 12, 100])
     const buffer = (await workbook.xlsx.writeBuffer()) as unknown as Buffer
 
     const preview = await excel.parseWorkbook(t.db, buffer)
