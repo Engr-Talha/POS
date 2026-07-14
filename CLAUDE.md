@@ -76,6 +76,16 @@ tools/           maintainer-only scripts (keygen). NOT shipped in the installer.
 ### Rounding
 - **No cash rounding. No rounding line.** 2 decimals, exact.
 
+### Selling (Phase 5 — must-dos carried forward)
+- **A pack with `retail_price <= 0` is PURCHASE-ONLY and MUST NOT be sellable.** "Buy in cartons,
+  sell in pieces" means a carton legitimately carries the supplier's barcode and has no selling
+  price. Scanning it at the till is a *receiving* action, not a sale — the sell path must refuse it,
+  or the shop rings up a free carton.
+- **`cost_price` is never typed.** It is the weighted average of `stock_movements.unit_cost`. A cost
+  correction is a business event: it goes through `stock.adjust()`, which posts a movement and a
+  balanced journal. A form must never write it, or the ledger and the stock report drift apart
+  silently and the trial balance still balances.
+
 ### Derived state
 - **Stock is DERIVED from `stock_movements`.** There is no mutable `products.stock` column, ever.
   A `stock_cache` table may exist as an optimization, but it is rebuildable from movements and a test
@@ -162,6 +172,12 @@ tools/           maintainer-only scripts (keygen). NOT shipped in the installer.
     `/bin/sh: Insha: command not found`. Plain `npm rebuild` uses prebuild-install, which downloads
     the correct Node-ABI binary and never invokes the compiler. It is also faster. (If we ever need
     a genuine source build, the project must first be moved to a path with no spaces.)
+10c. **`rebuild:electron` MUST delete `node_modules/better-sqlite3/build` first.** Once `npm test`
+    has dropped a NODE-ABI prebuilt in place, `electron-builder install-app-deps` looks at it,
+    decides nothing needs rebuilding, and **SHIPS THE NODE BINARY INSIDE THE APP**. The installer
+    builds cleanly, and then the app dies on launch with
+    `NODE_MODULE_VERSION 127 ... requires 148`. It nearly shipped. This is exactly why trap #9 says
+    LAUNCH THE PACKAGED BUILD — the tests, the typecheck and the build were all green.
 11. Large HTML (e.g. embedded fonts) breaks `loadURL('data:...')`. Write a temp file and `loadFile`.
 
 ### Printing / PDF

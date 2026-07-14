@@ -30,7 +30,9 @@ import {
   ListChecks,
   Settings as SettingsIcon,
   Scale,
-  CircleCheck
+  CircleCheck,
+  Package,
+  Boxes
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -38,12 +40,16 @@ import { ROLE_LABEL } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
 import { Books } from './sections/Books'
 import { Lists } from './sections/Lists'
+import { Products } from './sections/Products'
 import { SettingsSection } from './sections/SettingsSection'
+import { Stock } from './sections/Stock'
 
-type Section = 'overview' | 'books' | 'lists' | 'settings'
+type Section = 'overview' | 'products' | 'stock' | 'books' | 'lists' | 'settings'
 
 const NAV: Array<{ key: Section; label: string; icon: typeof Store }> = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'products', label: 'Items', icon: Package },
+  { key: 'stock', label: 'Stock', icon: Boxes },
   { key: 'books', label: 'Books', icon: Scale },
   { key: 'lists', label: 'Manage lists', icon: ListChecks },
   { key: 'settings', label: 'Settings', icon: SettingsIcon }
@@ -194,6 +200,12 @@ export function Home({
         <main style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
           {section === 'overview' && (
             <Overview state={state} onSignOutNeeded={onStateChange} />
+          )}
+          {section === 'products' && (
+            <Products readOnly={state.readOnly} currencySymbol={currencySymbol} />
+          )}
+          {section === 'stock' && (
+            <Stock readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'books' && <Books currencySymbol={currencySymbol} />}
           {section === 'lists' && <Lists readOnly={state.readOnly} />}

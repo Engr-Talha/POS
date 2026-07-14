@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import * as lookups from './lookups'
-import { runMigrations } from '../db/migrations'
+import { runMigrations, MIGRATIONS } from '../db/migrations'
 import { seed } from '../db/seed'
 
 describe('lookups — every dropdown in the app', () => {
@@ -74,13 +74,20 @@ describe('migrations', () => {
   it('are forward-only, recorded, and safe to run again', () => {
     const t = makeTestDb({ migrate: false })
 
+    // Derived from MIGRATIONS, not a hardcoded [1, 2]: adding a migration must not break this test,
+    // or the next person to add one "fixes" it by editing the number and stops reading what it says.
+    // What it asserts is the RULE — every migration runs exactly once, in ascending order — and that
+    // stays true at 3 migrations and at 30.
+    const versions = MIGRATIONS.map((m) => m.version).sort((a, b) => a - b)
+    const latest = versions[versions.length - 1]!
+
     const first = runMigrations(t.db)
-    expect(first.applied).toEqual([1, 2])
+    expect(first.applied).toEqual(versions)
 
     // Running again applies nothing — the app runs this on EVERY launch.
     const second = runMigrations(t.db)
     expect(second.applied).toEqual([])
-    expect(second.alreadyAt).toBe(2)
+    expect(second.alreadyAt).toBe(latest)
 
     t.cleanup()
   })

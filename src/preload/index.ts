@@ -69,6 +69,50 @@ const api: PosApi = {
 
   audit: {
     list: (input) => ipcRenderer.invoke(IPC.auditList, input)
+  },
+
+  products: {
+    list: (input) => ipcRenderer.invoke(IPC.productsList, input),
+    get: (input) => ipcRenderer.invoke(IPC.productsGet, input),
+    create: (input) => ipcRenderer.invoke(IPC.productsCreate, input),
+    update: (input) => ipcRenderer.invoke(IPC.productsUpdate, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.productsDeactivate, input),
+    createVariantGroup: (input) => ipcRenderer.invoke(IPC.productsCreateVariantGroup, input),
+    listVariants: (input) => ipcRenderer.invoke(IPC.productsListVariants, input)
+  },
+
+  // Every one of these is a READ of a figure derived from stock_movements — except `adjust`, which
+  // is the only way anything in this app moves stock at all. There is no `setStock`, deliberately.
+  stock: {
+    levels: (input) => ipcRenderer.invoke(IPC.stockLevels, input),
+    level: (input) => ipcRenderer.invoke(IPC.stockLevel, input),
+    movements: (input) => ipcRenderer.invoke(IPC.stockMovements, input),
+    lowStock: (input) => ipcRenderer.invoke(IPC.stockLowStock, input),
+    nearExpiry: (input) => ipcRenderer.invoke(IPC.stockNearExpiry, input),
+    adjust: (input) => ipcRenderer.invoke(IPC.stockAdjust, input)
+  },
+
+  catalog: {
+    findByBarcode: (input) => ipcRenderer.invoke(IPC.catalogFindByBarcode, input),
+    listBarcodes: (input) => ipcRenderer.invoke(IPC.catalogListBarcodes, input),
+    addBarcode: (input) => ipcRenderer.invoke(IPC.catalogAddBarcode, input),
+    replaceBarcode: (input) => ipcRenderer.invoke(IPC.catalogReplaceBarcode, input),
+    barcodeReplacements: (input) => ipcRenderer.invoke(IPC.catalogBarcodeReplacements, input),
+
+    listPacks: (input) => ipcRenderer.invoke(IPC.catalogListPacks, input),
+    savePack: (input) => ipcRenderer.invoke(IPC.catalogSavePack, input),
+    deletePack: (input) => ipcRenderer.invoke(IPC.catalogDeletePack, input),
+
+    listSuppliers: (input) => ipcRenderer.invoke(IPC.catalogListSuppliers, input),
+    getSupplier: (input) => ipcRenderer.invoke(IPC.catalogGetSupplier, input),
+    createSupplier: (input) => ipcRenderer.invoke(IPC.catalogCreateSupplier, input),
+    updateSupplier: (input) => ipcRenderer.invoke(IPC.catalogUpdateSupplier, input),
+    listProductSuppliers: (input) => ipcRenderer.invoke(IPC.catalogListProductSuppliers, input),
+    linkSupplier: (input) => ipcRenderer.invoke(IPC.catalogLinkSupplier, input),
+    unlinkSupplier: (input) => ipcRenderer.invoke(IPC.catalogUnlinkSupplier, input),
+
+    listBatches: (input) => ipcRenderer.invoke(IPC.catalogListBatches, input),
+    addBatch: (input) => ipcRenderer.invoke(IPC.catalogAddBatch, input)
   }
 }
 
