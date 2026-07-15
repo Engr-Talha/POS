@@ -268,7 +268,23 @@ export const IPC = {
   // name one on, exactly like the Excel-template export.
   reportsGet: 'reports:get',
   reportsExportExcel: 'reports:exportExcel',
-  reportsExportPdf: 'reports:exportPdf'
+  reportsExportPdf: 'reports:exportPdf',
+
+  // ── EXPENSES (migration 0014) — the shop's money going OUT on the NON-STOCK cost of running the ──
+  //
+  // Rent, wages, bills, transport, repairs. A purchase brings stock IN and re-averages its cost; an
+  // EXPENSE buys none — it is a running cost that lands straight in the Profit & Loss, paid NOW from
+  // cash or bank as ONE balanced journal (DR the category's expense account, CR the tender). THE
+  // RENDERER SENDS INTENT; MAIN DECIDES THE ACCOUNTS AND THE ACTOR: the input names WHAT it was for and
+  // HOW it was paid (lookups ids the service re-validates), never a ledger account and never a userId.
+  // The input schemas + row types live in '@shared/expenses' and are used verbatim by the handlers.
+  //
+  // create WRITES and is gated 'expense.manage' (manager) + assertWritable() in MAIN — an expired shop
+  // cannot book a new expense until it renews. list / get are 'expense.view' (manager) READS and keep
+  // working on an expired licence: it can still browse and export what it spent. (CLAUDE.md §6)
+  expenseCreate: 'expense:create',
+  expenseList: 'expense:list',
+  expenseGet: 'expense:get'
 } as const
 
 export type SystemInfo = {

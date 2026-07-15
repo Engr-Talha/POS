@@ -176,6 +176,13 @@ import type { Account, TrialBalance } from './accounting'
 import type { AppState } from './app-state'
 import type { ReportRequest } from './reports'
 import type { ReportPayload } from './report-export'
+import type {
+  CreateExpenseInput,
+  ListExpensesInput,
+  GetExpenseInput,
+  ExpenseDetail,
+  ExpenseList
+} from './expenses'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -816,5 +823,31 @@ export interface PosApi {
     exportExcel: (params: ReportRequest) => Promise<Result<string | null>>
     /** Returns the saved .pdf path, or null if the owner closed the save dialog. */
     exportPdf: (params: ReportRequest) => Promise<Result<string | null>>
+  }
+
+  /**
+   * EXPENSES — the shop's money going OUT on the NON-STOCK cost of running the place: rent, wages,
+   * bills, transport, repairs. A purchase brings stock IN and re-averages its cost; an EXPENSE buys
+   * none — it is a running cost that lands straight in the Profit & Loss, paid NOW from cash or bank
+   * as ONE balanced journal (DR the category's expense account, CR the tender).
+   *
+   * THE RENDERER SENDS INTENT; MAIN DECIDES THE ACCOUNTS. The input says WHAT it was for
+   * (categoryLookupId), HOW MUCH, and HOW it was paid (methodLookupId) — never a ledger account, and
+   * never a userId (that is the authenticated session in MAIN). `create` is the only WRITE, gated
+   * 'expense.manage' + assertWritable() in MAIN; `list` / `get` are 'expense.view' READS that keep
+   * working on an expired licence — an expired shop can still browse and export what it spent.
+   * (CLAUDE.md §6.) Permissions are enforced in MAIN, not by this interface (hiding a button is a
+   * courtesy, not a control).
+   */
+  expenses: {
+    /** Record an expense: writes the row and posts one balanced journal, in ONE transaction. Audited. */
+    create: (input: CreateExpenseInput) => Promise<Result<ExpenseDetail>>
+    /**
+     * The expenses list — paginated and indexed, newest first. Filterable by date range and category.
+     * Also carries `totalMinor` and the row count for the WHOLE filtered range, not just this page.
+     */
+    list: (input: ListExpensesInput) => Promise<Result<ExpenseList>>
+    /** ONE expense in full — the row plus its category / method labels and who recorded it. */
+    get: (input: GetExpenseInput) => Promise<Result<ExpenseDetail>>
   }
 }

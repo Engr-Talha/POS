@@ -120,6 +120,7 @@ import {
   type SupplierWithBalance
 } from '@shared/suppliers'
 import { CreatePurchaseInput, ListPurchasesInput, GetPurchaseInput } from '@shared/purchases'
+import { CreateExpenseInput, ListExpensesInput, GetExpenseInput } from '@shared/expenses'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -172,6 +173,7 @@ import * as excelImportService from '../services/excel-import'
 import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
 import * as shiftsService from '../services/shifts'
+import * as expensesService from '../services/expenses'
 import * as printer from '../printing/printer'
 import * as reportsService from '../services/reports'
 import { reportToXlsxBuffer } from '../services/reports-excel'
@@ -2028,5 +2030,45 @@ export function registerIpcHandlers(): void {
 
     if (path) log.info(`[reports] ${payload.kind} exported to PDF: ${path}`)
     return path
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EXPENSES (migration 0014) — the shop's money going OUT on the NON-STOCK cost of running the place
+  //
+  // Rent, wages, bills, transport, repairs. A purchase brings stock IN and re-averages its cost; an
+  // EXPENSE buys none — it is a running cost that lands straight in the Profit & Loss, paid NOW from
+  // cash or bank as ONE balanced journal (DR the category's expense account, CR the tender). THE
+  // RENDERER SENDS INTENT; MAIN DECIDES THE ACCOUNTS AND THE ACTOR — the input names WHAT it was for and
+  // HOW it was paid (lookups ids the service re-validates against the live lists), never a ledger account
+  // and never a userId; `user` comes from the session in MAIN.
+  //
+  // THE SERVICE AUDITS ITSELF ('expense.create') from inside its own transaction, where it holds the
+  // actor. So the create handler below does NOT log a second row — the same contract every other service
+  // keeps (see ipc/audit-contract.test.ts). A log that records the same act twice is a log nobody trusts.
+  //
+  // PERMISSIONS (rbac.ts) — booking and reviewing the shop's running costs are a manager's job, like a
+  // purchase:
+  //   expense.manage   record an expense            (WRITE  — assertWritable())
+  //   expense.view     read the expense history     (reads  — no assertWritable())
+  // Only the write is blocked on an expired licence; the reads keep working — an expired shop can still
+  // browse and export what it spent. (CLAUDE.md §6)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  handle(IPC.expenseCreate, CreateExpenseInput, (input) => {
+    const user = session.requirePermissionOf('expense.manage')
+    assertWritable()
+    // ONE transaction: the expenses row → DR the category's expense account · CR the tender → audit
+    // 'expense.create'. The service does it all and audits itself — do not log a second row here.
+    return expensesService.createExpense(getDb(), user, input)
+  })
+
+  handle(IPC.expenseList, ListExpensesInput, (input) => {
+    session.requirePermissionOf('expense.view')
+    return expensesService.listExpenses(getDb(), input)
+  })
+
+  handle(IPC.expenseGet, GetExpenseInput, (input) => {
+    session.requirePermissionOf('expense.view')
+    return expensesService.getExpense(getDb(), input.id)
   })
 }

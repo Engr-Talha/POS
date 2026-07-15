@@ -65,8 +65,10 @@ export const PERMISSIONS = {
   'supplier.pay': 'manager', // pay down what the shop owes a supplier
   'supplier.view': 'manager', // read the supplier ledger / balances
 
-  // Money
+  // Money — recording an expense is a manager act, like a purchase (§4 roles); reading the expense
+  // history is a manager's too. A cashier neither books the shop's running costs nor reviews them.
   'expense.manage': 'manager',
+  'expense.view': 'manager',
   'report.view': 'manager',
 
   // Administration

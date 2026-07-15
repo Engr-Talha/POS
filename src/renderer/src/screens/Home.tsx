@@ -42,7 +42,8 @@ import {
   Undo2,
   Wallet,
   Truck,
-  ShoppingCart
+  ShoppingCart,
+  HandCoins
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -51,6 +52,7 @@ import { ROLE_LABEL, roleCan } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
 import { Books } from './sections/Books'
 import { Customers } from './sections/Customers'
+import { Expenses } from './sections/Expenses'
 import { Lists } from './sections/Lists'
 import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
@@ -73,6 +75,7 @@ type Section =
   | 'sales'
   | 'returns'
   | 'purchases'
+  | 'expenses'
   | 'shifts'
   | 'opening'
   | 'books'
@@ -100,6 +103,7 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
   { key: 'returns', label: 'Returns', icon: Undo2, permission: 'sale.refund' },
   { key: 'purchases', label: 'Purchases', icon: ShoppingCart, permission: 'purchase.view' },
+  { key: 'expenses', label: 'Expenses', icon: HandCoins, permission: 'expense.manage' },
   { key: 'shifts', label: 'Shift', icon: Wallet, permission: 'shift.manage' },
   { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
@@ -308,6 +312,9 @@ export function Home({
               currencySymbol={currencySymbol}
               userRole={user.role}
             />
+          )}
+          {section === 'expenses' && (
+            <Expenses readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'shifts' && user && (
             <Shifts

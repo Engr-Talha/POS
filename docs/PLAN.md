@@ -302,6 +302,15 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Phase 7 Expenses done** (v0.12.0). The shop's NON-STOCK running costs (rent, wages, bills, transport)
+  paid from cash or bank: one balanced journal, DR the mapped expense account (category → 5200/5210/5220/
+  5230/5240, any other → General Expenses 5900) CR the tender; a 'credit'/on-account tender is refused (an
+  unpaid bill is not an expense row — that's an accrued liability, later). These flow straight into the
+  P&L. An Expenses screen lists + totals them by date range/category with a record form. Focused audit came
+  back clean (accounting/tender/RBAC/atomicity all hold) — one LOW fix: the date schema accepted a
+  calendar-invalid value (2026-02-30 rolled to March), now rejected, with a regression test. NOTE: a
+  transient machine overload made vitest's PARALLEL workers time out (spurious, varying failures); the
+  suite is green run sequentially (`vitest run --no-file-parallelism`) — 720 tests.
 - **Phase 7 buying side done** (v0.10.0). The mirror of selling: **Suppliers** (CRUD), **Purchases / GRN**
   (received stock re-averages the weighted cost through a frozen movement; DR Inventory + Input-Tax, CR
   cash/bank tenders, CR Payable for the unpaid remainder — balanced by construction), and the **Supplier

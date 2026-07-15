@@ -279,6 +279,16 @@ const api: PosApi = {
     get: (params) => ipcRenderer.invoke(IPC.reportsGet, params),
     exportExcel: (params) => ipcRenderer.invoke(IPC.reportsExportExcel, params),
     exportPdf: (params) => ipcRenderer.invoke(IPC.reportsExportPdf, params)
+  },
+
+  // EXPENSES — money going OUT on the non-stock cost of running the shop (rent, wages, bills, transport,
+  // repairs). The renderer says WHAT it was for and HOW it was paid; MAIN maps those to ledger accounts,
+  // stamps the actor from the session, and posts one balanced journal. `create` is the only write (gated
+  // 'expense.manage' + assertWritable() in MAIN, not by this whitelist); `list` and `get` are reads.
+  expenses: {
+    create: (input) => ipcRenderer.invoke(IPC.expenseCreate, input),
+    list: (input) => ipcRenderer.invoke(IPC.expenseList, input),
+    get: (input) => ipcRenderer.invoke(IPC.expenseGet, input)
   }
 }
 
