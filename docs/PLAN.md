@@ -283,6 +283,19 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   adjust the books). Adversarial audit found **7 real bugs**, all fixed with regression tests — chiefly
   that voiding a sale from an already-CLOSED shift rewrote its frozen Z-report and mis-charged today's
   drawer (now refused — after close, the instrument is a return, exactly as the returns guard works).
+- **Phase 9 (Reports) — IN PROGRESS** (targeting v0.11.0). The payoff: the owner finally SEES the business.
+  §5 lists ~18 reports; the FIRST increment is the core set that a shop reads daily/weekly, each exporting
+  to **Excel (exceljs) AND PDF** with the PDF **rendered and looked at before shipping** (trap #14), behind
+  one Reports screen (pick report → date range/params → view → export):
+    1. **Sales summary** (date range: count, gross, net, discounts, tax, by tender, by day).
+    2. **Profit** (revenue − COGS from the frozen sale-line cost; gross margin).
+    3. **Stock valuation** (on-hand × weighted cost = inventory value; ties to GL Inventory).
+    4. **Customer aging** + **Supplier aging** (current / 30 / 60 / 90+, reconciling to Receivable/Payable).
+    5. **Leakage** (discounts by user, voids, returns, no-sales — the anti-theft report).
+    6. **Financial statements** from the ledger: **Trial Balance**, **Profit & Loss**, **Balance Sheet**.
+  Every figure is DERIVED from the existing tables/ledger — reports read, never write, and never recompute
+  a frozen historical number. The remaining §5 reports (item/category-wise, payment-method, tax summary,
+  low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
 - **Phase 7 buying side done** (v0.10.0). The mirror of selling: **Suppliers** (CRUD), **Purchases / GRN**
   (received stock re-averages the weighted cost through a frozen movement; DR Inventory + Input-Tax, CR
   cash/bank tenders, CR Payable for the unpaid remainder — balanced by construction), and the **Supplier
