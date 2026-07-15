@@ -18,6 +18,7 @@ import * as customers from './customers'
 // The posting engine, aliased: the public `ledger()` statement function below owns the plain name.
 import * as postingEngine from './ledger'
 import { outstandingCredit } from './sales'
+import { openShiftId } from './shift-id'
 
 /**
  * THE CUSTOMER LEDGER — the running account the shop keeps with each customer, and the udhaar they pay
@@ -340,10 +341,10 @@ export function recordPayment(
         .prepare(
           `INSERT INTO customer_payments
              (customer_id, at, amount, method_lookup_id, cheque_no, cheque_date, wallet_ref, note,
-              user_id, journal_id, created_at)
+              user_id, journal_id, shift_id, created_at)
            VALUES
              (@customerId, @at, @amount, @methodLookupId, @chequeNo, @chequeDate, @walletRef, @note,
-              @userId, NULL, @at)`
+              @userId, NULL, @shiftId, @at)`
         )
         .run({
           customerId: input.customerId,
@@ -354,7 +355,9 @@ export function recordPayment(
           chequeDate: input.chequeDate ?? null,
           walletRef: input.walletRef ?? null,
           note: input.note ?? null,
-          userId: actor.id
+          userId: actor.id,
+          // The OPEN shift this repayment belongs to, or NULL if the till is not on a shift (0012).
+          shiftId: openShiftId(db)
         }).lastInsertRowid
     )
 

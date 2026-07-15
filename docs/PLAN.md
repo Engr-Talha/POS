@@ -262,8 +262,35 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
      to confirm the reason options before a `price_override_reason` list is seeded and enforced.
   2. **A cashier is told the wholesale tier is forbidden only at the Pay button**, not when they
      switch to it. Pure UX; the control itself is enforced in main.
+- **Phase 7 (customers half) done** (v0.7.0 → v0.7.1). Customers + inline "+ new customer" on Sell,
+  per-customer ledger with payments, Sales history, Users/staff admin, and one reusable Paginator on
+  **every** list (page size + page numbers — the owner's explicit ask). Audit fixed a retired-staff PIN
+  that could be reused and, on reactivation, collide (two active users behind one PIN, one identity).
+  The **suppliers / purchases / loyalty / expenses / quotations** half of Phase 7 is still to come.
+- **Phase 6a done** (v0.8.0). Returns / refunds: partial, restock-or-damage, refund vs apply-to-account,
+  supervisor-PIN, frozen-figure reversal (a refund matches the original receipt; restocked goods keep
+  GL Inventory == the stock report). Adversarial audit found **11 real bugs** — a refund misroutable onto
+  the udhaar tender, a void double-reversing an already-returned sale, and returns missing from the
+  derived customer balance/statement (all trap #17) — every one fixed with a regression test.
+- **v0.8.1** (owner-reported bug). An over-threshold discount demanded a supervisor PIN even for the
+  Owner — who, in a one-user shop, has no PIN and no other supervisor, so the sale could not complete.
+  The person at the till now authorises their own over-threshold discount when their role clears the bar
+  (exactly as void / return / wholesale-tier already did); the discount is still audited.
+- **Phase 6b done** (v0.9.0). Shift open/close + **Z-report** + cash-drawer movements — no-sale logged
+  with a reason (the theft vector), pay-in / pay-out / drop each posting a clean journal. Drawer
+  reconciliation: expected = opening float + cash sales (net of change) + cash udhaar + pay-ins − cash
+  refunds − pay-outs − drops; **over/short is recorded, never journaled** (a miscount must not silently
+  adjust the books). Adversarial audit found **7 real bugs**, all fixed with regression tests — chiefly
+  that voiding a sale from an already-CLOSED shift rewrote its frozen Z-report and mis-charged today's
+  drawer (now refused — after close, the instrument is a return, exactly as the returns guard works).
 
 ## 7. Deferred, deliberately
+
+- **Guided exchange** (a return + a linked replacement sale, settling the difference either way). Phase 6a
+  ships a *minimal* exchange that parks store credit on a named customer's account (`exchange_group_id`
+  seam is in the schema). Best built alongside the next selling work.
+- **Petty-cash categories.** Phase 6b's pay-out posts to General Expenses and pay-in to Owner Equity so
+  GL Cash stays honest; proper expense/supplier categorisation arrives with the **Expenses** phase.
 
 - **FBR real-time invoice reporting** (Pakistan Tier-1 retailers) — needs internet. Schema seams
   (`fbr_invoice_no`, `fbr_qr`, `fbr_sync_status`, `sync_queue`) are in from day one so it drops in later.

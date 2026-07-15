@@ -41,6 +41,7 @@ import * as catalog from './catalog'
 import * as ledger from './ledger'
 import * as settings from './settings'
 import * as stock from './stock'
+import { openShiftId } from './shift-id'
 
 /**
  * THE SALE ENGINE. Every rupee this shop takes passes through this file.
@@ -2076,7 +2077,11 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
     grandTotal: priced.grandTotal,
     paidTotal: args.paidTotal,
     changeDue: args.changeDue,
-    hadNegativeStock: args.hadNegativeStock ? 1 : 0
+    hadNegativeStock: args.hadNegativeStock ? 1 : 0,
+    // The OPEN shift this sale belongs to, or NULL if the till is not on a shift (migration 0012). A
+    // leaf lookup (shift-id.ts) so recording the shift cannot form a sales↔shifts import cycle. Runs
+    // inside the caller's transaction, so a resumed cart is stamped with the shift it is COMPLETED on.
+    shiftId: openShiftId(db)
   }
 
   if (args.parkedId != null) {
@@ -2090,7 +2095,7 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
          at = @at, customer_id = @customerId, user_id = @userId, price_tier = @priceTier,
          status = @status, subtotal_net = @subtotalNet, cart_discount = @cartDiscount,
          tax_total = @taxTotal, grand_total = @grandTotal, paid_total = @paidTotal,
-         change_due = @changeDue, had_negative_stock = @hadNegativeStock
+         change_due = @changeDue, had_negative_stock = @hadNegativeStock, shift_id = @shiftId
        WHERE id = @id`
     ).run({ ...values, id: args.parkedId })
 
@@ -2103,11 +2108,11 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
         `INSERT INTO sales
            (invoice_no, invoice_seq, invoice_year, at, customer_id, user_id, price_tier, status,
             subtotal_net, cart_discount, tax_total, grand_total, paid_total, change_due,
-            had_negative_stock, created_at)
+            had_negative_stock, shift_id, created_at)
          VALUES
            (@invoiceNo, @invoiceSeq, @invoiceYear, @at, @customerId, @userId, @priceTier, @status,
             @subtotalNet, @cartDiscount, @taxTotal, @grandTotal, @paidTotal, @changeDue,
-            @hadNegativeStock, @createdAt)`
+            @hadNegativeStock, @shiftId, @createdAt)`
       )
       .run({ ...values, createdAt: new Date().toISOString() }).lastInsertRowid
   )
@@ -2325,6 +2330,32 @@ export function voidSale(
       `Invoice ${sale.invoiceNo} has returns recorded against it, so it cannot be cancelled. Please reverse or settle those returns first.`,
       `sale ${input.id} has ${returnCount} return(s); refusing to void to avoid double reversal`
     )
+  }
+
+  // A sale rung on a shift THAT HAS SINCE CLOSED cannot be voided. A closed shift's Z-report is frozen:
+  // the drawer was counted and reconciled and signed off. But the shift's cash is DERIVED from its
+  // sales' live status (shifts.computeReconciliation filters status='completed'), so letting a void drop
+  // this sale out would silently rewrite that reconciled, closed drawer — and the cash a cash-sale void
+  // hands back today lands on whatever shift is open NOW, with no line to explain it, so today's cashier
+  // shows short for money a supervisor voided. After the drawer is closed the correct instrument is a
+  // RETURN, which lands its refund on today's shift and never mutates the original sale. So a closed-
+  // shift sale is refused here, exactly as a returned sale is. Only one shift is open at a time, so a
+  // sale's shift_id is the open shift (fine), a closed shift (refused), or NULL (fine). (Shift audit, HIGH.)
+  const saleShiftId = db.prepare('SELECT shift_id FROM sales WHERE id = ?').pluck().get(input.id) as
+    | number
+    | null
+  if (saleShiftId != null) {
+    const shiftClosed = db
+      .prepare('SELECT closed_at IS NOT NULL FROM shifts WHERE id = ?')
+      .pluck()
+      .get(saleShiftId) as number | undefined
+    if (shiftClosed) {
+      throw new AppError(
+        ErrorCode.VALIDATION,
+        `Invoice ${sale.invoiceNo} was rung on a shift that has already been closed, so it cannot be cancelled now. Please process a Return/refund instead.`,
+        `sale ${input.id} belongs to closed shift ${saleShiftId}; refusing to void (would corrupt the frozen Z-report and mis-charge the current drawer)`
+      )
+    }
   }
 
   // The reason must be on the owner's OWN void_reason list. The DATABASE refuses a void without one

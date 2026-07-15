@@ -41,7 +41,15 @@ export const PERMISSIONS = {
   'sale.discount.over_threshold': 'supervisor',
   'sale.price_override': 'supervisor',
   'sale.negative_stock': 'cashier', // allowed, but warned + flagged + audited
-  'drawer.no_sale': 'supervisor', // opening the till with no sale is a classic theft vector
+  'drawer.no_sale': 'supervisor', // physically kicking the till open with no sale is a theft vector
+
+  // Shifts / cash drawer — running the till is a CASHIER's job. Opening/closing a shift and recording a
+  // drawer movement (a no-sale, a pay-in/out, a drop) are all `shift.manage`: the control is the audit
+  // log and the Z-report variance, NOT a block. A no-sale and a pay-out are theft vectors and are
+  // heavily audited, but a cashier may still do them — that is real shop workflow. Reading the shift
+  // history and a historical Z-report is a supervisory/reporting act, so `shift.view` is a manager's.
+  'shift.manage': 'cashier',
+  'shift.view': 'manager',
 
   // Catalog & stock
   'product.manage': 'manager',

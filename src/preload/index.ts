@@ -223,6 +223,21 @@ const api: PosApi = {
     printReceipt: (input) => ipcRenderer.invoke(IPC.printReceipt, input),
     openDrawer: (input) => ipcRenderer.invoke(IPC.printOpenDrawer, input),
     listPrinters: () => ipcRenderer.invoke(IPC.printListPrinters)
+  },
+
+  // SHIFTS & THE CASH DRAWER — the till's trading day. Open with a float, record the drawer events that
+  // are NOT sales (a no-sale, cash in/out, a drop to the safe), and COUNT the drawer at close. The
+  // renderer sends INTENT; MAIN derives `expectedCash`/`variance` and freezes them — no total crosses
+  // this line. `current` is the light read the Sell screen leans on to know a drawer is open; `open`,
+  // `close` and `cashMovement` are the writes; `list`/`get` are the manager-gated reports. Every
+  // permission is enforced in MAIN — this whitelist is a boundary, not the security check.
+  shifts: {
+    open: (input) => ipcRenderer.invoke(IPC.shiftsOpen, input),
+    close: (input) => ipcRenderer.invoke(IPC.shiftsClose, input),
+    current: () => ipcRenderer.invoke(IPC.shiftsCurrent),
+    cashMovement: (input) => ipcRenderer.invoke(IPC.shiftsCashMovement, input),
+    list: (input) => ipcRenderer.invoke(IPC.shiftsList, input),
+    get: (input) => ipcRenderer.invoke(IPC.shiftsGet, input)
   }
 }
 

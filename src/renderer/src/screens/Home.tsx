@@ -38,7 +38,8 @@ import {
   ReceiptText,
   UsersRound,
   BookUser,
-  Undo2
+  Undo2,
+  Wallet
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -54,6 +55,7 @@ import { Returns } from './sections/Returns'
 import { SalesHistory } from './sections/SalesHistory'
 import { Sell } from './sections/Sell'
 import { SettingsSection } from './sections/SettingsSection'
+import { Shifts } from './sections/Shifts'
 import { Stock } from './sections/Stock'
 import { Users } from './sections/Users'
 
@@ -64,6 +66,7 @@ type Section =
   | 'stock'
   | 'sales'
   | 'returns'
+  | 'shifts'
   | 'opening'
   | 'books'
   | 'customers'
@@ -87,6 +90,7 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'stock', label: 'Stock', icon: Boxes },
   { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
   { key: 'returns', label: 'Returns', icon: Undo2, permission: 'sale.refund' },
+  { key: 'shifts', label: 'Shift', icon: Wallet, permission: 'shift.manage' },
   { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
   { key: 'customers', label: 'Customers', icon: BookUser, permission: 'report.view' },
@@ -281,6 +285,13 @@ export function Home({
           {section === 'sales' && <SalesHistory currencySymbol={currencySymbol} />}
           {section === 'returns' && user && (
             <Returns
+              userRole={user.role}
+              readOnly={state.readOnly}
+              currencySymbol={currencySymbol}
+            />
+          )}
+          {section === 'shifts' && user && (
+            <Shifts
               userRole={user.role}
               readOnly={state.readOnly}
               currencySymbol={currencySymbol}

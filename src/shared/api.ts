@@ -105,6 +105,18 @@ import type {
   RecordCustomerPaymentInput
 } from './customers'
 import type {
+  Shift,
+  ShiftDetail,
+  ShiftListItem,
+  ZReport,
+  CashMovement,
+  OpenShiftInput,
+  CloseShiftInput,
+  CashMovementInput,
+  ListShiftsInput,
+  GetShiftInput
+} from './shifts'
+import type {
   AddBarcodeInput,
   AdjustStockInput,
   Batch,
@@ -641,5 +653,49 @@ export interface PosApi {
 
     /** The printers the OS can see, for the Settings dropdown. Owner picks; nobody types a name. */
     listPrinters: () => Promise<Result<PrinterInfo[]>>
+  }
+
+  /**
+   * SHIFTS & THE CASH DRAWER — the till's trading day.
+   *
+   * A shift is a drawer session: a cashier opens it with a starting float, rings the day's sales and
+   * refunds through it, records the drawer events that are NOT sales (a no-sale pop, petty cash in or
+   * out, a drop to the safe), and at close COUNTS the drawer against what the books say should be there.
+   * The over/short is the single most watched number in a shop.
+   *
+   * THE RENDERER SENDS INTENT; MAIN DECIDES THE MONEY. No input carries `expectedCash` or `variance` —
+   * those are DERIVED in main from the shift's own documents and FROZEN at close, exactly as a sale line
+   * freezes its net/tax. The clock is main's too: nothing here is timestamped by a caller.
+   *
+   * PERMISSIONS, enforced in MAIN (this interface is not a security boundary — hiding a button is a
+   * courtesy, not a control):
+   *   open / close / cashMovement  'shift.manage' (cashier). Running the till is a cashier's job; the
+   *                                 control is the audit log and the variance, not a block. WRITES.
+   *   current                      'sale.create' (cashier). A LIGHT READ the Sell screen leans on to know
+   *                                 whether a drawer is open before it rings anything up.
+   *   list / get                   'shift.view' (manager). The shift history and a historical Z-report.
+   * Only the writes are blocked on an expired licence; every read keeps working. (CLAUDE.md §6.)
+   */
+  shifts: {
+    /** OPEN a shift with a starting float. Refused while one is already open — one drawer, one session. */
+    open: (input: OpenShiftInput) => Promise<Result<Shift>>
+    /**
+     * CLOSE the open shift by handing main the physically COUNTED cash. Main computes expected + variance,
+     * freezes them onto the row together, and returns the shift with its frozen Z-report. Over/short is
+     * RECORDED, never posted to the ledger — a miscount must not silently adjust GL Cash.
+     */
+    close: (input: CloseShiftInput) => Promise<Result<{ shift: Shift; zReport: ZReport }>>
+    /** The one open shift (no close time yet), or null. The Sell screen's read to know a drawer is open. */
+    current: () => Promise<Result<Shift | null>>
+    /**
+     * Record a drawer event that is NOT a sale: a no-sale pop, cash in, cash out, or a drop to the safe.
+     * Posts the balanced journal (NONE for a no-sale, which moves no money). A no-sale and a pay-out each
+     * REQUIRE a reason code from the owner's own list — the two theft vectors — and all are audited.
+     */
+    cashMovement: (input: CashMovementInput) => Promise<Result<CashMovement>>
+    /** The shifts list — paginated and indexed, newest first. Assume a shift a day for years. */
+    list: (input: ListShiftsInput) => Promise<Result<PagedResult<ShiftListItem>>>
+    /** ONE shift with its cash movements and its Z-report — the shift detail screen. */
+    get: (input: GetShiftInput) => Promise<Result<ShiftDetail>>
   }
 }

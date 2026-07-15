@@ -26,6 +26,7 @@ import * as auth from './auth'
 import * as ledger from './ledger'
 import * as sales from './sales'
 import * as stock from './stock'
+import { openShiftId } from './shift-id'
 
 /**
  * THE RETURNS ENGINE. Goods coming BACK, and the money that goes back with them. (Migration 0011.)
@@ -390,11 +391,11 @@ export function createReturn(db: DB, actor: User, rawInput: unknown, now = new D
           `INSERT INTO returns
              (sale_id, at, user_id, approved_by, approved_by_role, reason_code, reason_text,
               settlement, refund_method_lookup_id, exchange_group_id,
-              subtotal_net, tax_total, grand_total, journal_id, notes, created_at)
+              subtotal_net, tax_total, grand_total, journal_id, shift_id, notes, created_at)
            VALUES
              (@saleId, @at, @userId, @approvedBy, @approvedByRole, @reasonCode, @reasonText,
               @settlement, @refundMethodLookupId, @exchangeGroupId,
-              @subtotalNet, @taxTotal, @grandTotal, NULL, @notes, @createdAt)`
+              @subtotalNet, @taxTotal, @grandTotal, NULL, @shiftId, @notes, @createdAt)`
         )
         .run({
           saleId: sale.id,
@@ -410,6 +411,8 @@ export function createReturn(db: DB, actor: User, rawInput: unknown, now = new D
           subtotalNet,
           taxTotal,
           grandTotal,
+          // The OPEN shift this refund belongs to, or NULL if the till is not on a shift (migration 0012).
+          shiftId: openShiftId(db),
           notes: input.notes ?? null,
           createdAt: new Date().toISOString()
         }).lastInsertRowid

@@ -206,7 +206,27 @@ export const IPC = {
   // renderer print a receipt for a sale that never happened, with any total it liked.
   printReceipt: 'printing:printReceipt',
   printOpenDrawer: 'printing:openDrawer',
-  printListPrinters: 'printing:listPrinters'
+  printListPrinters: 'printing:listPrinters',
+
+  // ── SHIFTS & THE CASH DRAWER (Phase 6) ─────────────────────────────────────
+  //
+  // A shift is a drawer session: open with a float, ring the day through it, record the drawer events
+  // that are NOT sales (a no-sale, a pay-in/out, a drop), and COUNT the till at close. THE RENDERER
+  // SENDS INTENT; MAIN DECIDES THE MONEY — `expected_cash` and `variance` are DERIVED in main from the
+  // shift's own documents and FROZEN at close, never sent by a caller. The input schemas and the row
+  // types both live in '@shared/shifts' and are used verbatim by the handlers.
+  //
+  // open / close / cashMovement WRITE and are 'shift.manage' (a cashier's own gate — running the till is
+  // a cashier's job; the control is the audit log and the Z-report variance, not a block). `current` is a
+  // LIGHT READ the Sell screen leans on ('sale.create'): the till must know whether a drawer is open
+  // before it rings anything up. list / get are MANAGER reads ('shift.view'). Only the three writes take
+  // assertWritable() in MAIN; the reads keep working on an expired licence. (CLAUDE.md §6)
+  shiftsOpen: 'shifts:open',
+  shiftsClose: 'shifts:close',
+  shiftsCurrent: 'shifts:current',
+  shiftsCashMovement: 'shifts:cashMovement',
+  shiftsList: 'shifts:list',
+  shiftsGet: 'shifts:get'
 } as const
 
 export type SystemInfo = {

@@ -72,6 +72,24 @@ const SEED_LOOKUPS: Record<string, SeedLookup[]> = {
     { code: 'data_entry', label: 'Data entry correction' }
   ],
 
+  // Why the drawer was popped without a sale — an unexplained no-sale is a theft vector, so one is
+  // required. (Phase 6b.)
+  no_sale_reason: [
+    { code: 'make_change', label: 'Make change' },
+    { code: 'check_float', label: 'Check the float' },
+    { code: 'correction', label: 'Correcting a mistake' },
+    { code: 'other', label: 'Other' }
+  ],
+  // Why cash was taken OUT of the drawer (a pay-out). Required. (Phase 6b.)
+  pay_out_reason: [
+    { code: 'supplier', label: 'Paid a supplier (cash)' },
+    { code: 'utility', label: 'Paid a bill' },
+    { code: 'staff_advance', label: 'Staff advance' },
+    { code: 'petty', label: 'Petty expense' },
+    { code: 'owner_draw', label: 'Owner withdrawal' },
+    { code: 'other', label: 'Other' }
+  ],
+
   expense_category: [
     { code: 'rent', label: 'Rent' },
     { code: 'salaries', label: 'Salaries' },

@@ -70,6 +70,13 @@ import {
 } from '@shared/sales'
 import { CreateReturnInput, ListReturnsInput, GetReturnInput } from '@shared/returns'
 import {
+  OpenShiftInput,
+  CloseShiftInput,
+  CashMovementInput,
+  ListShiftsInput,
+  GetShiftInput
+} from '@shared/shifts'
+import {
   CommitOpeningInput,
   CustomerGetInput,
   CustomerListInput,
@@ -145,6 +152,7 @@ import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
 import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
+import * as shiftsService from '../services/shifts'
 import * as printer from '../printing/printer'
 import log from '../logger'
 
@@ -1718,5 +1726,88 @@ export function registerIpcHandlers(): void {
   handle<void, PrinterInfo[]>(IPC.printListPrinters, null, () => {
     session.requirePermissionOf('settings.manage')
     return printer.listPrinters()
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SHIFTS & THE CASH DRAWER (Phase 6)
+  //
+  // A shift is a drawer session: a cashier opens it with a float, rings the day through it, records the
+  // drawer events that are NOT sales (a no-sale, a pay-in/out, a drop to the safe), and COUNTS the till
+  // at close. THE RENDERER SENDS INTENT; MAIN DECIDES THE MONEY — `expectedCash` and `variance` are
+  // DERIVED in main from the shift's own documents and FROZEN at close, never sent by the caller.
+  //
+  // THE SERVICE AUDITS ITSELF. openShift / closeShift / recordCashMovement each write their own audit row
+  // (shift.open, shift.close, cash.movement) from inside their transaction, where they hold the actor and
+  // the before/after. So NOT ONE handler below logs a second row — the same contract every other service
+  // keeps (see ipc/audit-contract.test.ts). A log that records the same act twice is a log nobody trusts.
+  //
+  // PERMISSIONS — deliberately NOT uniform (rbac.ts), and the asymmetry that runs through the app:
+  //   open, close,      'shift.manage' (CASHIER). Running the till is a cashier's job; the control is the
+  //   cashMovement       audit log and the Z-report variance, NOT a block. WRITES — assertWritable().
+  //   current           'sale.create' (CASHIER). A LIGHT READ the TILL leans on: the Sell screen must know
+  //                      whether a drawer is open before it rings anything up. No assertWritable() — an
+  //                      expired shop can still SEE its shift state.
+  //   list, get         'shift.view' (MANAGER). The shift history and a historical Z-report are a
+  //                      reporting act. READS — no assertWritable(); an expired shop still exports them.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * OPEN A SHIFT with a starting float. The service validates again, posts NO journal (the float is cash
+   * already in the till, not a fresh accounting event), and audits shift.open itself. It refuses to open
+   * a second shift while one is live — one drawer, one session.
+   */
+  handle(IPC.shiftsOpen, OpenShiftInput, (input) => {
+    const user = session.requirePermissionOf('shift.manage')
+    assertWritable()
+    return shiftsService.openShift(getDb(), user, input)
+  })
+
+  /**
+   * CLOSE THE OPEN SHIFT. The cashier hands over the physically COUNTED cash; main computes the expected
+   * cash from the shift's own documents, freezes counted / expected / variance onto the row together, and
+   * audits shift.close. Over/short is RECORDED, never posted — a miscount must not adjust GL Cash. Returns
+   * the shift with its frozen Z-report.
+   */
+  handle(IPC.shiftsClose, CloseShiftInput, (input) => {
+    const user = session.requirePermissionOf('shift.manage')
+    assertWritable()
+    return shiftsService.closeShift(getDb(), user, input)
+  })
+
+  /**
+   * IS A SHIFT OPEN? The one shift with no close time, or null. A LIGHT READ the Sell screen leans on —
+   * gated 'sale.create', the cashier's own gate, because the till must know before it rings anything up.
+   * No assertWritable(): reading the shift state is never held hostage. (CLAUDE.md §6)
+   */
+  handle(IPC.shiftsCurrent, null, () => {
+    session.requirePermissionOf('sale.create')
+    return shiftsService.currentOpenShift(getDb())
+  })
+
+  /**
+   * RECORD A DRAWER MOVEMENT that is not a sale. Requires an OPEN shift. In ONE transaction: the movement
+   * row, its balanced journal (NONE for a no-sale, which moves no money), and the cash.movement audit row
+   * carrying the type and reason. A no-sale and a pay-out each demand a live reason code from the owner's
+   * own list — the two theft vectors — which the service checks against the active lookups rows.
+   */
+  handle(IPC.shiftsCashMovement, CashMovementInput, (input) => {
+    const user = session.requirePermissionOf('shift.manage')
+    assertWritable()
+    return shiftsService.recordCashMovement(getDb(), user, input)
+  })
+
+  // ── Reading shifts — MANAGER-gated ('shift.view'). No assertWritable(): an expired shop can still
+  //    browse its shift history and export a historical Z-report. (CLAUDE.md §6) ──────────────────────
+
+  /** THE SHIFTS LIST — paginated and indexed, newest first. Assume a shift a day for years. */
+  handle(IPC.shiftsList, ListShiftsInput, (input) => {
+    session.requirePermissionOf('shift.view')
+    return shiftsService.listShifts(getDb(), input)
+  })
+
+  /** ONE SHIFT with its cash movements and its Z-report — the shift detail screen. */
+  handle(IPC.shiftsGet, GetShiftInput, (input) => {
+    session.requirePermissionOf('shift.view')
+    return shiftsService.getShift(getDb(), input)
   })
 }
