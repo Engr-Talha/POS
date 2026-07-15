@@ -174,6 +174,8 @@ import type {
 import type { AuditEntry, BackupResult, Lookup, User } from './types'
 import type { Account, TrialBalance } from './accounting'
 import type { AppState } from './app-state'
+import type { ReportRequest } from './reports'
+import type { ReportPayload } from './report-export'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -794,5 +796,25 @@ export interface PosApi {
     list: (input: ListShiftsInput) => Promise<Result<PagedResult<ShiftListItem>>>
     /** ONE shift with its cash movements and its Z-report — the shift detail screen. */
     get: (input: GetShiftInput) => Promise<Result<ShiftDetail>>
+  }
+
+  /**
+   * REPORTS — the payoff. Nine reports, each read on screen and exportable to Excel or PDF.
+   *
+   * `params` is a discriminated union — `{ kind, ...that report's params }` — validated in MAIN. `get`
+   * returns the TAGGED report data (`{ kind, data }`) so the screen can render the right shape.
+   * `exportExcel` / `exportPdf` build the SAME report and let the owner choose where to save the file;
+   * MAIN writes it and returns the saved path, or NULL if they closed the save dialog. The renderer
+   * never names a path — it has no filesystem.
+   *
+   * ALL THREE ARE READS/EXPORTS, gated 'report.view' in MAIN and NEVER blocked by an expired licence: a
+   * read-only shop must still run every report and get its numbers out. (CLAUDE.md §6.)
+   */
+  reports: {
+    get: (params: ReportRequest) => Promise<Result<ReportPayload>>
+    /** Returns the saved .xlsx path, or null if the owner closed the save dialog. */
+    exportExcel: (params: ReportRequest) => Promise<Result<string | null>>
+    /** Returns the saved .pdf path, or null if the owner closed the save dialog. */
+    exportPdf: (params: ReportRequest) => Promise<Result<string | null>>
   }
 }

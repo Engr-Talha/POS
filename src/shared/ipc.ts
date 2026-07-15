@@ -252,7 +252,23 @@ export const IPC = {
   shiftsCurrent: 'shifts:current',
   shiftsCashMovement: 'shifts:cashMovement',
   shiftsList: 'shifts:list',
-  shiftsGet: 'shifts:get'
+  shiftsGet: 'shifts:get',
+
+  // ── REPORTS (Phase 8) — the payoff: read on screen, export to Excel / PDF ───
+  //
+  // A REPORT IS A READ, AND AN EXPORT IS AN EXPORT. All three are gated 'report.view' in MAIN and NONE
+  // takes assertWritable(): an expired, read-only shop must still run every report and get its numbers
+  // out as .xlsx / .pdf. Holding a shop's own figures hostage is the one thing read-only mode exists to
+  // prevent (CLAUDE.md §6) — and "export your data" is exactly what it protects.
+  //
+  // The input is the discriminated `ReportRequest` ({ kind, ...that report's params }), validated in
+  // MAIN. `get` returns the tagged report data for the screen. `exportExcel` / `exportPdf` build the
+  // SAME report and then MAIN opens the save dialog, writes the file and returns the saved path (or null
+  // if the owner closed the dialog). NEITHER export takes a path — the renderer has no filesystem to
+  // name one on, exactly like the Excel-template export.
+  reportsGet: 'reports:get',
+  reportsExportExcel: 'reports:exportExcel',
+  reportsExportPdf: 'reports:exportPdf'
 } as const
 
 export type SystemInfo = {

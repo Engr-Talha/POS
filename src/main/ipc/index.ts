@@ -141,6 +141,8 @@ import {
   type PagedResult
 } from '@shared/catalog'
 import { ok, err, AppError, ErrorCode, type Result } from '@shared/result'
+import { ReportRequest } from '@shared/reports'
+import { REPORT_TITLES, type ReportPayload } from '@shared/report-export'
 import type { AppState } from '../services/app-state'
 import { getAppState } from '../services/app-state'
 import { databaseSelfCheck } from '../services/system'
@@ -171,6 +173,9 @@ import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
 import * as shiftsService from '../services/shifts'
 import * as printer from '../printing/printer'
+import * as reportsService from '../services/reports'
+import { reportToXlsxBuffer } from '../services/reports-excel'
+import { reportToPdfBuffer } from '../services/reports-pdf'
 import log from '../logger'
 
 /**
@@ -307,6 +312,53 @@ function templateFileName(now: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0')
   const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   return `Opening balances template - ${day}.xlsx`
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// REPORT EXPORTS — the owner picks where the .xlsx / .pdf goes, MAIN writes it
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A report file name the owner can find again: "Sales Summary - 2026-07-15.xlsx". The title comes from
+ * the one data-driven `REPORT_TITLES` map (so a screen, a sheet and a file all say the same thing), with
+ * the characters Windows forbids in a filename (`\ / : * ? " < > |`) swapped for spaces.
+ */
+function reportFileName(kind: ReportPayload['kind'], ext: 'xlsx' | 'pdf', now: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  const safeTitle = REPORT_TITLES[kind].replace(/[\\/:*?"<>|]/g, ' ')
+  return `${safeTitle} - ${day}.${ext}`
+}
+
+/**
+ * Let the owner choose WHERE to save an exported report, then write it there. Returns the saved path, or
+ * null if they closed the dialog — not an error, a Tuesday.
+ *
+ * THE RENDERER NEVER NAMES A PATH (CLAUDE.md §3): main opens the save dialog and owns the filesystem, the
+ * same rule the Excel-template export follows. The buffer is built AFTER the dialog is confirmed, so a
+ * cancelled export never pays for the render — a PDF spins up a headless window, which is not free.
+ */
+async function saveReportFile(
+  defaultFileName: string,
+  filter: { name: string; extensions: string[] },
+  build: () => Promise<Buffer>
+): Promise<string | null> {
+  const options: SaveDialogOptions = {
+    title: 'Save report',
+    defaultPath: join(app.getPath('documents'), defaultFileName),
+    filters: [filter],
+    buttonLabel: 'Save report'
+  }
+
+  const window = BrowserWindow.getFocusedWindow()
+  const chosen = window
+    ? await dialog.showSaveDialog(window, options)
+    : await dialog.showSaveDialog(options)
+
+  if (chosen.canceled || !chosen.filePath) return null
+
+  writeFileSync(chosen.filePath, await build())
+  return chosen.filePath
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1910,5 +1962,71 @@ export function registerIpcHandlers(): void {
   handle(IPC.shiftsGet, GetShiftInput, (input) => {
     session.requirePermissionOf('shift.view')
     return shiftsService.getShift(getDb(), input)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REPORTS (Phase 8) — the payoff. Nine reports, on screen and out to Excel / PDF.
+  //
+  // A REPORT IS A READ, AND AN EXPORT IS AN EXPORT — so all three below are gated 'report.view' and
+  // NONE calls assertWritable(). An expired, read-only shop must still run every report and get its
+  // numbers out as .xlsx / .pdf; holding a shop's own figures hostage is the one thing read-only mode
+  // exists to prevent (CLAUDE.md §6). The line this app draws is "does it change THE BOOKS" — a report
+  // reads frozen numbers, and an export writes a file the OWNER chose; neither touches money or stock.
+  //
+  // The three route through ONE dispatch, reportsService.buildReport, which tags the bare report data
+  // with its kind. So the screen, the spreadsheet and the printout are always built from the same table
+  // and can never disagree about a number. NEITHER export takes a path: main opens the save dialog,
+  // writes the bytes and returns where they went — the renderer has no filesystem to name one on.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * RUN A REPORT FOR THE SCREEN. A read — no assertWritable() — returning the tagged report data
+   * ({ kind, data }) so the renderer can render the right shape. Annotated with the SHARED ReportPayload
+   * on purpose: `shared/` cannot import from `main/`, so this line ties buildReport's shape to the one
+   * the screen is typed against — drift breaks the build here, not the report later.
+   */
+  handle<ReportRequest, ReportPayload>(IPC.reportsGet, ReportRequest, (input) => {
+    session.requirePermissionOf('report.view')
+    return reportsService.buildReport(getDb(), input)
+  })
+
+  /**
+   * EXPORT A REPORT TO EXCEL — a workbook the owner opens and totals himself. An EXPORT, never a write:
+   * gated 'report.view', no assertWritable(). Builds the report, then lets the owner choose where the
+   * .xlsx goes; returns the saved path, or null if they closed the save dialog.
+   */
+  handle<ReportRequest, string | null>(IPC.reportsExportExcel, ReportRequest, async (input) => {
+    session.requirePermissionOf('report.view')
+
+    const payload = reportsService.buildReport(getDb(), input)
+    const path = await saveReportFile(
+      reportFileName(payload.kind, 'xlsx', new Date()),
+      { name: 'Excel file', extensions: ['xlsx'] },
+      () => reportToXlsxBuffer(payload)
+    )
+
+    if (path) log.info(`[reports] ${payload.kind} exported to Excel: ${path}`)
+    return path
+  })
+
+  /**
+   * EXPORT A REPORT TO A4 PDF — laid out to be printed and filed. An EXPORT, never a write: gated
+   * 'report.view', no assertWritable(). The shop name on the page comes from Settings (`shop.name`), the
+   * same figure the receipt uses. Returns the saved path, or null if they closed the save dialog.
+   */
+  handle<ReportRequest, string | null>(IPC.reportsExportPdf, ReportRequest, async (input) => {
+    session.requirePermissionOf('report.view')
+
+    const db = getDb()
+    const payload = reportsService.buildReport(db, input)
+    const shopName = settingsService.get<string>(db, 'shop.name', 'My Shop')
+    const path = await saveReportFile(
+      reportFileName(payload.kind, 'pdf', new Date()),
+      { name: 'PDF file', extensions: ['pdf'] },
+      () => reportToPdfBuffer(payload, shopName)
+    )
+
+    if (path) log.info(`[reports] ${payload.kind} exported to PDF: ${path}`)
+    return path
   })
 }

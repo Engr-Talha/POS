@@ -17,6 +17,7 @@ import {
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
+  BarChart3,
   Store,
   Sun,
   Moon,
@@ -54,6 +55,7 @@ import { Lists } from './sections/Lists'
 import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
 import { Purchases } from './sections/Purchases'
+import { Reports } from './sections/Reports'
 import { Returns } from './sections/Returns'
 import { SalesHistory } from './sections/SalesHistory'
 import { Sell } from './sections/Sell'
@@ -74,6 +76,7 @@ type Section =
   | 'shifts'
   | 'opening'
   | 'books'
+  | 'reports'
   | 'customers'
   | 'suppliers'
   | 'lists'
@@ -100,6 +103,7 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'shifts', label: 'Shift', icon: Wallet, permission: 'shift.manage' },
   { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
+  { key: 'reports', label: 'Reports', icon: BarChart3, permission: 'report.view' },
   { key: 'customers', label: 'Customers', icon: BookUser, permission: 'report.view' },
   { key: 'suppliers', label: 'Suppliers', icon: Truck, permission: 'supplier.view' },
   { key: 'lists', label: 'Manage lists', icon: ListChecks },
@@ -316,6 +320,7 @@ export function Home({
             <OpeningSetup readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'books' && <Books currencySymbol={currencySymbol} />}
+          {section === 'reports' && <Reports currencySymbol={currencySymbol} />}
           {section === 'customers' && (
             <Customers
               readOnly={state.readOnly}

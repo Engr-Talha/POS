@@ -283,7 +283,7 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   adjust the books). Adversarial audit found **7 real bugs**, all fixed with regression tests — chiefly
   that voiding a sale from an already-CLOSED shift rewrote its frozen Z-report and mis-charged today's
   drawer (now refused — after close, the instrument is a return, exactly as the returns guard works).
-- **Phase 9 (Reports) — IN PROGRESS** (targeting v0.11.0). The payoff: the owner finally SEES the business.
+- **Phase 9 (Reports) first increment DONE** (v0.11.0). The payoff: the owner finally SEES the business.
   §5 lists ~18 reports; the FIRST increment is the core set that a shop reads daily/weekly, each exporting
   to **Excel (exceljs) AND PDF** with the PDF **rendered and looked at before shipping** (trap #14), behind
   one Reports screen (pick report → date range/params → view → export):
@@ -294,8 +294,14 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
     5. **Leakage** (discounts by user, voids, returns, no-sales — the anti-theft report).
     6. **Financial statements** from the ledger: **Trial Balance**, **Profit & Loss**, **Balance Sheet**.
   Every figure is DERIVED from the existing tables/ledger — reports read, never write, and never recompute
-  a frozen historical number. The remaining §5 reports (item/category-wise, payment-method, tax summary,
-  low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+  a frozen historical number. Excel numbers reach the sheet as real numbers with a cell format (never a
+  pre-formatted string); the PDF is offline-safe (system fonts, no external asset, A4). I rendered the
+  Balance Sheet / Sales summary / Leakage PDFs and looked at them — clean and reconciling. Adversarial
+  audit found **7 real bugs**, all fixed: chiefly that **customer/supplier aging ignored the `asOf` date**
+  (they used today's balance aged against an old date, disagreeing with the balance sheet for that date) —
+  now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
+  surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
+  summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
 - **Phase 7 buying side done** (v0.10.0). The mirror of selling: **Suppliers** (CRUD), **Purchases / GRN**
   (received stock re-averages the weighted cost through a frozen movement; DR Inventory + Input-Tax, CR
   cash/bank tenders, CR Payable for the unpaid remainder — balanced by construction), and the **Supplier
@@ -310,6 +316,12 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
 
 ## 7. Deferred, deliberately
 
+- **Report date bucketing uses UTC, not the shop's local day** (reports audit, medium). A report's
+  from/to/as-of are compared against UTC timestamps, so a sale in the local midnight–05:00 window (for
+  PKT, UTC+5) can land on the neighbouring calendar day. For a shop that does not trade those hours the
+  impact is nil, and all reports use the SAME boundary so they still reconcile with each other. The proper
+  fix is a **shop-timezone setting** (CLAUDE.md §4) threaded through the date comparisons — slated for the
+  Phase 10 polish pass.
 - **Returns-to-supplier** (purchase returns) — sending goods back to a supplier, reducing the payable.
   The mirror of a customer return; deferred from the v0.10.0 buying increment to keep it reviewable.
 

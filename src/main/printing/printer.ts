@@ -242,6 +242,56 @@ async function printHtml(
 }
 
 /**
+ * HTML -> an A4 PDF buffer, for the reports the owner exports (services/reports-pdf.ts renders the
+ * HTML). SAME hidden-window + temp-file + teardown as printHtml — a report file can carry embedded
+ * content just as a receipt can, and loadURL('data:...') breaks on large HTML (trap #11), so it is
+ * written to a FILE and loaded with loadFile. `javascript: false` because a report is markup with no
+ * business running code, and there is no network at the till regardless (offline + CSP).
+ *
+ * Unlike printReceipt this DOES throw on failure: there is no committed sale to protect here, and the
+ * caller (an owner clicking "Export to PDF") wants to be told plainly if it did not work. The window
+ * and the temp directory are still torn down in `finally`, because this runs on demand and must not
+ * leak a hidden window per export.
+ */
+export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
+  const dir = mkdtempSync(join(tmpdir(), 'pos-report-'))
+  const file = join(dir, 'report.html')
+  writeFileSync(file, html, 'utf8')
+
+  const window = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      javascript: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  try {
+    await window.loadFile(file)
+
+    // printBackground so the header/total shading actually prints; A4 because that is what the shop's
+    // printer holds; ~13mm margins so nothing is clipped. The report's own CSS keeps the layout
+    // within this — no @page margin doubling, and no fixed height that would add a trailing blank page.
+    const pdf = await window.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4',
+      margins: PDF_MARGINS
+    })
+
+    log.info(`[pdf] rendered a ${pdf.length}-byte report`)
+    return pdf
+  } finally {
+    if (!window.isDestroyed()) window.destroy()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+/** A4 report margins, in inches (Electron's printToPDF unit) — about 13mm all round. */
+const PDF_MARGINS = { marginType: 'custom', top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 } as const
+
+/**
  * The printers the OS can see — for the Settings dropdown, so the owner PICKS their printer instead of
  * typing its name and getting it subtly wrong.
  *

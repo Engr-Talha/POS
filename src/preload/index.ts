@@ -268,6 +268,17 @@ const api: PosApi = {
     cashMovement: (input) => ipcRenderer.invoke(IPC.shiftsCashMovement, input),
     list: (input) => ipcRenderer.invoke(IPC.shiftsList, input),
     get: (input) => ipcRenderer.invoke(IPC.shiftsGet, input)
+  },
+
+  // REPORTS — read on screen, or export to Excel / PDF. All three are READS/EXPORTS gated 'report.view'
+  // in MAIN and never blocked by an expired licence (CLAUDE.md §6). `get` returns the tagged report data
+  // ({ kind, data }); `exportExcel` / `exportPdf` return the saved file path, or null if the owner closed
+  // the save dialog. The renderer passes only { kind, params } and NEVER a file path — MAIN owns the
+  // filesystem: it opens the save dialog, writes the bytes and reports back where they went.
+  reports: {
+    get: (params) => ipcRenderer.invoke(IPC.reportsGet, params),
+    exportExcel: (params) => ipcRenderer.invoke(IPC.reportsExportExcel, params),
+    exportPdf: (params) => ipcRenderer.invoke(IPC.reportsExportPdf, params)
   }
 }
 
