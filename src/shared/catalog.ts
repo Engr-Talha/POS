@@ -56,15 +56,10 @@ export type SerialStatus = (typeof SERIAL_STATUSES)[number]
 
 // ── Row types ────────────────────────────────────────────────────────────────
 
-export type Supplier = {
-  id: number
-  name: string
-  phone: string | null
-  address: string | null
-  /** lookups('supplier_type'). */
-  typeLookupId: number | null
-  isActive: boolean
-}
+// NOTE: the SUPPLIER record type and its create/update/list schemas live in '@shared/suppliers' —
+// the canonical party contract shared with the Suppliers screen, the supplier ledger and the
+// `supplier:*` IPC channels. This file owns only `ProductSupplier` (the product↔supplier LINK, the
+// "Multiple Suppliers" grid), which is a different thing.
 
 export type VariantGroup = {
   id: number
@@ -319,29 +314,9 @@ const TaxRateBp = z.number().int().min(0).max(100_000)
 const DiscountBp = z.number().int().min(0).max(10_000)
 
 // ── Suppliers ────────────────────────────────────────────────────────────────
-
-export const CreateSupplierInput = z.object({
-  name: z.string().trim().min(1, 'Please enter the supplier name.').max(200),
-  phone: z.string().trim().max(50).nullish(),
-  address: z.string().trim().max(500).nullish(),
-  typeLookupId: LookupId.nullish()
-})
-
-export const UpdateSupplierInput = z.object({
-  id: RowId,
-  name: z.string().trim().min(1).max(200).optional(),
-  phone: z.string().trim().max(50).nullish(),
-  address: z.string().trim().max(500).nullish(),
-  typeLookupId: LookupId.nullish(),
-  isActive: z.boolean().optional()
-})
-
-export const SupplierListInput = z.object({
-  page: z.number().int().positive().optional(),
-  pageSize: z.number().int().positive().max(200).optional(),
-  search: z.string().trim().max(100).optional(),
-  includeInactive: z.boolean().optional()
-})
+// The supplier record and its create/update/list schemas are the canonical party contract and live
+// in '@shared/suppliers' (used by the Suppliers screen, the supplier ledger and the `supplier:*` IPC
+// channels). This file's only supplier-facing type is `ProductSupplier` — the product↔supplier LINK.
 
 // ── Variant groups ───────────────────────────────────────────────────────────
 
@@ -634,9 +609,6 @@ export const ProductHistoryInput = z.object({
 
 // ── Inferred input types ─────────────────────────────────────────────────────
 
-export type CreateSupplierInput = z.infer<typeof CreateSupplierInput>
-export type UpdateSupplierInput = z.infer<typeof UpdateSupplierInput>
-export type SupplierListInput = z.infer<typeof SupplierListInput>
 export type CreateVariantGroupInput = z.infer<typeof CreateVariantGroupInput>
 export type ProductPackInput = z.infer<typeof ProductPackInput>
 export type ProductSupplierInput = z.infer<typeof ProductSupplierInput>

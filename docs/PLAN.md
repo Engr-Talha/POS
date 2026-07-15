@@ -283,8 +283,22 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   adjust the books). Adversarial audit found **7 real bugs**, all fixed with regression tests — chiefly
   that voiding a sale from an already-CLOSED shift rewrote its frozen Z-report and mis-charged today's
   drawer (now refused — after close, the instrument is a return, exactly as the returns guard works).
+- **Phase 7 buying side done** (v0.10.0). The mirror of selling: **Suppliers** (CRUD), **Purchases / GRN**
+  (received stock re-averages the weighted cost through a frozen movement; DR Inventory + Input-Tax, CR
+  cash/bank tenders, CR Payable for the unpaid remainder — balanced by construction), and the **Supplier
+  ledger** (what's owed = opening payable + credit purchases − payments, reconciling to GL Payables like a
+  customer's udhaar). Also **consolidated a duplicate supplier service**: the workflow's new party-service
+  is now the single supplier home; catalog's old supplier CRUD, the two pickers, and the Excel importer
+  were repointed to it. Adversarial audit came back clean on the accounting/ledger/consolidation — only
+  **3 LOW UI findings** (no inline add-supplier on the purchase screen; a stale batch/expiry blocking
+  submit; unvalidated date filters), all fixed with a regression test where testable. Input tax defaults
+  to 0 (needs the owner's GST status to confirm the treatment). The **loyalty / expenses / quotations**
+  part of Phase 7, and **returns-to-supplier**, remain.
 
 ## 7. Deferred, deliberately
+
+- **Returns-to-supplier** (purchase returns) — sending goods back to a supplier, reducing the payable.
+  The mirror of a customer return; deferred from the v0.10.0 buying increment to keep it reviewable.
 
 - **Guided exchange** (a return + a linked replacement sale, settling the difference either way). Phase 6a
   ships a *minimal* exchange that parks store credit on a named customer's account (`exchange_group_id`

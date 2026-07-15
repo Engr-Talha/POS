@@ -10,6 +10,7 @@ import { parseQty, ONE_UNIT } from '@shared/qty'
 import * as audit from './audit'
 import * as catalog from './catalog'
 import * as customers from './customers'
+import * as suppliers from './suppliers'
 import * as lookups from './lookups'
 import * as opening from './opening'
 import * as products from './products'
@@ -1655,7 +1656,7 @@ function writeParties(
     const id =
       kind === 'customer'
         ? customers.create(db, actor, { name: row.name, phone: row.phone }, now).id
-        : catalog.createSupplier(db, { name: row.name, phone: row.phone }, now).id
+        : suppliers.create(db, actor, { name: row.name, phone: row.phone }, now).id
 
     ids.set(row.row, id)
   }

@@ -46,7 +46,10 @@ import {
   Users,
   Wallet
 } from 'lucide-react'
-import type { ProductListItem, Supplier } from '@shared/catalog'
+import type { ProductListItem } from '@shared/catalog'
+// The supplier RECORD type is the canonical party contract — this wizard lists and creates supplier
+// records through `window.pos.suppliers.*`, so its type comes from '@shared/suppliers'.
+import type { Supplier } from '@shared/suppliers'
 import type {
   ImportError,
   ImportLookupList,
@@ -1239,7 +1242,7 @@ function StepPayables({
   }, [load])
 
   const searchSuppliers = useCallback(async (term: string): Promise<Party[]> => {
-    const result = await window.pos.catalog.listSuppliers({
+    const result = await window.pos.suppliers.list({
       page: 1,
       pageSize: 20,
       search: term === '' ? undefined : term
@@ -2923,7 +2926,7 @@ function AddSupplierModal({
     if (!name.trim()) return
 
     setBusy(true)
-    const result = await window.pos.catalog.createSupplier({
+    const result = await window.pos.suppliers.create({
       name: name.trim(),
       phone: phone.trim() === '' ? null : phone.trim(),
       address: address.trim() === '' ? null : address.trim(),

@@ -79,11 +79,9 @@ export const IPC = {
   catalogSavePack: 'catalog:savePack',
   catalogDeletePack: 'catalog:deletePack',
 
-  // ── Catalog: suppliers ─────────────────────────────────────────────────────
-  catalogListSuppliers: 'catalog:listSuppliers',
-  catalogGetSupplier: 'catalog:getSupplier',
-  catalogCreateSupplier: 'catalog:createSupplier',
-  catalogUpdateSupplier: 'catalog:updateSupplier',
+  // ── Catalog: the product↔supplier LINK (the "Multiple Suppliers" panel) ─────
+  // The supplier RECORD's own create/update/get/list are the canonical `supplier:*` channels below —
+  // there is no `catalog:*Supplier` CRUD any more. These three are ONLY the product↔supplier link.
   catalogListProductSuppliers: 'catalog:listProductSuppliers',
   catalogLinkSupplier: 'catalog:linkSupplier',
   catalogUnlinkSupplier: 'catalog:unlinkSupplier',
@@ -139,6 +137,34 @@ export const IPC = {
   customersLedger: 'customers:ledger',
   customersBalance: 'customers:balance',
   customersRecordPayment: 'customers:recordPayment',
+
+  // ── Buying — suppliers, purchases (goods-received notes), the supplier ledger ─
+  //
+  // The mirror of customers + selling, pointing the other way: a supplier is OWED BY the shop where a
+  // customer OWES it. WHAT THE SHOP OWES IS DERIVED, never stored (opening payable + Σ purchase payables
+  // − Σ supplier_payments), and reconciles to the paisa with GL Accounts Payable — there is no channel
+  // that writes a balance. The input schemas + row types live in '@shared/suppliers' and
+  // '@shared/purchases' and are used verbatim by the handlers.
+  //
+  // Writes are 'supplier.manage' / 'purchase.manage' / 'supplier.pay'; reads 'supplier.view' /
+  // 'purchase.view' (rbac.ts — the Manager owns products and purchases). Only the writes take
+  // assertWritable() in MAIN; the reads keep working on an expired licence — a shop can still list its
+  // suppliers, read a statement and export what it owes. (CLAUDE.md §6)
+  supplierCreate: 'supplier:create',
+  supplierUpdate: 'supplier:update',
+  supplierDeactivate: 'supplier:deactivate',
+  supplierGet: 'supplier:get',
+  supplierList: 'supplier:list',
+
+  purchaseCreate: 'purchase:create',
+  purchaseList: 'purchase:list',
+  purchaseGet: 'purchase:get',
+
+  supplierLedgerBalance: 'supplierLedger:balance',
+  supplierLedgerLedger: 'supplierLedger:ledger',
+  supplierLedgerListWithBalances: 'supplierLedger:listWithBalances',
+  supplierLedgerRecordPayment: 'supplierLedger:recordPayment',
+  supplierLedgerGetPayment: 'supplierLedger:getPayment',
 
   // ── Users & roles — OWNER ONLY ('user.manage'), enforced in MAIN ────────────
   // Managing staff is the shop's keys: who may sell, void, override a price. A user is NEVER deleted
@@ -337,7 +363,8 @@ export const ProductIdInput = z.object({ productId: RowId })
 
 export const ListVariantsInput = z.object({ variantGroupId: RowId })
 
-export const SupplierGetInput = z.object({ id: RowId })
+// SupplierGetInput ({ id }) is the canonical supplier read input and lives in '@shared/suppliers' —
+// the `supplier:get` handler and the Suppliers screen import it from there. It is NOT redeclared here.
 
 /** The stock list. Mirrors stock.StockLevelsInput — the handler's types tie the two together. */
 export const StockLevelsInput = z.object({
@@ -810,6 +837,23 @@ export const CustomerBalanceInput = z.object({ customerId: RowId })
  */
 export type CustomerWithBalance = Customer & { balance: number }
 
+// ── Buying — the leftover supplier inputs with no home in shared/suppliers.ts ──
+//
+// The supplier CREATE / UPDATE / LIST / LEDGER / PAYMENT schemas are the canonical contract and live in
+// '@shared/suppliers'; the purchase schemas in '@shared/purchases'. The handlers import those straight.
+// Defined HERE are only the leftovers — the plain-id supplier writes and reads, mirroring
+// CustomerDeactivateInput / CustomerBalanceInput. An IPC input MUST be a schema; the renderer is not
+// trusted, and neither is a future LAN client.
+
+/** Retire a supplier — never delete; last year's purchase still points at the row. */
+export const SupplierDeactivateInput = z.object({ id: RowId })
+
+/** What the shop owes a supplier RIGHT NOW — derived on read. Just the id; the figure comes back as a number. */
+export const SupplierBalanceInput = z.object({ supplierId: RowId })
+
+/** Read one supplier payment by its id — for the payment receipt. */
+export const SupplierPaymentGetInput = z.object({ id: RowId })
+
 // ── Users & roles — OWNER ONLY ─────────────────────────────────────────────────
 // The SERVICE does the real validation — length against the `security.*` SETTINGS, username
 // uniqueness, the last-owner guard, PIN collision. These schemas are the gate at the boundary. Password
@@ -870,7 +914,6 @@ export type AuditListInput = z.infer<typeof AuditListInput>
 export type ProductDeactivateInput = z.infer<typeof ProductDeactivateInput>
 export type ProductIdInput = z.infer<typeof ProductIdInput>
 export type ListVariantsInput = z.infer<typeof ListVariantsInput>
-export type SupplierGetInput = z.infer<typeof SupplierGetInput>
 export type StockLevelsInput = z.infer<typeof StockLevelsInput>
 export type LowStockInput = z.infer<typeof LowStockInput>
 export type NearExpiryInput = z.infer<typeof NearExpiryInput>
@@ -887,6 +930,9 @@ export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
 export type ReturnableLinesInput = z.infer<typeof ReturnableLinesInput>
 export type CustomerDeactivateInput = z.infer<typeof CustomerDeactivateInput>
 export type CustomerBalanceInput = z.infer<typeof CustomerBalanceInput>
+export type SupplierDeactivateInput = z.infer<typeof SupplierDeactivateInput>
+export type SupplierBalanceInput = z.infer<typeof SupplierBalanceInput>
+export type SupplierPaymentGetInput = z.infer<typeof SupplierPaymentGetInput>
 export type UserListInput = z.infer<typeof UserListInput>
 export type CreateUserInput = z.infer<typeof CreateUserInput>
 export type UpdateUserInput = z.infer<typeof UpdateUserInput>

@@ -20,7 +20,9 @@ import {
   ProductDeactivateInput,
   ProductIdInput,
   ListVariantsInput,
-  SupplierGetInput,
+  SupplierDeactivateInput,
+  SupplierBalanceInput,
+  SupplierPaymentGetInput,
   StockLevelsInput,
   LowStockInput,
   NearExpiryInput,
@@ -103,6 +105,21 @@ import {
   type CustomerLedgerPage,
   type CustomerPayment
 } from '@shared/customers'
+// The BUYING contract — the mirror of customers + sales. The supplier record, the goods-received note and
+// the running payable statement. These are the SINGLE home of the supplier record schemas now that the
+// duplicate product-supplier CRUD in '@shared/catalog' is gone, so no aliasing is needed any more.
+import {
+  SupplierInput,
+  UpdateSupplierInput,
+  SupplierListInput,
+  SupplierGetInput,
+  RecordSupplierPaymentInput,
+  SupplierLedgerInput,
+  type SupplierPayment,
+  type SupplierLedgerPage,
+  type SupplierWithBalance
+} from '@shared/suppliers'
+import { CreatePurchaseInput, ListPurchasesInput, GetPurchaseInput } from '@shared/purchases'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -117,9 +134,6 @@ import {
   ReplaceBarcodeInput,
   SaveProductPackInput,
   DeleteProductPackInput,
-  CreateSupplierInput,
-  UpdateSupplierInput,
-  SupplierListInput,
   SaveProductSupplierInput,
   DeleteProductSupplierInput,
   CreateBatchInput,
@@ -147,6 +161,9 @@ import * as catalogService from '../services/catalog'
 import * as openingService from '../services/opening'
 import * as customersService from '../services/customers'
 import * as customerLedgerService from '../services/customer-ledger'
+import * as suppliersService from '../services/suppliers'
+import * as purchasesService from '../services/purchases'
+import * as supplierLedgerService from '../services/supplier-ledger'
 import * as usersService from '../services/users'
 import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
@@ -817,50 +834,9 @@ export function registerIpcHandlers(): void {
     return true
   })
 
-  // ── Suppliers ─────────────────────────────────────────────────────────────
-  handle(IPC.catalogListSuppliers, SupplierListInput, (input) => {
-    session.requirePermissionOf('report.view')
-    return catalogService.listSuppliers(getDb(), input)
-  })
-
-  handle(IPC.catalogGetSupplier, SupplierGetInput, (input) => {
-    session.requirePermissionOf('report.view')
-    return catalogService.getSupplier(getDb(), input.id)
-  })
-
-  handle(IPC.catalogCreateSupplier, CreateSupplierInput, (input) => {
-    const user = session.requirePermissionOf('purchase.manage')
-    assertWritable()
-
-    const supplier = catalogService.createSupplier(getDb(), input)
-    auditService.record(getDb(), user, {
-      action: 'supplier.create',
-      entity: 'supplier',
-      entityId: supplier.id,
-      after: supplier
-    })
-
-    return supplier
-  })
-
-  handle(IPC.catalogUpdateSupplier, UpdateSupplierInput, (input) => {
-    const user = session.requirePermissionOf('purchase.manage')
-    assertWritable()
-
-    const before = catalogService.getSupplier(getDb(), input.id)
-    const after = catalogService.updateSupplier(getDb(), input)
-
-    auditService.record(getDb(), user, {
-      action: 'supplier.update',
-      entity: 'supplier',
-      entityId: input.id,
-      before,
-      after
-    })
-
-    return after
-  })
-
+  // ── The product↔supplier LINK (the "Multiple Suppliers" panel) ─────────────
+  // The supplier RECORD's create/update/get/list are the canonical `supplier:*` handlers further down.
+  // These three touch ONLY product_suppliers — the code and price THIS supplier uses for THIS product.
   handle(IPC.catalogListProductSuppliers, ProductIdInput, (input) => {
     session.requirePermissionOf('report.view')
     return catalogService.listSuppliersForProduct(getDb(), input.productId)
@@ -1321,6 +1297,131 @@ export function registerIpcHandlers(): void {
       // ONE transaction: customer_payments row → DR Cash/Bank · CR Receivable → audit 'customer.payment'.
       // The service does it all and audits itself — do not log a second row here.
       return customerLedgerService.recordPayment(getDb(), user, input)
+    }
+  )
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUYING — suppliers, purchases (goods-received notes) and the supplier ledger
+  //
+  // The mirror of the customers + selling side, pointing the other way: a supplier is OWED BY the shop
+  // where a customer OWES it. WHAT THE SHOP OWES A SUPPLIER IS DERIVED, NEVER STORED — opening payable +
+  // Σ (purchase.grand_total − paid_total) − Σ supplier_payments, exactly as stock is the sum of its
+  // movements. No handler here writes a balance: `balance`, `listWithBalances` and `ledger` all recompute
+  // on read (CLAUDE.md trap #17), and they reconcile to the paisa with GL Accounts Payable.
+  //
+  // The services AUDIT THEMSELVES (supplier.create/update, purchase.create, supplier.payment) from inside
+  // their own transactions, where they hold the actor and the before/after — so NOT ONE handler below
+  // logs a second row. A log that records the same act twice is a log nobody trusts.
+  //
+  // PERMISSIONS (rbac.ts) — the Manager owns products and purchases, so buying is a manager's job:
+  //   supplier.manage   create / update / retire a supplier          (WRITES)
+  //   supplier.view     read the supplier record, ledger, balances   (reads)
+  //   purchase.manage   receive goods — create a purchase / GRN       (WRITE)
+  //   purchase.view     read the purchase history                    (reads)
+  //   supplier.pay      pay down what the shop owes a supplier        (WRITE)
+  //
+  // WRITES call assertWritable(): an expired shop cannot receive goods or pay a supplier until it renews.
+  // READS do not — it can still list its suppliers, read a statement and export what it owes. (CLAUDE.md §6)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── Suppliers ──────────────────────────────────────────────────────────────
+  handle(IPC.supplierCreate, SupplierInput, (input) => {
+    const user = session.requirePermissionOf('supplier.manage')
+    assertWritable()
+    // The service audits supplier.create itself — it has the actor. Do not log it twice here.
+    return suppliersService.create(getDb(), user, input)
+  })
+
+  handle(IPC.supplierUpdate, UpdateSupplierInput, (input) => {
+    const user = session.requirePermissionOf('supplier.manage')
+    assertWritable()
+    // Only the fields the form actually sent arrive here (trap #18). The service audits supplier.update.
+    return suppliersService.update(getDb(), user, input)
+  })
+
+  handle(IPC.supplierDeactivate, SupplierDeactivateInput, (input) => {
+    const user = session.requirePermissionOf('supplier.manage')
+    assertWritable()
+    // Retire, never delete — last year's purchase and this supplier's opening payable point at the row.
+    // The service flips is_active through the same audited update path.
+    return suppliersService.deactivate(getDb(), user, input.id)
+  })
+
+  handle(IPC.supplierGet, SupplierGetInput, (input) => {
+    session.requirePermissionOf('supplier.view')
+    return suppliersService.getById(getDb(), input.id)
+  })
+
+  handle(IPC.supplierList, SupplierListInput, (input) => {
+    session.requirePermissionOf('supplier.view')
+    return suppliersService.list(getDb(), input)
+  })
+
+  // ── Purchases — a goods-received note ──────────────────────────────────────
+  handle(IPC.purchaseCreate, CreatePurchaseInput, (input) => {
+    const user = session.requirePermissionOf('purchase.manage')
+    assertWritable()
+    // ONE transaction: stock in at the landed cost (re-averaging the weighted cost), one balanced journal
+    // (DR Inventory/Input Tax, CR tenders/Payable), audit purchase.create. The service does it all and
+    // audits itself — do not log a second row here.
+    return purchasesService.createPurchase(getDb(), user, input)
+  })
+
+  handle(IPC.purchaseList, ListPurchasesInput, (input) => {
+    session.requirePermissionOf('purchase.view')
+    return purchasesService.listPurchases(getDb(), input)
+  })
+
+  handle(IPC.purchaseGet, GetPurchaseInput, (input) => {
+    session.requirePermissionOf('purchase.view')
+    return purchasesService.getPurchase(getDb(), input.id)
+  })
+
+  // ── The supplier ledger — the running account, and the dues paid back ──────
+  // Annotated with the SHARED result types on purpose (the customer-ledger pattern): the annotation ties
+  // each handler to the '@shared/suppliers' shape the screen is typed against, so a service that ever
+  // drifted would break the build HERE rather than the statement rendering a blank column.
+  handle<SupplierListInput, PagedResult<SupplierWithBalance>>(
+    IPC.supplierLedgerListWithBalances,
+    SupplierListInput,
+    (input) => {
+      session.requirePermissionOf('supplier.view')
+      return supplierLedgerService.listWithBalances(getDb(), input)
+    }
+  )
+
+  handle<SupplierLedgerInput, SupplierLedgerPage>(
+    IPC.supplierLedgerLedger,
+    SupplierLedgerInput,
+    (input) => {
+      session.requirePermissionOf('supplier.view')
+      return supplierLedgerService.ledger(getDb(), input)
+    }
+  )
+
+  handle<SupplierBalanceInput, number>(IPC.supplierLedgerBalance, SupplierBalanceInput, (input) => {
+    session.requirePermissionOf('supplier.view')
+    return supplierLedgerService.balance(getDb(), input.supplierId)
+  })
+
+  handle<RecordSupplierPaymentInput, SupplierPayment>(
+    IPC.supplierLedgerRecordPayment,
+    RecordSupplierPaymentInput,
+    (input) => {
+      const user = session.requirePermissionOf('supplier.pay')
+      assertWritable()
+      // ONE transaction: supplier_payments row → DR Accounts Payable · CR Cash/Bank → audit
+      // 'supplier.payment'. The service does it all and audits itself — do not log a second row here.
+      return supplierLedgerService.recordPayment(getDb(), user, input)
+    }
+  )
+
+  handle<SupplierPaymentGetInput, SupplierPayment>(
+    IPC.supplierLedgerGetPayment,
+    SupplierPaymentGetInput,
+    (input) => {
+      session.requirePermissionOf('supplier.view')
+      return supplierLedgerService.getPayment(getDb(), input.id)
     }
   )
 

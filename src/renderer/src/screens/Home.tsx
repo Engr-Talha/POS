@@ -39,7 +39,9 @@ import {
   UsersRound,
   BookUser,
   Undo2,
-  Wallet
+  Wallet,
+  Truck,
+  ShoppingCart
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -51,9 +53,11 @@ import { Customers } from './sections/Customers'
 import { Lists } from './sections/Lists'
 import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
+import { Purchases } from './sections/Purchases'
 import { Returns } from './sections/Returns'
 import { SalesHistory } from './sections/SalesHistory'
 import { Sell } from './sections/Sell'
+import { Suppliers } from './sections/Suppliers'
 import { SettingsSection } from './sections/SettingsSection'
 import { Shifts } from './sections/Shifts'
 import { Stock } from './sections/Stock'
@@ -66,10 +70,12 @@ type Section =
   | 'stock'
   | 'sales'
   | 'returns'
+  | 'purchases'
   | 'shifts'
   | 'opening'
   | 'books'
   | 'customers'
+  | 'suppliers'
   | 'lists'
   | 'users'
   | 'settings'
@@ -90,10 +96,12 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'stock', label: 'Stock', icon: Boxes },
   { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
   { key: 'returns', label: 'Returns', icon: Undo2, permission: 'sale.refund' },
+  { key: 'purchases', label: 'Purchases', icon: ShoppingCart, permission: 'purchase.view' },
   { key: 'shifts', label: 'Shift', icon: Wallet, permission: 'shift.manage' },
   { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
   { key: 'customers', label: 'Customers', icon: BookUser, permission: 'report.view' },
+  { key: 'suppliers', label: 'Suppliers', icon: Truck, permission: 'supplier.view' },
   { key: 'lists', label: 'Manage lists', icon: ListChecks },
   { key: 'users', label: 'Staff', icon: UsersRound, permission: 'user.manage' },
   { key: 'settings', label: 'Settings', icon: SettingsIcon }
@@ -290,6 +298,13 @@ export function Home({
               currencySymbol={currencySymbol}
             />
           )}
+          {section === 'purchases' && user && (
+            <Purchases
+              readOnly={state.readOnly}
+              currencySymbol={currencySymbol}
+              userRole={user.role}
+            />
+          )}
           {section === 'shifts' && user && (
             <Shifts
               userRole={user.role}
@@ -306,6 +321,13 @@ export function Home({
               readOnly={state.readOnly}
               currencySymbol={currencySymbol}
               isOwner={state.session?.user.role === 'owner'}
+            />
+          )}
+          {section === 'suppliers' && user && (
+            <Suppliers
+              readOnly={state.readOnly}
+              currencySymbol={currencySymbol}
+              userRole={user.role}
             />
           )}
           {section === 'lists' && <Lists readOnly={state.readOnly} />}

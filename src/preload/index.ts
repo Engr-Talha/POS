@@ -103,10 +103,6 @@ const api: PosApi = {
     savePack: (input) => ipcRenderer.invoke(IPC.catalogSavePack, input),
     deletePack: (input) => ipcRenderer.invoke(IPC.catalogDeletePack, input),
 
-    listSuppliers: (input) => ipcRenderer.invoke(IPC.catalogListSuppliers, input),
-    getSupplier: (input) => ipcRenderer.invoke(IPC.catalogGetSupplier, input),
-    createSupplier: (input) => ipcRenderer.invoke(IPC.catalogCreateSupplier, input),
-    updateSupplier: (input) => ipcRenderer.invoke(IPC.catalogUpdateSupplier, input),
     listProductSuppliers: (input) => ipcRenderer.invoke(IPC.catalogListProductSuppliers, input),
     linkSupplier: (input) => ipcRenderer.invoke(IPC.catalogLinkSupplier, input),
     unlinkSupplier: (input) => ipcRenderer.invoke(IPC.catalogUnlinkSupplier, input),
@@ -161,6 +157,40 @@ const api: PosApi = {
     ledger: (input) => ipcRenderer.invoke(IPC.customersLedger, input),
     balance: (input) => ipcRenderer.invoke(IPC.customersBalance, input),
     recordPayment: (input) => ipcRenderer.invoke(IPC.customersRecordPayment, input)
+  },
+
+  // BUYING — the mirror of customers + selling. A supplier is OWED BY the shop; a purchase brings stock
+  // IN at a real landed cost. Note what is NOT here: any way to SET what the shop owes. That figure is
+  // DERIVED from the ledger (opening payable + purchase payables − payments) — `balance`,
+  // `listWithBalances` and `ledger` recompute it on read; `recordPayment` posts a payable paid down (DR
+  // Payable, CR Cash/Bank), lowering the derived balance, never setting it. Permissions are enforced in
+  // MAIN, not by this file: 'supplier.manage' / 'purchase.manage' / 'supplier.pay' for the writes.
+  suppliers: {
+    list: (input) => ipcRenderer.invoke(IPC.supplierList, input),
+    get: (input) => ipcRenderer.invoke(IPC.supplierGet, input),
+    create: (input) => ipcRenderer.invoke(IPC.supplierCreate, input),
+    update: (input) => ipcRenderer.invoke(IPC.supplierUpdate, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.supplierDeactivate, input)
+  },
+
+  // A purchase (goods-received note). The renderer says WHAT was received, HOW MANY and at WHAT COST;
+  // MAIN freezes each line's value from the stock movement it creates, computes the payable and posts one
+  // balanced journal. `create` is the only write. A renderer that could post its own totals could book a
+  // truckload of stock in for one rupee behind a perfectly balanced journal.
+  purchases: {
+    create: (input) => ipcRenderer.invoke(IPC.purchaseCreate, input),
+    list: (input) => ipcRenderer.invoke(IPC.purchaseList, input),
+    get: (input) => ipcRenderer.invoke(IPC.purchaseGet, input)
+  },
+
+  // The running account the shop keeps WITH each supplier, and the dues it pays back. `recordPayment`'s
+  // userId and timestamp come from MAIN's session and clock — never the renderer.
+  supplierLedger: {
+    balance: (input) => ipcRenderer.invoke(IPC.supplierLedgerBalance, input),
+    ledger: (input) => ipcRenderer.invoke(IPC.supplierLedgerLedger, input),
+    listWithBalances: (input) => ipcRenderer.invoke(IPC.supplierLedgerListWithBalances, input),
+    recordPayment: (input) => ipcRenderer.invoke(IPC.supplierLedgerRecordPayment, input),
+    getPayment: (input) => ipcRenderer.invoke(IPC.supplierLedgerGetPayment, input)
   },
 
   // USERS & ROLES — OWNER ONLY, enforced in MAIN (this whitelist is a security boundary, but not THE

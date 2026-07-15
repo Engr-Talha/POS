@@ -55,7 +55,15 @@ export const PERMISSIONS = {
   'product.manage': 'manager',
   'stock.adjust': 'manager',
   'stock.take.approve': 'manager',
-  'purchase.manage': 'manager',
+
+  // Buying — the mirror of selling. The Manager role owns products and purchases (§4 roles), so the
+  // supplier record, the goods-received note and paying a supplier down are all a manager's job; a
+  // cashier neither buys stock nor settles supplier accounts.
+  'purchase.manage': 'manager', // create a purchase / GRN
+  'purchase.view': 'manager', // read the purchase history
+  'supplier.manage': 'manager', // add / edit / retire a supplier
+  'supplier.pay': 'manager', // pay down what the shop owes a supplier
+  'supplier.view': 'manager', // read the supplier ledger / balances
 
   // Money
   'expense.manage': 'manager',

@@ -57,10 +57,12 @@ import type {
   ProductSupplier,
   StockLevel,
   StockMovement,
-  Supplier,
   UpdateProductInput
 } from '@shared/catalog'
 import { MANUAL_MOVEMENT_TYPES } from '@shared/catalog'
+// The supplier RECORD type is the canonical party contract — the picker below lists and creates
+// supplier records through `window.pos.suppliers.*`, so its type comes from '@shared/suppliers' too.
+import type { Supplier } from '@shared/suppliers'
 import { formatMoney, parseMoney } from '@shared/money'
 import { costPerUnit, costToPriceMinor, formatCost, parseCost } from '@shared/cost'
 import { formatQty, ONE_UNIT, parseQty } from '@shared/qty'
@@ -2332,7 +2334,7 @@ function SuppliersPanel({
   const reload = useCallback(async (): Promise<void> => {
     const [rows, all] = await Promise.all([
       window.pos.catalog.listProductSuppliers({ productId }),
-      window.pos.catalog.listSuppliers({ page: 1, pageSize: 200 })
+      window.pos.suppliers.list({ page: 1, pageSize: 200 })
     ])
     setLinks(rows.ok ? rows.data : [])
     setSuppliers(all.ok ? all.data.rows : [])
@@ -2384,7 +2386,7 @@ function SuppliersPanel({
   async function createSupplier(): Promise<void> {
     if (!newSupplierName.trim()) return
     setBusy(true)
-    const result = await window.pos.catalog.createSupplier({ name: newSupplierName.trim() })
+    const result = await window.pos.suppliers.create({ name: newSupplierName.trim() })
     setBusy(false)
 
     if (!result.ok) {

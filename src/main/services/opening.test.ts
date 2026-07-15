@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import * as opening from './opening'
 import * as customers from './customers'
-import * as catalog from './catalog'
+import * as suppliers from './suppliers'
 import * as ledger from './ledger'
 import * as stock from './stock'
 import { ACC } from '../db/chart-of-accounts'
@@ -139,8 +139,8 @@ function makeProduct(t: TestDb, options: MakeProduct = {}): number {
   )
 }
 
-function makeSupplier(t: TestDb, name: string): number {
-  return catalog.createSupplier(t.db, { name }).id
+function makeSupplier(t: TestDb, actor: User, name: string): number {
+  return suppliers.create(t.db, actor, { name }).id
 }
 
 function makeCustomer(t: TestDb, actor: User, name: string): number {
@@ -323,7 +323,7 @@ describe('opening — the draft', () => {
 
   it('udhaar and supplier dues are one row per party, and say so plainly', () => {
     const rashidId = makeCustomer(t, owner, 'Rashid')
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     opening.addReceivable(t.db, owner, { customerId: rashidId, amount: 12_400 * RS })
     opening.addPayable(t.db, owner, { supplierId: tradersId, amount: 8_000 * RS })
@@ -359,7 +359,7 @@ describe('opening — the draft', () => {
     const oilId = makeProduct(t, { sku: 'OIL-5L' })
     const riceId = makeProduct(t, { sku: 'RICE-25KG' })
     const rashidId = makeCustomer(t, owner, 'Rashid')
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     opening.setCashAndBank(t.db, owner, {
       goLiveDate: '2026-07-01',
@@ -464,7 +464,7 @@ describe('opening — the draft', () => {
   /** REGRESSION (trap #18): the note on an udhaar / supplier-due row survives an amount correction. */
   it('REGRESSION: correcting an amount must NOT wipe the note against it', () => {
     const rashidId = makeCustomer(t, owner, 'Rashid')
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     const udhaar = opening.addReceivable(t.db, owner, {
       customerId: rashidId,
@@ -553,7 +553,7 @@ describe('opening — the commit', () => {
     const riceId = makeProduct(t, { sku: 'RICE-25KG' })
     const rashidId = makeCustomer(t, owner, 'Rashid')
     const bilalId = makeCustomer(t, owner, 'Bilal')
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     opening.setCashAndBank(t.db, owner, {
       goLiveDate: '2026-07-01',
@@ -600,7 +600,7 @@ describe('opening — the commit', () => {
 
   it('A SHOP THAT OWES MORE THAN IT OWNS commits fine — OBE lands on the DEBIT side', () => {
     const productId = makeProduct(t, { sku: 'P-1' })
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     // Rs 1,000 of stock, Rs 500 in the till... and Rs 20,000 owed to suppliers.
     opening.setCashAndBank(t.db, owner, { goLiveDate: '2026-07-01', openingCash: 500 * RS })
@@ -641,7 +641,7 @@ describe('opening — the commit', () => {
   })
 
   it('a shop with exactly as much as it owes posts no equity line — and still balances', () => {
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     opening.setCashAndBank(t.db, owner, { goLiveDate: '2026-07-01', openingCash: 8_000 * RS })
     opening.addPayable(t.db, owner, { supplierId: tradersId, amount: 8_000 * RS })
@@ -841,7 +841,7 @@ describe('opening — the door only opens once', () => {
   it('a committed setup cannot be edited — the correction path is an adjustment, and it says so', () => {
     const productId = makeProduct(t, { sku: 'OIL-5L' })
     const rashidId = makeCustomer(t, owner, 'Rashid')
-    const tradersId = makeSupplier(t, 'Karachi Traders')
+    const tradersId = makeSupplier(t, owner, 'Karachi Traders')
 
     opening.addStockLine(t.db, owner, {
       productId,

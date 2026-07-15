@@ -10,10 +10,13 @@ import type {
   ProductPack,
   ProductSupplier,
   SerialNumber,
-  SerialStatus,
-  Supplier
+  SerialStatus
 } from '@shared/catalog'
 import { ONE_UNIT } from '@shared/qty'
+// The supplier RECORD (create/update/list/getById) is the canonical party service. This file keeps
+// only the product↔supplier LINK; it reaches into suppliers.getById to prove a supplier exists before
+// linking a product to it. No cycle: suppliers.ts does not import catalog.ts.
+import * as suppliers from './suppliers'
 
 /**
  * CATALOG — the parts of the legacy "Item Detail" form that hang off a product:
@@ -112,15 +115,6 @@ type ProductSupplierRow = {
   discount_bp: number
   is_preferred: number
   supplier_name?: string
-}
-
-type SupplierRow = {
-  id: number
-  name: string
-  phone: string | null
-  address: string | null
-  type_lookup_id: number | null
-  is_active: number
 }
 
 type BatchRow = {
@@ -226,17 +220,6 @@ function toProductSupplier(row: ProductSupplierRow): ProductSupplier {
   }
   if (row.supplier_name != null) link.supplierName = row.supplier_name
   return link
-}
-
-function toSupplier(row: SupplierRow): Supplier {
-  return {
-    id: row.id,
-    name: row.name,
-    phone: row.phone,
-    address: row.address,
-    typeLookupId: row.type_lookup_id,
-    isActive: Boolean(row.is_active)
-  }
 }
 
 function toBatch(row: BatchRow): Batch {
@@ -892,136 +875,14 @@ export function deletePack(db: DB, id: number, now = new Date()): void {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// SUPPLIERS — and the legacy "MULTIPLE SUPPLIER" panel
+// THE LEGACY "MULTIPLE SUPPLIER" PANEL — the product↔supplier LINK
+//
+// The SUPPLIER RECORD itself (create / update / retire / read / list) is NOT here. It is the canonical
+// party service in `services/suppliers.ts`, the mirror of `customers.ts`, and it is what the Suppliers
+// screen, the supplier ledger and the `supplier:*` IPC channels all use. This file owns only the LINK
+// between a product and a supplier — one product, many suppliers, each with their own item code and
+// price — and it reaches into `suppliers.getById()` to prove a supplier exists before linking to it.
 // ═════════════════════════════════════════════════════════════════════════════
-
-export type CreateSupplierArgs = {
-  name: string
-  phone?: string | null | undefined
-  address?: string | null | undefined
-  /** lookups('supplier_type'). */
-  typeLookupId?: number | null | undefined
-}
-
-export function createSupplier(db: DB, input: CreateSupplierArgs, now = new Date()): Supplier {
-  const name = input.name.trim()
-  if (!name) {
-    throw new AppError(ErrorCode.VALIDATION, 'Please enter the supplier name.', 'empty supplier name')
-  }
-
-  const id = Number(
-    db
-      .prepare(
-        `INSERT INTO suppliers (name, phone, address, type_lookup_id, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?)`
-      )
-      .run(
-        name,
-        input.phone?.trim() || null,
-        input.address?.trim() || null,
-        input.typeLookupId ?? null,
-        now.toISOString(),
-        now.toISOString()
-      ).lastInsertRowid
-  )
-
-  return getSupplier(db, id)
-}
-
-export type UpdateSupplierArgs = {
-  id: number
-  name?: string | undefined
-  phone?: string | null | undefined
-  address?: string | null | undefined
-  typeLookupId?: number | null | undefined
-  isActive?: boolean | undefined
-}
-
-/**
- * Only the fields the form actually edited. `undefined` means "the form never loaded this — leave
- * it alone"; `null` means "the user cleared it". Writing a whole object back is how a phone number
- * a form never showed gets silently wiped. (CLAUDE.md trap #18)
- */
-export function updateSupplier(db: DB, input: UpdateSupplierArgs, now = new Date()): Supplier {
-  const existing = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(input.id)
-  if (!existing) {
-    throw new AppError(
-      ErrorCode.NOT_FOUND,
-      'That supplier no longer exists.',
-      `supplier id=${input.id}`
-    )
-  }
-
-  db.prepare(
-    `UPDATE suppliers SET
-       name = COALESCE(@name, name),
-       phone = CASE WHEN @phoneSet = 1 THEN @phone ELSE phone END,
-       address = CASE WHEN @addressSet = 1 THEN @address ELSE address END,
-       type_lookup_id = CASE WHEN @typeSet = 1 THEN @typeLookupId ELSE type_lookup_id END,
-       is_active = COALESCE(@isActive, is_active),
-       updated_at = @now
-     WHERE id = @id`
-  ).run({
-    id: input.id,
-    name: input.name?.trim() || null,
-    phoneSet: input.phone === undefined ? 0 : 1,
-    phone: input.phone?.trim() || null,
-    addressSet: input.address === undefined ? 0 : 1,
-    address: input.address?.trim() || null,
-    typeSet: input.typeLookupId === undefined ? 0 : 1,
-    typeLookupId: input.typeLookupId ?? null,
-    isActive: input.isActive === undefined ? null : input.isActive ? 1 : 0,
-    now: now.toISOString()
-  })
-
-  return getSupplier(db, input.id)
-}
-
-export function getSupplier(db: DB, id: number): Supplier {
-  const row = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id) as SupplierRow | undefined
-  if (!row) {
-    throw new AppError(ErrorCode.NOT_FOUND, 'That supplier no longer exists.', `supplier id=${id}`)
-  }
-  return toSupplier(row)
-}
-
-export type SupplierListArgs = {
-  page?: number | undefined
-  pageSize?: number | undefined
-  search?: string | undefined
-  includeInactive?: boolean | undefined
-}
-
-/** Paginated, with an index behind it — assume 100k rows, not 10. (CLAUDE.md §4) */
-export function listSuppliers(db: DB, input: SupplierListArgs = {}): PagedResult<Supplier> {
-  const { page, pageSize, offset } = pageOf(input)
-
-  const where: string[] = []
-  const params: Record<string, unknown> = {}
-
-  if (!input.includeInactive) where.push('is_active = 1')
-
-  const search = input.search?.trim()
-  if (search) {
-    where.push('(name LIKE @search OR phone LIKE @search)')
-    params['search'] = `%${search}%`
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-
-  const total = db
-    .prepare(`SELECT COUNT(*) FROM suppliers ${whereSql}`)
-    .pluck()
-    .get(params) as number
-
-  const rows = db
-    .prepare(
-      `SELECT * FROM suppliers ${whereSql} ORDER BY name LIMIT @limit OFFSET @offset`
-    )
-    .all({ ...params, limit: pageSize, offset }) as SupplierRow[]
-
-  return { rows: rows.map(toSupplier), total, page, pageSize }
-}
 
 export type LinkSupplierArgs = {
   /** Omitted = insert or update the existing link for this (product, supplier). */
@@ -1051,7 +912,7 @@ export function linkSupplierToProduct(
   now = new Date()
 ): ProductSupplier {
   productRow(db, input.productId)
-  getSupplier(db, input.supplierId) // throws NOT_FOUND in plain language if it is gone
+  suppliers.getById(db, input.supplierId) // throws NOT_FOUND in plain language if it is gone
 
   const existing = (
     input.id != null

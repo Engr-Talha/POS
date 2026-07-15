@@ -17,7 +17,9 @@ import type {
   ProductDeactivateInput,
   ProductIdInput,
   ListVariantsInput,
-  SupplierGetInput,
+  SupplierDeactivateInput,
+  SupplierBalanceInput,
+  SupplierPaymentGetInput,
   StockLevelsInput,
   LowStockInput,
   NearExpiryInput,
@@ -104,6 +106,27 @@ import type {
   CustomerPayment,
   RecordCustomerPaymentInput
 } from './customers'
+// The BUYING contract, and now the SINGLE home of the supplier record schemas — the duplicate
+// product-supplier CRUD that './catalog' used to own is gone, so no aliasing is needed any more.
+import type {
+  Supplier,
+  SupplierInput,
+  UpdateSupplierInput,
+  SupplierListInput,
+  SupplierGetInput,
+  SupplierLedgerInput,
+  RecordSupplierPaymentInput,
+  SupplierPayment,
+  SupplierLedgerPage,
+  SupplierWithBalance
+} from './suppliers'
+import type {
+  CreatePurchaseInput,
+  ListPurchasesInput,
+  GetPurchaseInput,
+  PurchaseDetail,
+  PurchaseListItem
+} from './purchases'
 import type {
   Shift,
   ShiftDetail,
@@ -125,7 +148,6 @@ import type {
   BarcodeReplacement,
   CreateBatchInput,
   CreateProductInput,
-  CreateSupplierInput,
   CreateVariantGroupInput,
   DeleteProductPackInput,
   DeleteProductSupplierInput,
@@ -146,10 +168,7 @@ import type {
   StockLevelInput,
   StockMovement,
   StockMovementListInput,
-  Supplier,
-  SupplierListInput,
   UpdateProductInput,
-  UpdateSupplierInput,
   VariantGroup
 } from './catalog'
 import type { AuditEntry, BackupResult, Lookup, User } from './types'
@@ -293,11 +312,10 @@ export interface PosApi {
     savePack: (input: SaveProductPackInput) => Promise<Result<ProductPack>>
     deletePack: (input: DeleteProductPackInput) => Promise<Result<boolean>>
 
-    listSuppliers: (input: SupplierListInput) => Promise<Result<PagedResult<Supplier>>>
-    getSupplier: (input: SupplierGetInput) => Promise<Result<Supplier>>
-    createSupplier: (input: CreateSupplierInput) => Promise<Result<Supplier>>
-    updateSupplier: (input: UpdateSupplierInput) => Promise<Result<Supplier>>
-    /** MULTIPLE SUPPLIERS: each with its own supplier item code and its own price. */
+    /**
+     * MULTIPLE SUPPLIERS: each with its own supplier item code and its own price. This is the LINK
+     * only — the supplier record's own list/get/create/update live under `suppliers` below.
+     */
     listProductSuppliers: (input: ProductIdInput) => Promise<Result<ProductSupplier[]>>
     linkSupplier: (input: SaveProductSupplierInput) => Promise<Result<ProductSupplier>>
     unlinkSupplier: (input: DeleteProductSupplierInput) => Promise<Result<boolean>>
@@ -453,6 +471,85 @@ export interface PosApi {
      * from MAIN, never the renderer.
      */
     recordPayment: (input: RecordCustomerPaymentInput) => Promise<Result<CustomerPayment>>
+  }
+
+  /**
+   * SUPPLIERS — who the shop buys from, and who it owes money to. The mirror of `customers`.
+   *
+   * NOTE WHAT IS ABSENT: a balance. There is no field to type one into and no method that writes one.
+   * What the shop owes a supplier is DERIVED from the ledger (opening payable + purchase payables −
+   * payments), exactly as stock is derived from movements — see `supplierLedger`. Writes are gated
+   * 'supplier.manage' in MAIN, reads 'supplier.view'. (This whitelist is a boundary, not the check.)
+   */
+  suppliers: {
+    /** Paginated, searches name AND phone (two distributors can carry the same trading name). */
+    list: (input: SupplierListInput) => Promise<Result<PagedResult<Supplier>>>
+    /** One supplier record by id — for resolving a `supplierId`. */
+    get: (input: SupplierGetInput) => Promise<Result<Supplier>>
+    create: (input: SupplierInput) => Promise<Result<Supplier>>
+    /** Send ONLY the fields the form edited. A whole object posted back wipes what it never loaded. (Trap #18.) */
+    update: (input: UpdateSupplierInput) => Promise<Result<Supplier>>
+    /** Retire — never delete. Last year's purchase still points at the row. */
+    deactivate: (input: SupplierDeactivateInput) => Promise<Result<Supplier>>
+  }
+
+  /**
+   * PURCHASES — a goods-received note. The mirror of a sale, pointing the other way: a sale takes stock
+   * OUT and brings money IN; a purchase brings stock IN at a real landed cost and either pays for it now
+   * or owes the supplier the rest.
+   *
+   * THE RENDERER SENDS INTENT; MAIN DECIDES THE MONEY. A line says WHAT was received, HOW MANY and at
+   * WHAT COST — main freezes each line's value from the stock movement it creates, computes the payable
+   * (grandTotal − paidTotal), and posts one balanced journal. `create` is gated 'purchase.manage' in MAIN
+   * and WRITES; the two reads are 'purchase.view' and keep working on an expired licence.
+   */
+  purchases: {
+    /**
+     * RECEIVE GOODS. ONE transaction: stock in at the landed cost (re-averaging the weighted cost), one
+     * balanced journal (DR Inventory/Input Tax, CR tenders/Payable), audited. Returns the frozen GRN.
+     */
+    create: (input: CreatePurchaseInput) => Promise<Result<PurchaseDetail>>
+    /** The purchases list — paginated and indexed, newest first. Filterable by supplier and date range. */
+    list: (input: ListPurchasesInput) => Promise<Result<PagedResult<PurchaseListItem>>>
+    get: (input: GetPurchaseInput) => Promise<Result<PurchaseDetail>>
+  }
+
+  /**
+   * THE SUPPLIER LEDGER — the running account the shop keeps WITH each supplier, and the dues it pays
+   * back. The mirror of the customer udhaar ledger, reflected: a customer OWES the shop, a supplier is
+   * OWED BY it.
+   *
+   * NOTE WHAT IS ABSENT: any way to SET what the shop owes. `balance`, `listWithBalances` and `ledger` all
+   * DERIVE it on read (opening payable + purchase payables − payments) and reconcile to the paisa with GL
+   * Accounts Payable — they never write it. `recordPayment` posts a payable paid down (DR Payable, CR
+   * Cash/Bank); it lowers the derived balance, it does not set it. Reads are gated 'supplier.view' in
+   * MAIN; `recordPayment` is 'supplier.pay'.
+   */
+  supplierLedger: {
+    /** What the shop owes a supplier RIGHT NOW — DERIVED on read (opening + purchase payables − payments). */
+    balance: (input: SupplierBalanceInput) => Promise<Result<number>>
+    /**
+     * ONE PAGE of a supplier's statement, OLDEST FIRST, with a running balance per row — it reads like a
+     * bank statement. The page also carries the current derived `balance` for the header. Correct
+     * whichever screen recorded a payment (CLAUDE.md trap #17).
+     */
+    ledger: (input: SupplierLedgerInput) => Promise<Result<SupplierLedgerPage>>
+    /**
+     * Every supplier WITH their derived payable balance — the Suppliers screen. The balance is computed
+     * only for the page's rows, never the whole table (assume 100k+ suppliers).
+     */
+    listWithBalances: (
+      input: SupplierListInput
+    ) => Promise<Result<PagedResult<SupplierWithBalance>>>
+    /**
+     * Record a payment to a supplier. Posts DR Accounts Payable · CR Cash/Bank in ONE transaction and
+     * audits WHO paid, WHEN. A split settlement (part cash, part cheque) is TWO calls, one per method.
+     * Overpayment is allowed — the balance goes negative, the supplier owes the shop. `userId` and `at`
+     * come from MAIN, never the renderer.
+     */
+    recordPayment: (input: RecordSupplierPaymentInput) => Promise<Result<SupplierPayment>>
+    /** Read one supplier payment by id — for the payment receipt. */
+    getPayment: (input: SupplierPaymentGetInput) => Promise<Result<SupplierPayment>>
   }
 
   /**

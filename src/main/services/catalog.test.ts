@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import type { DB } from '../db'
+import type { User } from '@shared/types'
 import * as catalog from './catalog'
+// The supplier RECORD service (create/getById/...) is canonical and lives here. The product↔supplier
+// LINK tests below still need real supplier rows to link to, so they create them through it.
+import * as suppliers from './suppliers'
 import { ONE_UNIT } from '@shared/qty'
 
 /**
@@ -511,7 +515,23 @@ describe('packs — buy a carton, sell a piece', () => {
 
 describe('suppliers — one product, many suppliers, each with their OWN code and price', () => {
   let t: TestDb
-  beforeEach(() => (t = makeTestDb({ withSeed: true })))
+  let actor: User
+
+  // The supplier RECORD CRUD (create/update/list/getById) is tested in suppliers.test.ts — the mirror
+  // of customers. Here we only prove the product↔supplier LINK, so we create real supplier rows through
+  // the canonical service and then link products to them.
+  beforeEach(() => {
+    t = makeTestDb({ withSeed: true })
+    const id = makeUser(t.db)
+    actor = {
+      id,
+      username: 'ali.the.manager',
+      fullName: 'Ali the Manager',
+      role: 'manager',
+      hasPin: false,
+      isActive: true
+    }
+  })
   afterEach(() => t.cleanup())
 
   it('SEVERAL SUPPLIERS FOR ONE PRODUCT, EACH WITH A DIFFERENT ITEM CODE AND PRICE', () => {
@@ -519,9 +539,9 @@ describe('suppliers — one product, many suppliers, each with their OWN code an
     // invoice back to the product it bought.
     const id = makeProduct(t.db, { name: 'Coke 1.5L' })
 
-    const metro = catalog.createSupplier(t.db, { name: 'Metro Cash & Carry', phone: '0300-1234567' })
-    const imtiaz = catalog.createSupplier(t.db, { name: 'Imtiaz Wholesale' })
-    const local = catalog.createSupplier(t.db, { name: 'Local Distributor' })
+    const metro = suppliers.create(t.db, actor, { name: 'Metro Cash & Carry', phone: '0300-1234567' })
+    const imtiaz = suppliers.create(t.db, actor, { name: 'Imtiaz Wholesale' })
+    const local = suppliers.create(t.db, actor, { name: 'Local Distributor' })
 
     catalog.linkSupplierToProduct(t.db, {
       productId: id,
@@ -562,7 +582,7 @@ describe('suppliers — one product, many suppliers, each with their OWN code an
 
   it('the first supplier linked becomes the preferred one', () => {
     const id = makeProduct(t.db)
-    const s = catalog.createSupplier(t.db, { name: 'Only Supplier' })
+    const s = suppliers.create(t.db, actor, { name: 'Only Supplier' })
 
     const link = catalog.linkSupplierToProduct(t.db, { productId: id, supplierId: s.id })
     expect(link.isPreferred).toBe(true)
@@ -570,7 +590,7 @@ describe('suppliers — one product, many suppliers, each with their OWN code an
 
   it('linking the same supplier again EDITS the link instead of failing', () => {
     const id = makeProduct(t.db)
-    const s = catalog.createSupplier(t.db, { name: 'Metro' })
+    const s = suppliers.create(t.db, actor, { name: 'Metro' })
 
     catalog.linkSupplierToProduct(t.db, {
       productId: id,
@@ -594,7 +614,7 @@ describe('suppliers — one product, many suppliers, each with their OWN code an
   it('one supplier supplies many products, each under its own code', () => {
     const coke = makeProduct(t.db, { name: 'Coke' })
     const pepsi = makeProduct(t.db, { name: 'Pepsi' })
-    const metro = catalog.createSupplier(t.db, { name: 'Metro' })
+    const metro = suppliers.create(t.db, actor, { name: 'Metro' })
 
     catalog.linkSupplierToProduct(t.db, {
       productId: coke,
@@ -611,42 +631,18 @@ describe('suppliers — one product, many suppliers, each with their OWN code an
     expect(catalog.listSuppliersForProduct(t.db, pepsi)[0]!.supplierItemCode).toBe('MET-2')
   })
 
-  it('lists suppliers paginated, searchable, active-only by default', () => {
-    for (let i = 1; i <= 25; i++) catalog.createSupplier(t.db, { name: `Supplier ${i}` })
-    const gone = catalog.createSupplier(t.db, { name: 'Closed Down Traders' })
-    catalog.updateSupplier(t.db, { id: gone.id, isActive: false })
-
-    const page1 = catalog.listSuppliers(t.db, { page: 1, pageSize: 10 })
-    expect(page1.rows).toHaveLength(10)
-    expect(page1.total).toBe(25) // the inactive one is not counted
-
-    const found = catalog.listSuppliers(t.db, { search: 'Closed', includeInactive: true })
-    expect(found.rows.map((s) => s.name)).toEqual(['Closed Down Traders'])
-  })
-
-  it('an update writes only the fields the form sent — it never wipes the rest', () => {
-    // Trap #18: posting a whole object back is how a phone number the form never loaded disappears.
-    const s = catalog.createSupplier(t.db, {
-      name: 'Metro',
-      phone: '0300-1234567',
-      address: 'Karachi'
-    })
-
-    const updated = catalog.updateSupplier(t.db, { id: s.id, name: 'Metro Cash & Carry' })
-
-    expect(updated.name).toBe('Metro Cash & Carry')
-    expect(updated.phone).toBe('0300-1234567') // untouched
-    expect(updated.address).toBe('Karachi') // untouched
-
-    // …and an explicit null still clears it.
-    expect(catalog.updateSupplier(t.db, { id: s.id, phone: null }).phone).toBeNull()
-  })
+  // NOTE: the supplier RECORD tests that used to live here — pagination/search/active-only, and the
+  // trap-#18 "an update writes only the fields the form sent" — moved WITH the CRUD itself to the
+  // canonical service. They are covered by suppliers.test.ts ('the list is PAGINATED and searchable',
+  // 'SAVES ONLY THE FIELDS THE FORM SENT', 'null means the user CLEARED it'). Not re-tested here.
 
   it('refuses to link a supplier that does not exist, in plain language', () => {
     const id = makeProduct(t.db)
+    // linkSupplierToProduct proves the supplier exists via suppliers.getById — its plain-language
+    // NOT_FOUND message is "That supplier could not be found. They may have been removed."
     expectUserMessage(
       () => catalog.linkSupplierToProduct(t.db, { productId: id, supplierId: 999 }),
-      /supplier no longer exists/i
+      /supplier could not be found/i
     )
   })
 })
