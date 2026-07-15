@@ -1255,7 +1255,7 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
   const priced = priceCart(db, actor, input, approver)
 
   // ── 2. A discount above the threshold needs a supervisor AND a reason ─────
-  const approval = checkDiscountApproval(db, priced, input, approver)
+  const approval = checkDiscountApproval(db, priced, input, actor, approver)
 
   // ── 3. Negative stock ─────────────────────────────────────────────────────
   const shortages = findShortages(db, priced)
@@ -1554,6 +1554,7 @@ function checkDiscountApproval(
   db: DB,
   priced: PricedCart,
   input: z.output<typeof CompleteSaleInput>,
+  actor: User,
   approver: User | null
 ): DiscountApproval {
   const discount = priced.discountGiven
@@ -1569,11 +1570,21 @@ function checkDiscountApproval(
 
   if (!overPercent && !overAmount) return { required: false, percentBp, reasonCode: null }
 
-  if (approver == null || !roleCan(approver.role, 'sale.discount.over_threshold')) {
+  // The person at the till may ALREADY hold the authority. An owner, manager or supervisor approves
+  // their own over-threshold discount, exactly as they approve their own void (voidSale) or return
+  // (returns.resolveAuthoriser) — no one is standing behind them to ask. Only a cashier below the bar
+  // needs a supervisor to come over and enter a PIN. Checking the actor's own role first is also what
+  // stops the trap the owner hit: a shop whose only user is the owner (who has no PIN) could otherwise
+  // never complete an over-threshold discount, because there is no supervisor PIN in existence to type.
+  const authorised =
+    roleCan(actor.role, 'sale.discount.over_threshold') ||
+    (approver != null && roleCan(approver.role, 'sale.discount.over_threshold'))
+
+  if (!authorised) {
     throw new AppError(
       ErrorCode.NEEDS_APPROVAL,
       `A discount of ${money(db, discount)} is more than a cashier may give on their own. Please ask a supervisor to approve it.`,
-      `discount ${discount} (${percentBp}bp of ${priced.listGross}) is over the limits (percent=${limitPercent}bp, amount=${limitAmount}); approver=${approver?.role ?? 'none'}`
+      `discount ${discount} (${percentBp}bp of ${priced.listGross}) is over the limits (percent=${limitPercent}bp, amount=${limitAmount}); actor=${actor.role}, approver=${approver?.role ?? 'none'}`
     )
   }
 
@@ -2165,7 +2176,11 @@ function writeSaleAuditTrail(
 ): void {
   const { saleId, invoiceNo, priced, approval, approver, shortages, hadNegativeStock, now } = args
 
-  if (approval.required && approver) {
+  if (approval.required) {
+    // WHO authorised the big discount: the supervisor who entered their PIN, or — when the person at
+    // the till already held the role — themselves. Either way it is logged, so the leakage report never
+    // misses an over-threshold discount just because an owner rang it up on their own authority.
+    const authoriser = approver ?? actor
     audit.record(
       db,
       actor,
@@ -2173,7 +2188,7 @@ function writeSaleAuditTrail(
         action: 'sale.discount.over_threshold',
         entity: 'sale',
         entityId: saleId,
-        approvedBy: approver, // the APPROVER'S NAME lands in the log, beside the cashier's
+        approvedBy: authoriser, // the AUTHORISER'S NAME lands in the log, beside the cashier's
         ...(approval.reasonCode != null ? { reasonCode: approval.reasonCode } : {}),
         after: {
           invoiceNo,

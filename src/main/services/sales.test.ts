@@ -764,6 +764,34 @@ describe('a discount above the threshold', () => {
     everythingHolds(t, owner)
   })
 
+  it('lets a supervisor-or-above authorise their OWN over-threshold discount — no PIN, no trap', () => {
+    const productId = makeProduct({ retailPrice: 10_000, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    // The owner OUTRANKS a supervisor, so they authorise the big discount themselves — there is no one
+    // to ask, and in a one-user shop there is no supervisor PIN in existence to type. It must go
+    // straight through, exactly as an owner voids or returns on their own authority. REGRESSION: the
+    // approval check looked ONLY at the PIN approver and ignored the actor's own role, so the owner was
+    // trapped behind a "Supervisor PIN" prompt they could never satisfy, and the sale could not complete.
+    const { sale } = sales.complete(t.db, owner, {
+      lines: [{ productId, qtyM: ONE_UNIT }],
+      cartDiscount: 5_000,
+      cartDiscountReasonCode: 'regular_customer',
+      payments: [{ methodLookupId: cash(), amount: 6_700 }]
+      // NOTE: no approverPin — the person at the till already holds the authority.
+    })
+    expect(sale.grandTotal).toBe(6_700)
+
+    // The big discount is STILL audited — WHO authorised it (the owner, on their own authority) is
+    // exactly what the leakage report is for, so a self-approved discount must never go unrecorded.
+    const rows = auditRows('sale.discount.over_threshold')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!['user_name']).toBe('Insha Owner')
+    expect(rows[0]!['approved_by_name']).toBe('Insha Owner') // authorised themselves
+    expect(rows[0]!['reason_code']).toBe('regular_customer')
+    everythingHolds(t, owner)
+  })
+
   it('still refuses when the "supervisor" is only a cashier', () => {
     const productId = makeProduct({ retailPrice: 10_000 })
     openingStock(productId, 10 * ONE_UNIT)
