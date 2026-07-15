@@ -9,7 +9,6 @@ import {
   Divider,
   Group,
   Modal,
-  Pagination,
   Select,
   Skeleton,
   Stack,
@@ -61,6 +60,7 @@ import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
 import { formatQty } from '@shared/qty'
 import { CostInput, LookupSelect, MoneyInput, QtyInput } from './ProductForm'
+import { Paginator } from '../../components/Paginator'
 
 /**
  * THE OPENING SETUP WIZARD — the shopkeeper's first hour with this app.
@@ -83,7 +83,7 @@ import { CostInput, LookupSelect, MoneyInput, QtyInput } from './ProductForm'
  * a quantity by a cost, so it cannot promise a figure the journal does not post.
  */
 
-const PAGE_SIZE = 25
+const DEFAULT_PAGE_SIZE = 25
 
 type StepProps = {
   wizard: OpeningWizardState
@@ -454,6 +454,7 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
   const [rows, setRows] = useState<OpeningStockLine[] | null>(null)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
 
   const [draft, setDraft] = useState<StockDraft>(EMPTY_STOCK_DRAFT)
@@ -463,7 +464,7 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
     setRows(null)
     setError(null)
 
-    const result = await window.pos.opening.listStockLines({ page, pageSize: PAGE_SIZE })
+    const result = await window.pos.opening.listStockLines({ page, pageSize })
     if (!result.ok) {
       setError(result.error.userMessage)
       setRows([])
@@ -473,7 +474,7 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page])
+  }, [page, pageSize])
 
   useEffect(() => {
     void load()
@@ -615,7 +616,6 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
     else void load()
   }
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const editing = draft.id !== null
 
   return (
@@ -843,11 +843,14 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
               </Table>
             </Table.ScrollContainer>
 
-            {pages > 1 && (
-              <Group justify="center" mt="lg">
-                <Pagination value={page} onChange={setPage} total={pages} size="sm" />
-              </Group>
-            )}
+            <Paginator
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              unit="item"
+            />
           </>
         )}
       </Card>
@@ -959,6 +962,7 @@ function StepReceivables({
   const [rows, setRows] = useState<OpeningReceivable[] | null>(null)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
 
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -972,7 +976,7 @@ function StepReceivables({
     setRows(null)
     setError(null)
 
-    const result = await window.pos.opening.listReceivables({ page, pageSize: PAGE_SIZE })
+    const result = await window.pos.opening.listReceivables({ page, pageSize })
     if (!result.ok) {
       setError(result.error.userMessage)
       setRows([])
@@ -982,7 +986,7 @@ function StepReceivables({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page])
+  }, [page, pageSize])
 
   useEffect(() => {
     void load()
@@ -1065,7 +1069,6 @@ function StepReceivables({
     else void load()
   }
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <Stack gap="lg" pt="lg">
@@ -1157,8 +1160,9 @@ function StepReceivables({
         error={error}
         readOnly={readOnly}
         page={page}
-        pages={pages}
+        pageSize={pageSize}
         onPage={setPage}
+        onPageSize={setPageSize}
         onRetry={() => void load()}
         onEdit={(id) => {
           const row = rows?.find((candidate) => candidate.id === id)
@@ -1204,6 +1208,7 @@ function StepPayables({
   const [rows, setRows] = useState<OpeningPayable[] | null>(null)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
 
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -1217,7 +1222,7 @@ function StepPayables({
     setRows(null)
     setError(null)
 
-    const result = await window.pos.opening.listPayables({ page, pageSize: PAGE_SIZE })
+    const result = await window.pos.opening.listPayables({ page, pageSize })
     if (!result.ok) {
       setError(result.error.userMessage)
       setRows([])
@@ -1227,7 +1232,7 @@ function StepPayables({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page])
+  }, [page, pageSize])
 
   useEffect(() => {
     void load()
@@ -1310,7 +1315,6 @@ function StepPayables({
     else void load()
   }
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <Stack gap="lg" pt="lg">
@@ -1400,8 +1404,9 @@ function StepPayables({
         error={error}
         readOnly={readOnly}
         page={page}
-        pages={pages}
+        pageSize={pageSize}
         onPage={setPage}
+        onPageSize={setPageSize}
         onRetry={() => void load()}
         onEdit={(id) => {
           const row = rows?.find((candidate) => candidate.id === id)
@@ -2153,7 +2158,7 @@ function ImportProblems({ errors }: { errors: ImportError[] }): React.JSX.Elemen
         </Table>
       </Table.ScrollContainer>
 
-      <PagedFooter paged={paged} total={errors.length} noun="problems" />
+      <PagedFooter paged={paged} total={errors.length} unit="problem" />
     </Card>
   )
 }
@@ -2444,7 +2449,7 @@ function PreviewStockTable({
             </Table>
           </Table.ScrollContainer>
 
-          <PagedFooter paged={paged} total={rows.length} noun="rows" />
+          <PagedFooter paged={paged} total={rows.length} unit="row" />
         </>
       )}
     </Card>
@@ -2533,7 +2538,7 @@ function PreviewPartyTable({
         </Table>
       </Table.ScrollContainer>
 
-      <PagedFooter paged={paged} total={rows.length} noun="rows" />
+      <PagedFooter paged={paged} total={rows.length} unit="row" />
     </Card>
   )
 }
@@ -2542,9 +2547,11 @@ function PreviewPartyTable({
 
 type Paged<T> = {
   page: number
-  pages: number
+  pageSize: number
+  total: number
   visible: T[]
   setPage: (page: number) => void
+  setPageSize: (pageSize: number) => void
 }
 
 /**
@@ -2558,35 +2565,36 @@ type Paged<T> = {
  */
 function usePagedRows<T>(rows: T[]): Paged<T> {
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
 
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
+  const pages = Math.max(1, Math.ceil(rows.length / pageSize))
   const safe = Math.min(page, pages)
-  const visible = rows.slice((safe - 1) * PAGE_SIZE, safe * PAGE_SIZE)
+  const visible = rows.slice((safe - 1) * pageSize, safe * pageSize)
 
-  return { page: safe, pages, visible, setPage }
+  return { page: safe, pageSize, total: rows.length, visible, setPage, setPageSize }
 }
 
 function PagedFooter<T>({
   paged,
   total,
-  noun
+  unit,
+  units
 }: {
   paged: Paged<T>
   total: number
-  noun: string
+  unit: string
+  units?: string
 }): React.JSX.Element | null {
-  if (paged.pages <= 1) return null
-
-  const first = (paged.page - 1) * PAGE_SIZE + 1
-  const last = Math.min(paged.page * PAGE_SIZE, total)
-
   return (
-    <Group justify="space-between" mt="md">
-      <Text size="xs" c="dimmed">
-        {first}–{last} of {total} {noun}
-      </Text>
-      <Pagination value={paged.page} onChange={paged.setPage} total={paged.pages} size="sm" />
-    </Group>
+    <Paginator
+      page={paged.page}
+      pageSize={paged.pageSize}
+      total={total}
+      onPage={paged.setPage}
+      onPageSize={paged.setPageSize}
+      unit={unit}
+      units={units}
+    />
   )
 }
 
@@ -3000,8 +3008,9 @@ function PartyTable({
   error,
   readOnly,
   page,
-  pages,
+  pageSize,
   onPage,
+  onPageSize,
   onRetry,
   onEdit,
   onRemove
@@ -3017,8 +3026,9 @@ function PartyTable({
   error: string | null
   readOnly: boolean
   page: number
-  pages: number
+  pageSize: number
   onPage: (page: number) => void
+  onPageSize: (pageSize: number) => void
   onRetry: () => void
   onEdit: (id: number) => void
   onRemove: (id: number) => void
@@ -3117,11 +3127,15 @@ function PartyTable({
             </Table>
           </Table.ScrollContainer>
 
-          {pages > 1 && (
-            <Group justify="center" mt="lg">
-              <Pagination value={page} onChange={onPage} total={pages} size="sm" />
-            </Group>
-          )}
+          <Paginator
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            onPage={onPage}
+            onPageSize={onPageSize}
+            unit="entry"
+            units="entries"
+          />
         </>
       )}
     </Card>

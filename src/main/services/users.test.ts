@@ -280,10 +280,38 @@ describe('users — staff administration', () => {
     const back = users.reactivate(t.db, owner, sara.id)
     expect(back.isActive).toBe(true)
     expect(auth.signIn(t.db, 'sara', 'letmein123').id).toBe(sara.id)
+    // She comes back WITHOUT her old PIN — retiring cleared it. The owner sets a fresh one if wanted.
+    expect(back.hasPin).toBe(false)
 
     // Still exactly one row for Sara — deactivate/reactivate never deletes and never duplicates.
     const count = t.db.prepare("SELECT COUNT(*) FROM users WHERE username = 'sara'").pluck().get() as number
     expect(count).toBe(1)
+  })
+
+  it('retiring frees the PIN, and reactivating cannot resurrect a collision — one PIN, one person', () => {
+    // The landmine sequence: a retired PIN, reused while its owner was gone, must never come back to
+    // haunt PIN sign-in when the original owner returns. Guarded by clearing the PIN on deactivate.
+    const sara = users.create(t.db, owner, { username: 'sara', fullName: 'Sara', role: 'cashier', password: 'letmein123' })
+    const ali = users.create(t.db, owner, { username: 'ali', fullName: 'Ali', role: 'cashier', password: 'letmein456' })
+
+    users.setPin(t.db, owner, sara.id, '4821')
+    users.deactivate(t.db, owner, sara.id)
+
+    // With Sara retired her PIN is freed, so Ali may take it — no false collision against a ghost.
+    const aliWithPin = users.setPin(t.db, owner, ali.id, '4821')
+    expect(aliWithPin.hasPin).toBe(true)
+
+    // Bring Sara back. The dangerous moment: two active users must NOT now share 4821.
+    users.reactivate(t.db, owner, sara.id)
+
+    // 4821 resolves to exactly ONE person — Ali, who was given it — for sign-in AND for approval.
+    expect(auth.signInWithPin(t.db, '4821').id).toBe(ali.id)
+    expect(auth.verifyPin(t.db, '4821').id).toBe(ali.id)
+
+    // Sara is active again but carries no PIN, so nothing of hers answers to 4821.
+    const saraBack = users.list(t.db, 1, 100).rows.find((u) => u.id === sara.id)!
+    expect(saraBack.isActive).toBe(true)
+    expect(saraBack.hasPin).toBe(false)
   })
 
   it('an unknown user id is refused in plain language, never a crash', () => {

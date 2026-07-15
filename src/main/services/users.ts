@@ -329,7 +329,15 @@ export function deactivate(db: DB, actor: User, id: number, now = new Date()): U
   const before = loadRow(db, userId)
   assertNotLastOwner(db, before, `user.deactivate would remove the shop's only owner id=${userId}`)
 
-  db.prepare('UPDATE users SET is_active = 0, updated_at = @at WHERE id = @id').run({
+  const hadPin = before.pin_hash != null
+
+  // Retiring clears the quick-switch PIN, not just the ability to sign in. A PIN is a re-settable
+  // credential, never a business record, and a dormant one on a retired row is a landmine: the
+  // collision check and PIN sign-in both look at ACTIVE users only, so a later hire could be handed
+  // the same PIN with no clash, and reactivating this person would then put two active users behind
+  // one PIN — one identity, a false audit trail for every sale and approval. The invariant is simply
+  // `inactive ⟹ no PIN`; migration 0010 backfills it for rows retired before this fix.
+  db.prepare('UPDATE users SET is_active = 0, pin_hash = NULL, updated_at = @at WHERE id = @id').run({
     at: now.toISOString(),
     id: userId
   })
@@ -341,8 +349,8 @@ export function deactivate(db: DB, actor: User, id: number, now = new Date()): U
       action: 'user.deactivate',
       entity: 'user',
       entityId: userId,
-      before: { isActive: Boolean(before.is_active) },
-      after: { isActive: false }
+      before: { isActive: Boolean(before.is_active), hasPin: hadPin },
+      after: { isActive: false, hasPin: false }
     },
     now
   )
@@ -350,7 +358,13 @@ export function deactivate(db: DB, actor: User, id: number, now = new Date()): U
   return toUser(loadRow(db, userId))
 }
 
-/** Bring a retired staff member back. Reactivating can only ever help, so there is no guard. */
+/**
+ * Bring a retired staff member back. They return WITHOUT a quick-switch PIN — retiring cleared it
+ * (see `deactivate` and migration 0010), so there is never a dormant PIN here to collide with one a
+ * new hire was given while this person was gone. The owner sets them a fresh PIN if they want one,
+ * which collision-checks against every active user the normal way. Reactivating can only ever help a
+ * shop that is short-staffed, so — unlike deactivate — there is no last-owner guard.
+ */
 export function reactivate(db: DB, actor: User, id: number, now = new Date()): User {
   const userId = parseId(id, 'user.reactivate')
   const before = loadRow(db, userId)

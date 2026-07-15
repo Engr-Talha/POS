@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   Group,
-  Pagination,
   Skeleton,
   Stack,
   Switch,
@@ -27,6 +26,7 @@ import type { ProductListItem } from '@shared/catalog'
 import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
 import { LookupSelect, ProductForm } from './ProductForm'
+import { Paginator } from '../../components/Paginator'
 
 /**
  * THE PRODUCTS LIST.
@@ -40,7 +40,7 @@ import { LookupSelect, ProductForm } from './ProductForm'
  * costs one call, not one-plus-N.
  */
 
-const PAGE_SIZE = 25
+const DEFAULT_PAGE_SIZE = 25
 
 export function Products({
   readOnly,
@@ -98,6 +98,7 @@ function ProductList({
   const [error, setError] = useState<string | null>(null)
 
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [categoryId, setCategoryId] = useState<number | null>(null)
@@ -122,7 +123,7 @@ function ProductList({
 
     const result = await window.pos.products.list({
       page,
-      pageSize: PAGE_SIZE,
+      pageSize,
       search: debounced === '' ? undefined : debounced,
       categoryId: categoryId ?? undefined,
       belowReorderOnly: belowReorderOnly || undefined,
@@ -140,13 +141,12 @@ function ProductList({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page, debounced, categoryId, belowReorderOnly, includeInactive])
+  }, [page, pageSize, debounced, categoryId, belowReorderOnly, includeInactive])
 
   useEffect(() => {
     void load()
   }, [load, version])
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const filtered = debounced !== '' || categoryId !== null || belowReorderOnly || includeInactive
 
   return (
@@ -380,11 +380,14 @@ function ProductList({
               </Table>
             </Table.ScrollContainer>
 
-            {pages > 1 && (
-              <Group justify="center" mt="lg">
-                <Pagination value={page} onChange={setPage} total={pages} size="sm" />
-              </Group>
-            )}
+            <Paginator
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              unit="product"
+            />
           </>
         )}
       </Card>

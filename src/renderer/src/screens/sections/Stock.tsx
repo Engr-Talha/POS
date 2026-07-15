@@ -6,7 +6,6 @@ import {
   Card,
   Group,
   NumberInput,
-  Pagination,
   Skeleton,
   Stack,
   Switch,
@@ -34,6 +33,7 @@ import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
 import { formatQty } from '@shared/qty'
 import { AdjustStockModal, LookupSelect } from './ProductForm'
+import { Paginator } from '../../components/Paginator'
 
 /**
  * STOCK.
@@ -45,7 +45,7 @@ import { AdjustStockModal, LookupSelect } from './ProductForm'
  * never disagree with the movements behind it.
  */
 
-const PAGE_SIZE = 25
+const DEFAULT_PAGE_SIZE = 25
 
 type Target = { id: number; name: string; sku: string; onHandM: number }
 
@@ -247,6 +247,7 @@ function Levels({
   const [error, setError] = useState<string | null>(null)
 
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [categoryId, setCategoryId] = useState<number | null>(null)
@@ -267,7 +268,7 @@ function Levels({
 
     const result = await window.pos.stock.levels({
       page,
-      pageSize: PAGE_SIZE,
+      pageSize,
       search: debounced === '' ? undefined : debounced,
       categoryId: categoryId ?? undefined,
       includeInactive: includeInactive || undefined,
@@ -284,13 +285,12 @@ function Levels({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page, debounced, categoryId, includeInactive])
+  }, [page, pageSize, debounced, categoryId, includeInactive])
 
   useEffect(() => {
     void load()
   }, [load, version])
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const filtered = debounced !== '' || categoryId !== null
 
   return (
@@ -368,11 +368,14 @@ function Levels({
               onAdjust={onAdjust}
             />
 
-            {pages > 1 && (
-              <Group justify="center" mt="lg">
-                <Pagination value={page} onChange={setPage} total={pages} size="sm" />
-              </Group>
-            )}
+            <Paginator
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              unit="product"
+            />
           </>
         )}
       </Card>
@@ -399,6 +402,7 @@ function LowStock({
   const [total, setTotal] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
 
   const load = useCallback(async (): Promise<void> => {
     setRows(null)
@@ -406,7 +410,7 @@ function LowStock({
 
     const result = await window.pos.stock.lowStock({
       page,
-      pageSize: PAGE_SIZE,
+      pageSize,
       sortBy: 'on_hand',
       sortDir: 'asc'
     })
@@ -420,13 +424,12 @@ function LowStock({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [page])
+  }, [page, pageSize])
 
   useEffect(() => {
     void load()
   }, [load, version])
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return (
     <Stack gap="lg">
@@ -475,11 +478,14 @@ function LowStock({
               onAdjust={onAdjust}
             />
 
-            {pages > 1 && (
-              <Group justify="center" mt="lg">
-                <Pagination value={page} onChange={setPage} total={pages} size="sm" />
-              </Group>
-            )}
+            <Paginator
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              unit="product"
+            />
           </>
         )}
       </Card>
@@ -502,6 +508,7 @@ function NearExpiry({
   const [total, setTotal] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [days, setDays] = useState(30)
 
   useEffect(() => {
@@ -512,7 +519,7 @@ function NearExpiry({
     setRows(null)
     setError(null)
 
-    const result = await window.pos.stock.nearExpiry({ days, page, pageSize: PAGE_SIZE })
+    const result = await window.pos.stock.nearExpiry({ days, page, pageSize })
 
     if (!result.ok) {
       setError(result.error.userMessage)
@@ -523,13 +530,12 @@ function NearExpiry({
 
     setRows(result.data.rows)
     setTotal(result.data.total)
-  }, [days, page])
+  }, [days, page, pageSize])
 
   useEffect(() => {
     void load()
   }, [load, version])
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const atRisk = (rows ?? []).reduce((sum, row) => sum + row.valueMinor, 0)
 
   return (
@@ -657,11 +663,14 @@ function NearExpiry({
               </Table>
             </Table.ScrollContainer>
 
-            {pages > 1 && (
-              <Group justify="center" mt="lg">
-                <Pagination value={page} onChange={setPage} total={pages} size="sm" />
-              </Group>
-            )}
+            <Paginator
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPage={setPage}
+              onPageSize={setPageSize}
+              unit="product"
+            />
           </>
         )}
       </Card>
