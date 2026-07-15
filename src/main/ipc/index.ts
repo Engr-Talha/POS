@@ -33,6 +33,7 @@ import {
   OutstandingCreditInput,
   OpenDrawerInput,
   PrintReceiptInput,
+  ReturnableLinesInput,
   CustomerDeactivateInput,
   CustomerBalanceInput,
   UserListInput,
@@ -67,6 +68,7 @@ import {
   type SaleDetail,
   type SaleLineInput
 } from '@shared/sales'
+import { CreateReturnInput, ListReturnsInput, GetReturnInput } from '@shared/returns'
 import {
   CommitOpeningInput,
   CustomerGetInput,
@@ -142,6 +144,7 @@ import * as usersService from '../services/users'
 import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
 import * as salesService from '../services/sales'
+import * as returnsService from '../services/returns'
 import * as printer from '../printing/printer'
 import log from '../logger'
 
@@ -1569,6 +1572,69 @@ export function registerIpcHandlers(): void {
   handle(IPC.saleOutstandingCredit, OutstandingCreditInput, (input) => {
     session.requirePermissionOf('sale.create')
     return salesService.outstandingCredit(getDb(), input.customerId)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RETURNS — goods coming BACK, and the money that goes back with them
+  //
+  // The inverse of a sale, and it obeys the same disciplines. THE RENDERER SENDS INTENT, MAIN DECIDES
+  // THE MONEY: a return line says WHICH sale line came back and HOW MANY — never what to refund. The
+  // service reads the FROZEN net/tax/cost off the original sale line, scales them, posts the balanced
+  // journal and the restock movement, and AUDITS ITSELF with `sale.return` — so NOT ONE handler below
+  // logs a second row (the same contract the sales handlers keep; see ipc/audit-contract.test.ts).
+  //
+  // The asymmetry that runs through the whole app (CLAUDE.md §6):
+  //   create        SUPERVISOR gate AND assertWritable() — an expired shop cannot refund until it renews.
+  //   the three reads  a permission and NOTHING else. An expired shop can still look a sale up to return
+  //                    against, browse its returns and reprint a credit note — its data is never hostage.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * PROCESS A RETURN. SUPERVISOR ONLY — the same gate, and the same shape, as `sale:void`.
+   *
+   * `requirePermissionOf('sale.refund')` asks about the user who is SIGNED IN. A cashier who needs to
+   * process a return gets a supervisor to sign in (PIN quick-switch) — the same act as a supervisor
+   * turning the key — which puts the supervisor's own name and role on the return and on the audit row.
+   * The service re-checks the role independently and FREEZES the refund from the original sale, so a
+   * tampered renderer cannot refund a Rs 200,000 television for one rupee behind a balanced journal.
+   */
+  handle(IPC.returnsCreate, CreateReturnInput, (input) => {
+    const user = session.requirePermissionOf('sale.refund')
+    assertWritable()
+    return returnsService.createReturn(getDb(), user, input)
+  })
+
+  // ── Reading returns ─────────────────────────────────────────────────────────
+  // All READS. No assertWritable(): an expired shop can still look a sale up, browse its returns and
+  // export its numbers. It simply cannot refund a new one. (CLAUDE.md §6)
+
+  /**
+   * THE RETURNS DESK'S FIRST MOVE: look a sale up — by its id, or by the number printed on the
+   * customer's receipt — and show, per line, what may still come back. `sale.create` — a CASHIER's
+   * gate, exactly like the `sale:get` / `sale:getByInvoiceNo` reads this is built on: a cashier holding
+   * a receipt must be able to look the sale up. The refund itself still needs a supervisor above.
+   */
+  handle(IPC.returnsReturnableLines, ReturnableLinesInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return returnsService.returnableLines(getDb(), input.ref)
+  })
+
+  /**
+   * THE RETURNS LIST — paginated and indexed. `report.view`, a MANAGER's view, matching `sale:list`:
+   * browsing every return the shop has made, with totals, is a report, not a till lookup.
+   */
+  handle(IPC.returnsList, ListReturnsInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return returnsService.listReturns(getDb(), input)
+  })
+
+  /**
+   * ONE return, with its lines — the return detail screen and the credit note. `sale.create`, matching
+   * `sale:get`: a cashier reprinting a customer's credit note must be able to read it back.
+   */
+  handle(IPC.returnsGet, GetReturnInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return returnsService.getReturn(getDb(), input)
   })
 
   // ═══════════════════════════════════════════════════════════════════════════

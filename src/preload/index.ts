@@ -205,6 +205,17 @@ const api: PosApi = {
     outstandingCredit: (input) => ipcRenderer.invoke(IPC.saleOutstandingCredit, input)
   },
 
+  // RETURNS — the inverse of a sale. Look at what a return line CANNOT carry across this line: net,
+  // taxAmount, gross, unitCost, a timestamp, or who approved it. The renderer says WHICH sale line came
+  // back and HOW MANY; MAIN reads the frozen figures off the original sale, decides the refund, stamps
+  // the clock and derives the approver. `create` is the only write, and it is supervisor-gated in MAIN.
+  returns: {
+    create: (input) => ipcRenderer.invoke(IPC.returnsCreate, input),
+    returnableLines: (input) => ipcRenderer.invoke(IPC.returnsReturnableLines, input),
+    list: (input) => ipcRenderer.invoke(IPC.returnsList, input),
+    get: (input) => ipcRenderer.invoke(IPC.returnsGet, input)
+  },
+
   // The printer and the cash drawer. `printReceipt` takes a SALE ID — the renderer cannot hand main a
   // receipt to print, because a renderer that could would be able to print a receipt for a sale that
   // never happened. Main reads the sale from the database and builds the paper itself.

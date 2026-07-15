@@ -40,11 +40,11 @@ export const CUSTOMER_PRICE_TIERS = ['retail', 'wholesale'] as const
 export type CustomerPriceTier = (typeof CUSTOMER_PRICE_TIERS)[number]
 
 /**
- * The three kinds of line a customer's udhaar statement is built from. An `opening` balance and a
- * `sale` on credit RAISE what they owe (a charge); a `payment` LOWERS it. The ledger service tags
- * every row so the screen can render and total them without re-deriving the kind.
+ * The kinds of line a customer's udhaar statement is built from. An `opening` balance and a `sale` on
+ * credit RAISE what they owe (a charge); a `payment` and a `return` credited to the account LOWER it.
+ * The ledger service tags every row so the screen can render and total them without re-deriving the kind.
  */
-export const CUSTOMER_LEDGER_KINDS = ['opening', 'sale', 'payment'] as const
+export const CUSTOMER_LEDGER_KINDS = ['opening', 'sale', 'payment', 'return'] as const
 export type CustomerLedgerKind = (typeof CUSTOMER_LEDGER_KINDS)[number]
 
 // ── Row types ────────────────────────────────────────────────────────────────

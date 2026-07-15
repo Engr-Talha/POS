@@ -26,11 +26,11 @@ import { outstandingCredit } from './sales'
  * ── WHAT A CUSTOMER OWES IS DERIVED, NEVER STORED ──────────────────────────────────────────────────
  * Exactly as stock is the sum of its movements (CLAUDE.md §4), a customer's balance is:
  *
- *       opening udhaar  +  credit-sale receivables  −  customer payments
+ *       opening udhaar  +  credit-sale receivables  −  customer payments  −  returns credited to account
  *
  * There is no balance column, and there never will be. A typed balance is one that can silently
  * disagree with the rows behind it — and then the shop chases a customer for money the ledger says they
- * do not owe. `balance()` recomputes on read.
+ * do not owe. `balance()` recomputes on read (it delegates to sales.outstandingCredit).
  *
  * ── ONE SOURCE OF TRUTH, SO EVERY SCREEN AGREES (CLAUDE.md trap #17) ────────────────────────────────
  * `sales.outstandingCredit()` is the single function that says what a customer owes. The sale screen's
@@ -79,10 +79,10 @@ export function balance(db: DB, customerId: number): number {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * The three sources a customer's udhaar statement is built from, merged into one chronological list.
- * Each row is either a CHARGE (opening balance, credit sale — raises what they owe) or a PAYMENT (lowers
- * it). `kind_rank` breaks a same-instant tie deterministically: an opening balance before a sale before
- * a payment, so the running balance is stable and repeatable across pages.
+ * The sources a customer's udhaar statement is built from, merged into one chronological list. Each row
+ * is either a CHARGE (opening balance, credit sale — raises what they owe) or a PAYMENT (lowers it).
+ * `kind_rank` breaks a same-instant tie deterministically: opening before sale before payment before
+ * return, so the running balance is stable and repeatable across pages.
  *
  *   opening   dated to the go-live date (the accounting date of the opening journal) so it always sorts
  *             first — it is the oldest thing on the account.
@@ -91,6 +91,9 @@ export function balance(db: DB, customerId: number): number {
  *             This is exactly what the sale's journal debited to Receivable, which is what keeps the
  *             statement reconciled with the GL.
  *   payment   one row per customer_payment.
+ *   return    one row per return SETTLED ONTO THE ACCOUNT ('customer_credit' or the minimal 'exchange'),
+ *             carrying its grand_total as a payment — exactly what the return's journal credited to
+ *             Receivable, and exactly the set outstandingCredit() subtracts, so the two stay reconciled.
  */
 const LEDGER_UNION = `
   SELECT 'opening' AS kind, 0 AS kind_rank, r.id AS ref_id,
@@ -124,6 +127,22 @@ const LEDGER_UNION = `
     FROM customer_payments cp
     LEFT JOIN lookups ml ON ml.id = cp.method_lookup_id
    WHERE cp.customer_id = @customerId
+
+  UNION ALL
+
+  -- A return SETTLED ONTO THE ACCOUNT (a credit note, or the minimal exchange's store credit) posts CR
+  -- Receivable for its grand_total (returns.ts) — the same effect a payment has — so it is a PAYMENT
+  -- line here, LOWERING what the customer owes. A 'refund' return paid out through a tender never
+  -- touched Receivable and is not on this statement. This is exactly the set outstandingCredit()
+  -- subtracts, so the running balance still ends on balance(). (Returns audit, HIGH — trap #17.)
+  SELECT 'return' AS kind, 3 AS kind_rank, r.id AS ref_id, r.at AS at,
+         0 AS charge, r.grand_total AS payment,
+         s.invoice_no AS invoice_no, NULL AS method_label, NULL AS cheque_no, NULL AS wallet_ref,
+         r.reason_text AS note
+    FROM returns r
+    JOIN sales s ON s.id = r.sale_id
+   WHERE s.customer_id = @customerId
+     AND r.settlement IN ('customer_credit', 'exchange')
 `
 
 type LedgerUnionRow = {
@@ -140,10 +159,14 @@ type LedgerUnionRow = {
   note: string | null
 }
 
-/** Cashier-readable: the invoice number, "Opening balance", or the payment method + its reference. */
+/** Cashier-readable: the invoice number, "Opening balance", a credit note, or the payment method. */
 function describeRow(row: LedgerUnionRow): string {
   if (row.kind === 'opening') return row.note ? `Opening balance — ${row.note}` : 'Opening balance'
   if (row.kind === 'sale') return row.invoice_no ?? `Sale #${row.ref_id}`
+  if (row.kind === 'return') {
+    const against = row.invoice_no ? ` — ${row.invoice_no}` : ''
+    return row.note ? `Credit note${against} (${row.note})` : `Credit note${against}`
+  }
 
   const label = row.method_label ?? 'Payment'
   const reference = row.cheque_no

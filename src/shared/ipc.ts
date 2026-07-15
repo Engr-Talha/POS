@@ -185,6 +185,20 @@ export const IPC = {
   saleGetByInvoiceNo: 'sale:getByInvoiceNo',
   saleOutstandingCredit: 'sale:outstandingCredit',
 
+  // ── RETURNS — goods coming BACK, and the money that goes back with them ─────
+  //
+  // The inverse of a sale, and it obeys the same rules. THE RENDERER SENDS INTENT, MAIN DECIDES THE
+  // MONEY: a return line says WHICH sale line came back and HOW MANY — never what to refund. Main reads
+  // the FROZEN net/tax/cost off the original sale line and scales them, so a tampered renderer cannot
+  // refund a television for one rupee behind a balanced journal. `create` is the only WRITE and is
+  // SUPERVISOR-ONLY ('sale.refund'), enforced in MAIN; the three reads keep working on an expired
+  // licence, because an expired shop must still look a sale up, browse its returns and reprint a credit
+  // note. (CLAUDE.md §4, §6.)
+  returnsCreate: 'returns:create',
+  returnsReturnableLines: 'returns:returnableLines',
+  returnsList: 'returns:list',
+  returnsGet: 'returns:get',
+
   // ── PRINTING & THE CASH DRAWER ─────────────────────────────────────────────
   //
   // `printReceipt` takes a SALE ID, never a receipt. Main reads the sale from the database and builds
@@ -621,6 +635,30 @@ export const OpenDrawerInput = z.object({
   reasonText: z.string().trim().max(500).nullish()
 })
 
+// ═════════════════════════════════════════════════════════════════════════════
+// RETURNS — the one leftover input that had no home in shared/returns.ts
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// CreateReturnInput / ListReturnsInput / GetReturnInput are the canonical returns contract and live in
+// '@shared/returns'; the handlers import those verbatim. This is the leftover: `returnableLines(db, ref)`
+// takes a plain `number | string`, and an IPC input MUST be a schema — the renderer is not trusted, and
+// neither is a future LAN client.
+
+/**
+ * THE RETURNS DESK'S FIRST MOVE — look a sale up to see what may still come back.
+ *
+ * `ref` is EITHER the internal sale id (a number) OR the invoice number printed on the customer's
+ * receipt (a string). The service dispatches on the type exactly as it does today: a number is read as a
+ * sale id, anything else as an invoice number — so "123" typed into the box finds invoice "123", never
+ * sale-row 123. One field, mapped 1:1 to the service, so the handler stays a thin passthrough.
+ */
+export const ReturnableLinesInput = z.object({
+  ref: z.union([
+    RowId,
+    z.string().trim().min(1, 'Please enter the sale or invoice number.').max(64)
+  ])
+})
+
 // ── What the scanner gives back ──────────────────────────────────────────────
 
 /**
@@ -826,6 +864,7 @@ export type ListHeldInput = z.infer<typeof ListHeldInput>
 export type OutstandingCreditInput = z.infer<typeof OutstandingCreditInput>
 export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
 export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
+export type ReturnableLinesInput = z.infer<typeof ReturnableLinesInput>
 export type CustomerDeactivateInput = z.infer<typeof CustomerDeactivateInput>
 export type CustomerBalanceInput = z.infer<typeof CustomerBalanceInput>
 export type UserListInput = z.infer<typeof UserListInput>

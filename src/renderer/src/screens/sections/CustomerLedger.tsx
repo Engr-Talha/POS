@@ -113,7 +113,8 @@ export function BalanceText({
 const KIND_BADGE: Record<CustomerLedgerKind, { color: string; label: string }> = {
   opening: { color: 'gray', label: 'Opening' },
   sale: { color: 'blue', label: 'Credit sale' },
-  payment: { color: 'teal', label: 'Payment' }
+  payment: { color: 'teal', label: 'Payment' },
+  return: { color: 'teal', label: 'Credit note' }
 }
 
 const PAGE_SIZE = 50

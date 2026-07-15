@@ -1850,7 +1850,12 @@ const PAYMENT_ACCOUNTS: Record<string, string> = {
   credit: ACC.RECEIVABLE // udhaar: they paid with a promise, and it becomes a receivable
 }
 
-function accountForPaymentMethod(code: string): string {
+/**
+ * Exported so the RETURNS service settles a refund through the SAME payment-method → account mapping a
+ * sale uses (returns.ts). One mapping, reused — not a second copy free to disagree about where a
+ * JazzCash refund lands. Adding the `export` changes no behaviour here; it only shares the resolution.
+ */
+export function accountForPaymentMethod(code: string): string {
   return PAYMENT_ACCOUNTS[code] ?? ACC.BANK
 }
 
@@ -1949,9 +1954,13 @@ function assertCreditRules(
  * (see customers.ts): a typed balance is one that can disagree with the invoices behind it, and then the
  * shop chases a customer for money the ledger says they do not owe.
  *
- *     opening udhaar  +  every credit payment on a COMPLETED sale  −  every customer_payment received
+ *     opening udhaar  +  every credit payment on a COMPLETED sale
+ *                     −  every customer_payment received  −  every return credited to the account
  *
- * A voided sale is excluded, because it did not happen.
+ * A voided sale is excluded, because it did not happen. A return settled onto the customer's account —
+ * 'customer_credit' or the minimal 'exchange' — lowers the debt exactly as a payment does (all post CR
+ * Receivable), so it is subtracted the same way; a 'refund' pays out through a tender and never lands
+ * here (it is refused if it would credit Receivable).
  *
  * THIS IS THE ONE FUNCTION that says what a customer owes, and it is used from BOTH sides of the debt:
  * the credit-limit check here in the sale path, and `balance()` on the customer-ledger screen
@@ -1987,7 +1996,26 @@ export function outstandingCredit(db: DB, customerId: number): number {
     .pluck()
     .get(customerId) as number
 
-  return opening + onCredit - paidBack
+  // Udhaar CREDITED BY A RETURN. A return posts CR Receivable for its grand_total (returns.ts) whenever
+  // it is settled onto the customer's account — the same credit a payment posts — so it lowers what the
+  // customer owes by exactly that and MUST be subtracted here, or the ledger screen chases them for
+  // money the general ledger says they no longer owe (CLAUDE.md trap #17: a derived balance must be
+  // right from EVERY path that moves it, the returns desk included). BOTH 'customer_credit' and the
+  // minimal 'exchange' (which parks store credit on Receivable for a replacement sale) credit
+  // Receivable; a 'refund' pays OUT through a real tender and is refused if it would land on Receivable
+  // (returns.ts resolveSettlement), so those two settlements are exactly the ones that belong here —
+  // and this term stays equal, per customer, to what the GL posted to Accounts Receivable.
+  const creditedByReturns = db
+    .prepare(
+      `SELECT COALESCE(SUM(r.grand_total), 0)
+       FROM returns r
+       JOIN sales s ON s.id = r.sale_id
+       WHERE s.customer_id = ? AND r.settlement IN ('customer_credit', 'exchange')`
+    )
+    .pluck()
+    .get(customerId) as number
+
+  return opening + onCredit - paidBack - creditedByReturns
 }
 
 // ── Writing the rows ─────────────────────────────────────────────────────────
@@ -2263,6 +2291,24 @@ export function voidSale(
       ErrorCode.VALIDATION,
       'Only a completed sale can be cancelled. A parked cart is simply discarded.',
       `sale ${input.id} has status "${sale.status}"`
+    )
+  }
+
+  // A sale that has already had goods RETURNED against it cannot be voided. A void reverses the WHOLE
+  // sale — re-stocking every unit and contra-posting the entire original journal — but a return has
+  // ALREADY reversed part of it. Voiding on top would pay the returned money out a second time (the
+  // drawer goes negative) and put the returned goods back a second time (phantom stock). The returns
+  // are their own documents and must be dealt with on their own terms. This mirrors how createReturn
+  // refuses a voided sale — the two operations are mutually exclusive. (Returns audit, HIGH.)
+  const returnCount = db
+    .prepare('SELECT COUNT(*) FROM returns WHERE sale_id = ?')
+    .pluck()
+    .get(input.id) as number
+  if (returnCount > 0) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `Invoice ${sale.invoiceNo} has returns recorded against it, so it cannot be cancelled. Please reverse or settle those returns first.`,
+      `sale ${input.id} has ${returnCount} return(s); refusing to void to avoid double reversal`
     )
   }
 

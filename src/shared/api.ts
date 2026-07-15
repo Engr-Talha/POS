@@ -36,6 +36,7 @@ import type {
   OutstandingCreditInput,
   OpenDrawerInput,
   PrintReceiptInput,
+  ReturnableLinesInput,
   CompleteSaleResponse,
   PrintOutcome,
   DrawerOutcome,
@@ -64,6 +65,14 @@ import type {
   SaveQuoteInput,
   VoidSaleInput
 } from './sales'
+import type {
+  CreateReturnInput,
+  ListReturnsInput,
+  GetReturnInput,
+  ReturnDetail,
+  ReturnableSale,
+  ReturnListItem
+} from './returns'
 import type {
   CommitOpeningInput,
   CustomerGetInput,
@@ -565,6 +574,40 @@ export interface PosApi {
      * `selling.creditLimit` (warn or block), enforced in MAIN.
      */
     outstandingCredit: (input: OutstandingCreditInput) => Promise<Result<number>>
+  }
+
+  /**
+   * RETURNS — goods coming BACK, and the money that goes back with them.
+   *
+   * A return is the inverse of a sale and obeys the same disciplines. THE RENDERER SENDS INTENT, MAIN
+   * DECIDES THE MONEY: a return line says WHICH sale line came back and HOW MANY — it does NOT say what
+   * to refund. Main reads the FROZEN net/tax/cost off the original sale line, scales them to the returned
+   * quantity, and freezes the result, so a tampered renderer cannot refund a Rs 200,000 television for
+   * one rupee behind a balanced journal. The clock and the approver are MAIN's, never the renderer's.
+   * (shared/returns.ts.)
+   *
+   * `create` is the ONLY write and is SUPERVISOR-ONLY ('sale.refund'), enforced in MAIN — the UI hiding
+   * a button is a courtesy, not a control (CLAUDE.md §4). The three reads keep working on an expired
+   * licence: an expired shop must still look a sale up, browse its returns and reprint a credit note. It
+   * simply cannot refund a new one until it renews. (CLAUDE.md §6.)
+   */
+  returns: {
+    /**
+     * PROCESS A RETURN. Supervisor-only, enforced in MAIN. ONE transaction: the refund is frozen from
+     * the original sale, the balanced journal posts, restocked lines come back at the cost they left at,
+     * and it is audited with a reason code. Returns the frozen return, ready for the credit note.
+     */
+    create: (input: CreateReturnInput) => Promise<Result<ReturnDetail>>
+    /**
+     * THE RETURNS DESK'S FIRST MOVE: look a sale up — by its id, or by the invoice number printed on the
+     * customer's receipt — and see, per line, what was sold, what has already come back, and what remains
+     * returnable, with the frozen figures the picker needs to show what a refund is worth.
+     */
+    returnableLines: (input: ReturnableLinesInput) => Promise<Result<ReturnableSale>>
+    /** The returns history — paginated and indexed. Manager-gated ('report.view'); assume years of trading. */
+    list: (input: ListReturnsInput) => Promise<Result<PagedResult<ReturnListItem>>>
+    /** One return, with its lines and a few joined labels — the return detail screen and the credit note. */
+    get: (input: GetReturnInput) => Promise<Result<ReturnDetail>>
   }
 
   /**
