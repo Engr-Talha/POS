@@ -3,21 +3,23 @@ import type { DB } from '../db'
 import type { User } from '@shared/types'
 import { AppError, ErrorCode } from '@shared/result'
 import type { PagedResult } from '@shared/catalog'
+import { CustomerGetInput, CustomerListInput } from '@shared/opening'
 import {
   CreateCustomerInput,
-  CustomerGetInput,
-  CustomerListInput,
   UpdateCustomerInput,
-  type Customer
-} from '@shared/opening'
+  type Customer,
+  type CustomerPriceTier
+} from '@shared/customers'
 import * as audit from './audit'
 
 /**
  * CUSTOMERS — who owes the shop money, and who the loyalty points belong to.
  *
- * MINIMAL ON PURPOSE. The customer LEDGER, loyalty and per-customer pricing are all Phase 7. This
- * service exists NOW for one reason: opening udhaar has to be owed BY SOMEBODY, and a receivable with
- * no customer against it is a number nobody can ever collect.
+ * THE CUSTOMER RECORD. Phase 7 (migration 0009) turned the minimal row into a real party the shop
+ * keeps a running account with: on top of name/phone/address/type/credit-limit it now carries a
+ * business name and tax number (for a proper sales-tax invoice), free-text notes, and a default price
+ * tier. The udhaar LEDGER itself — the running statement and the repayments that bring the balance
+ * down — lives next door in `customer-ledger.ts`; loyalty and per-customer pricing are still to come.
  *
  * THE THING THAT IS NOT HERE, AND NEVER WILL BE: A BALANCE.
  *
@@ -42,6 +44,12 @@ type CustomerRow = {
   address: string | null
   type_lookup_id: number | null
   credit_limit: number
+  // ── Phase 7 (migration 0009). All nullable — a walk-in added before this build is simply NULL. ──
+  business_name: string | null
+  tax_number: string | null
+  notes: string | null
+  // The CHECK on this column (0009) guarantees it is 'retail', 'wholesale' or NULL — never anything else.
+  price_tier: CustomerPriceTier | null
   is_active: number
   created_at: string
   updated_at: string
@@ -55,6 +63,10 @@ function toCustomer(row: CustomerRow): Customer {
     address: row.address,
     typeLookupId: row.type_lookup_id,
     creditLimit: row.credit_limit,
+    businessName: row.business_name,
+    taxNumber: row.tax_number,
+    notes: row.notes,
+    priceTier: row.price_tier,
     isActive: Boolean(row.is_active),
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -82,8 +94,10 @@ export function create(db: DB, actor: User, raw: unknown, now = new Date()): Cus
         db
           .prepare(
             `INSERT INTO customers (name, phone, address, type_lookup_id, credit_limit,
+                                    business_name, tax_number, notes, price_tier,
                                     is_active, created_at, updated_at)
-             VALUES (@name, @phone, @address, @typeLookupId, @creditLimit, 1, @at, @at)`
+             VALUES (@name, @phone, @address, @typeLookupId, @creditLimit,
+                     @businessName, @taxNumber, @notes, @priceTier, 1, @at, @at)`
           )
           .run({
             name: input.name,
@@ -91,6 +105,10 @@ export function create(db: DB, actor: User, raw: unknown, now = new Date()): Cus
             address: input.address ?? null,
             typeLookupId: input.typeLookupId ?? null,
             creditLimit: input.creditLimit,
+            businessName: input.businessName ?? null,
+            taxNumber: input.taxNumber ?? null,
+            notes: input.notes ?? null,
+            priceTier: input.priceTier ?? null,
             at
           }).lastInsertRowid
       ),
@@ -121,6 +139,10 @@ const UPDATABLE: Record<string, string> = {
   address: 'address',
   typeLookupId: 'type_lookup_id',
   creditLimit: 'credit_limit',
+  businessName: 'business_name',
+  taxNumber: 'tax_number',
+  notes: 'notes',
+  priceTier: 'price_tier',
   isActive: 'is_active'
   // NO BALANCE. See the header — what a customer owes is derived from the ledger. Not an oversight.
 }

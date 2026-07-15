@@ -39,7 +39,16 @@ import type {
   CompleteSaleResponse,
   PrintOutcome,
   DrawerOutcome,
-  PrinterInfo
+  PrinterInfo,
+  CustomerWithBalance,
+  CustomerDeactivateInput,
+  CustomerBalanceInput,
+  UserListInput,
+  CreateUserInput,
+  UpdateUserInput,
+  SetUserPasswordInput,
+  SetUserPinInput,
+  UserIdInput
 } from './ipc'
 import type {
   CompleteSaleInput,
@@ -57,8 +66,7 @@ import type {
 } from './sales'
 import type {
   CommitOpeningInput,
-  CreateCustomerInput,
-  Customer,
+  CustomerGetInput,
   CustomerListInput,
   DeleteOpeningPayableInput,
   DeleteOpeningReceivableInput,
@@ -74,9 +82,19 @@ import type {
   OpeningStockListInput,
   UpdateOpeningPayableInput,
   UpdateOpeningReceivableInput,
-  UpdateOpeningStockLineInput,
-  UpdateCustomerInput
+  UpdateOpeningStockLineInput
 } from './opening'
+// The canonical Phase-7 customer contract. `list` / `get` still take the '@shared/opening' schemas
+// above; everything that carries the new profile fields, the ledger and payments comes from here.
+import type {
+  Customer,
+  CreateCustomerInput,
+  UpdateCustomerInput,
+  CustomerLedgerInput,
+  CustomerLedgerPage,
+  CustomerPayment,
+  RecordCustomerPaymentInput
+} from './customers'
 import type {
   AddBarcodeInput,
   AdjustStockInput,
@@ -113,7 +131,7 @@ import type {
   UpdateSupplierInput,
   VariantGroup
 } from './catalog'
-import type { AuditEntry, BackupResult, Lookup } from './types'
+import type { AuditEntry, BackupResult, Lookup, User } from './types'
 import type { Account, TrialBalance } from './accounting'
 import type { AppState } from './app-state'
 
@@ -379,11 +397,62 @@ export interface PosApi {
    * `creditLimit` is a different thing entirely: how much udhaar they are ALLOWED to run up.
    */
   customers: {
-    /** Paginated. Searches name AND phone — two customers really are both called Muhammad Rashid. */
+    /**
+     * Paginated, searches name AND phone (two customers really are both called Muhammad Rashid).
+     * Gated 'sale.create' in MAIN — NOT 'report.view' — because the TILL needs it: a credit (udhaar)
+     * sale must name the customer, and a cashier who cannot list customers cannot take udhaar. Returns
+     * plain customer records — no balance, no cost.
+     */
     list: (input: CustomerListInput) => Promise<Result<PagedResult<Customer>>>
+    /**
+     * THE PHASE-7 CUSTOMERS SCREEN: every customer WITH their derived udhaar balance. Manager-gated
+     * ('report.view') — this is the aging of the shop's receivables, not a till lookup. The balance is
+     * computed only for the page's rows, never the whole table (assume 100k+ customers).
+     */
+    listWithBalances: (input: CustomerListInput) => Promise<Result<PagedResult<CustomerWithBalance>>>
+    /** One customer record by id — the same fields as `list`, for resolving a `customerId`. */
+    get: (input: CustomerGetInput) => Promise<Result<Customer>>
     create: (input: CreateCustomerInput) => Promise<Result<Customer>>
     /** Send ONLY the fields the form edited. (Trap #18.) */
     update: (input: UpdateCustomerInput) => Promise<Result<Customer>>
+    /** Retire — never delete. Last year's credit sale still points at the row. */
+    deactivate: (input: CustomerDeactivateInput) => Promise<Result<Customer>>
+    /**
+     * ONE PAGE of the running udhaar statement, OLDEST FIRST, with a running balance per row — it reads
+     * like a bank statement. The page also carries the current derived `balance` and `creditLimit` for
+     * the header. Correct whichever screen recorded a payment (CLAUDE.md trap #17).
+     */
+    ledger: (input: CustomerLedgerInput) => Promise<Result<CustomerLedgerPage>>
+    /** What the customer owes RIGHT NOW — DERIVED on read (opening + credit sales − payments). */
+    balance: (input: CustomerBalanceInput) => Promise<Result<number>>
+    /**
+     * Record an udhaar repayment. Posts DR Cash/Bank · CR Receivable in ONE transaction and audits WHO
+     * took the money, WHEN. A split settlement (part cash, part cheque) is TWO calls, one per method.
+     * Overpayment is allowed — the balance goes negative, the shop owes them. `userId` and `at` come
+     * from MAIN, never the renderer.
+     */
+    recordPayment: (input: RecordCustomerPaymentInput) => Promise<Result<CustomerPayment>>
+  }
+
+  /**
+   * USERS & ROLES — OWNER ONLY. Every method is gated 'user.manage' in MAIN; the UI hiding a button is
+   * a courtesy, not a control (CLAUDE.md §4). A user is NEVER deleted — retired and restored — so last
+   * year's sale keeps a name on it, and the shop must always keep one active owner (the service refuses
+   * the write that would strand it). A password or PIN goes IN but NEVER comes back: the only thing the
+   * renderer ever learns is whether a PIN is set (`User.hasPin`).
+   */
+  users: {
+    /** Paginated. Shows active AND retired staff, so the owner can reactivate someone they re-hired. */
+    list: (input: UserListInput) => Promise<Result<PagedResult<User>>>
+    create: (input: CreateUserInput) => Promise<Result<User>>
+    /** Send ONLY the fields the form edited (trap #18). The last active owner cannot be demoted. */
+    update: (input: UpdateUserInput) => Promise<Result<User>>
+    setPassword: (input: SetUserPasswordInput) => Promise<Result<User>>
+    /** Set the counter quick-switch PIN, or clear it with `pin: null`. No two active staff share a PIN. */
+    setPin: (input: SetUserPinInput) => Promise<Result<User>>
+    /** Retire — never delete. The last active owner cannot be retired. */
+    deactivate: (input: UserIdInput) => Promise<Result<User>>
+    reactivate: (input: UserIdInput) => Promise<Result<User>>
   }
 
   /**

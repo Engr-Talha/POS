@@ -34,7 +34,10 @@ import {
   CircleCheck,
   Package,
   Boxes,
-  ClipboardList
+  ClipboardList,
+  ReceiptText,
+  UsersRound,
+  BookUser
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -42,14 +45,28 @@ import type { Permission } from '@shared/rbac'
 import { ROLE_LABEL, roleCan } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
 import { Books } from './sections/Books'
+import { Customers } from './sections/Customers'
 import { Lists } from './sections/Lists'
 import { OpeningSetup } from './sections/OpeningSetup'
 import { Products } from './sections/Products'
+import { SalesHistory } from './sections/SalesHistory'
 import { Sell } from './sections/Sell'
 import { SettingsSection } from './sections/SettingsSection'
 import { Stock } from './sections/Stock'
+import { Users } from './sections/Users'
 
-type Section = 'sell' | 'overview' | 'products' | 'stock' | 'opening' | 'books' | 'lists' | 'settings'
+type Section =
+  | 'sell'
+  | 'overview'
+  | 'products'
+  | 'stock'
+  | 'sales'
+  | 'opening'
+  | 'books'
+  | 'customers'
+  | 'lists'
+  | 'users'
+  | 'settings'
 
 /**
  * `permission` hides an entry the user could not use anyway. That is a COURTESY, not a control —
@@ -65,9 +82,12 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'products', label: 'Items', icon: Package },
   { key: 'stock', label: 'Stock', icon: Boxes },
+  { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
   { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
   { key: 'books', label: 'Books', icon: Scale },
+  { key: 'customers', label: 'Customers', icon: BookUser, permission: 'report.view' },
   { key: 'lists', label: 'Manage lists', icon: ListChecks },
+  { key: 'users', label: 'Staff', icon: UsersRound, permission: 'user.manage' },
   { key: 'settings', label: 'Settings', icon: SettingsIcon }
 ]
 
@@ -254,11 +274,22 @@ export function Home({
           {section === 'stock' && (
             <Stock readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
+          {section === 'sales' && <SalesHistory currencySymbol={currencySymbol} />}
           {section === 'opening' && (
             <OpeningSetup readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'books' && <Books currencySymbol={currencySymbol} />}
+          {section === 'customers' && (
+            <Customers
+              readOnly={state.readOnly}
+              currencySymbol={currencySymbol}
+              isOwner={state.session?.user.role === 'owner'}
+            />
+          )}
           {section === 'lists' && <Lists readOnly={state.readOnly} />}
+          {section === 'users' && (
+            <Users currentUser={state.session?.user ?? null} readOnly={state.readOnly} />
+          )}
           {section === 'settings' && (
             <SettingsSection
               readOnly={state.readOnly}

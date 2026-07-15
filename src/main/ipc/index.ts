@@ -33,6 +33,14 @@ import {
   OutstandingCreditInput,
   OpenDrawerInput,
   PrintReceiptInput,
+  CustomerDeactivateInput,
+  CustomerBalanceInput,
+  UserListInput,
+  CreateUserInput,
+  UpdateUserInput,
+  SetUserPasswordInput,
+  SetUserPinInput,
+  UserIdInput,
   type StockAdjustResult,
   type NearExpiryItem,
   type SystemInfo,
@@ -43,7 +51,8 @@ import {
   type CompleteSaleResponse,
   type PrintOutcome,
   type DrawerOutcome,
-  type PrinterInfo
+  type PrinterInfo,
+  type CustomerWithBalance
 } from '@shared/ipc'
 import {
   CompleteSaleInput,
@@ -60,7 +69,7 @@ import {
 } from '@shared/sales'
 import {
   CommitOpeningInput,
-  CreateCustomerInput,
+  CustomerGetInput,
   CustomerListInput,
   DeleteOpeningPayableInput,
   DeleteOpeningReceivableInput,
@@ -72,9 +81,19 @@ import {
   OpeningStockListInput,
   UpdateOpeningPayableInput,
   UpdateOpeningReceivableInput,
-  UpdateOpeningStockLineInput,
-  UpdateCustomerInput
+  UpdateOpeningStockLineInput
 } from '@shared/opening'
+// The canonical Phase-7 customer schemas — the create/update ones carry the new profile fields
+// (business_name, tax_number, notes, price_tier) that the old '@shared/opening' minimal schemas would
+// silently STRIP before they ever reached the service. The ledger + payment schemas are new here.
+import {
+  CreateCustomerInput,
+  UpdateCustomerInput,
+  CustomerLedgerInput,
+  RecordCustomerPaymentInput,
+  type CustomerLedgerPage,
+  type CustomerPayment
+} from '@shared/customers'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -118,6 +137,8 @@ import * as stockService from '../services/stock'
 import * as catalogService from '../services/catalog'
 import * as openingService from '../services/opening'
 import * as customersService from '../services/customers'
+import * as customerLedgerService from '../services/customer-ledger'
+import * as usersService from '../services/users'
 import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
 import * as salesService from '../services/sales'
@@ -1191,52 +1212,163 @@ export function registerIpcHandlers(): void {
     return result
   })
 
-  // ── Customers ─────────────────────────────────────────────────────────────
-  // Minimal on purpose: the customer ledger, loyalty and per-customer pricing are Phase 7. Customers
-  // exist NOW because opening udhaar has to be owed BY SOMEBODY.
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CUSTOMERS & THE UDHAAR LEDGER (Phase 7)
   //
-  // THERE IS NO ENDPOINT HERE THAT WRITES A BALANCE, and there never will be. What a customer owes is
-  // DERIVED from the ledger, exactly as stock is derived from the movements. `creditLimit` is a
-  // different thing: how much udhaar they are ALLOWED to run up. A limit, not a debt.
+  // WHAT A CUSTOMER OWES IS DERIVED, NEVER STORED — opening udhaar + credit sales − payments, exactly as
+  // stock is the sum of its movements. No handler here writes a balance. `balance`, `listWithBalances`
+  // and `ledger` all recompute on read, and they can never disagree with the credit-limit check on the
+  // till because they share ONE function — sales.outstandingCredit — which is the literal trap #17.
   //
-  // Writes are gated on 'settings.manage' — a cashier cannot invent a customer at the till, which is
-  // how udhaar quietly gets written off to "Ali". A new credit customer is added by the owner. Phase 7
-  // puts a customer LEDGER in front of a cashier, and that needs its own 'customer.manage' permission in
-  // shared/rbac.ts. Opening a gate later is safe; shipping one too wide is not.
+  // PERMISSIONS — and why they are deliberately NOT uniform:
   //
-  // ── THE READ IS 'sale.create', AND IT HAS TO BE (Phase 5). ─────────────────────────────────────────
+  //   list, get            'sale.create'.  The TILL needs these. Credit (udhaar) is a payment method and
+  //                        `selling.requireCustomerForCredit` defaults ON, so a credit sale must NAME the
+  //                        customer — a cashier who cannot look one up cannot take udhaar, the commonest
+  //                        credit workflow in a Pakistani shop. They expose name/phone/address/type and
+  //                        CREDIT LIMIT — nothing about what the shop pays. `get` shows STRICTLY LESS than
+  //                        `list` (one row), so it is not gated tighter than `list`.
+  //   listWithBalances,    'report.view'.  These expose what customers OWE — the aging of the shop's
+  //   ledger, balance       receivables, manager-level report data, not a till lookup.
+  //   create/update/       'settings.manage' (owner).  Kept from the existing gate: a cashier must not be
+  //   deactivate           able to invent a customer at the till and quietly write udhaar off to "Ali".
+  //                        The finer gate this really wants is a 'customer.manage' (manager) permission in
+  //                        shared/rbac.ts — out of this task's file scope. Add it later and relax these to
+  //                        it. Opening a gate later is safe; shipping one too wide is not.
+  //   recordPayment        'sale.create'.  The cashier at the counter takes the repayment. It posts a real
+  //                        journal (DR Cash raises the drawer's EXPECTED cash) and is audited — a faked
+  //                        payment cannot make udhaar vanish without also making the till short.
   //
-  // It was 'report.view' (manager). But CREDIT (UDHAAR) IS A PAYMENT METHOD ON THE TILL, and
-  // `selling.requireCustomerForCredit` defaults to ON — so a credit sale must NAME the customer. A
-  // cashier who cannot list customers cannot name one, and therefore cannot take udhaar at all: the
-  // single most common credit workflow in a Pakistani shop, closed to the only role that mans the till.
-  //
-  // Main's own contract already assumed this. `sale:outstandingCredit` is gated on 'sale.create' and its
-  // doc says "read BEFORE taking a credit sale, so the cashier can see the udhaar before adding to it" —
-  // an endpoint that was unreachable, because nothing gave the cashier a customer id to pass it.
-  //
-  // What this exposes is name, phone, address, type and CREDIT LIMIT — every field a cashier needs to
-  // decide whether to give someone credit, and not one figure about what the shop pays for anything.
-  // No cost, no margin. (Contrast `products.list`, which carries `costPrice` and therefore stays at
-  // 'report.view': a name-search at the till needs its own narrow endpoint, not a wider gate on this one.)
+  // The services audit their own writes (customer.create/update, customer.payment). No handler double-logs.
+  // WRITES call assertWritable(); an expired shop can still list, read a ledger and export — never ring up.
+  // ═══════════════════════════════════════════════════════════════════════════
+
   handle(IPC.customersList, CustomerListInput, (input) => {
     session.requirePermissionOf('sale.create')
     return customersService.list(getDb(), input)
   })
 
+  // Annotated with the SHARED result type: `shared/` cannot import from `main/`, so this line ties the
+  // service's CustomerWithBalance to the one the screen is typed against. Drift breaks the build here.
+  handle<CustomerListInput, PagedResult<CustomerWithBalance>>(
+    IPC.customersListWithBalances,
+    CustomerListInput,
+    (input) => {
+      session.requirePermissionOf('report.view')
+      return customerLedgerService.listWithBalances(getDb(), input)
+    }
+  )
+
+  handle(IPC.customersGet, CustomerGetInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return customersService.getById(getDb(), input.id)
+  })
+
   handle(IPC.customersCreate, CreateCustomerInput, (input) => {
     const user = session.requirePermissionOf('settings.manage')
     assertWritable()
-    // The service audits customer.create itself — it has the actor. Do not log it twice here.
+    // Validated with the CANONICAL '@shared/customers' schema, so the new profile fields (business name,
+    // tax number, notes, price tier) actually flow through. The service audits customer.create itself.
     return customersService.create(getDb(), user, input)
   })
 
   handle(IPC.customersUpdate, UpdateCustomerInput, (input) => {
     const user = session.requirePermissionOf('settings.manage')
     assertWritable()
-    // Only the fields the form sent arrive here. The service audits customer.update, with a before/after
-    // of exactly the fields that were touched.
+    // Only the fields the form sent arrive here (trap #18). The service audits customer.update, with a
+    // before/after of exactly the fields that were touched.
     return customersService.update(getDb(), user, input)
+  })
+
+  handle(IPC.customersDeactivate, CustomerDeactivateInput, (input) => {
+    const user = session.requirePermissionOf('settings.manage')
+    assertWritable()
+    // Retire, never delete — the service flips is_active via the same audited update path.
+    return customersService.deactivate(getDb(), user, input.id)
+  })
+
+  handle<CustomerLedgerInput, CustomerLedgerPage>(
+    IPC.customersLedger,
+    CustomerLedgerInput,
+    (input) => {
+      session.requirePermissionOf('report.view')
+      return customerLedgerService.ledger(getDb(), input)
+    }
+  )
+
+  handle<CustomerBalanceInput, number>(IPC.customersBalance, CustomerBalanceInput, (input) => {
+    session.requirePermissionOf('report.view')
+    return customerLedgerService.balance(getDb(), input.customerId)
+  })
+
+  handle<RecordCustomerPaymentInput, CustomerPayment>(
+    IPC.customersRecordPayment,
+    RecordCustomerPaymentInput,
+    (input) => {
+      const user = session.requirePermissionOf('sale.create')
+      assertWritable()
+      // ONE transaction: customer_payments row → DR Cash/Bank · CR Receivable → audit 'customer.payment'.
+      // The service does it all and audits itself — do not log a second row here.
+      return customerLedgerService.recordPayment(getDb(), user, input)
+    }
+  )
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // USERS & ROLES — OWNER ONLY
+  //
+  // Every handler is gated 'user.manage' (owner) in MAIN — the renderer is not a security boundary
+  // (CLAUDE.md §4). The service audits every write (user.create / update / set_password / set_pin /
+  // clear_pin / deactivate / reactivate) with the actor's name and role, and NEVER writes a password or
+  // PIN into the row — so no handler logs a second time. A user is NEVER deleted: retire and restore, so
+  // last year's sale keeps a name on it. The service refuses any write that would leave the shop with no
+  // active owner.
+  //
+  // WRITES call assertWritable(): an expired shop cannot hire, retire or re-PIN staff until it renews.
+  // `list` is a READ and does not — the owner can still see who holds the keys to the shop.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  handle(IPC.usersList, UserListInput, (input) => {
+    session.requirePermissionOf('user.manage')
+    return usersService.list(getDb(), input.page, input.pageSize)
+  })
+
+  handle(IPC.usersCreate, CreateUserInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    return usersService.create(getDb(), actor, input)
+  })
+
+  handle(IPC.usersUpdate, UpdateUserInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    // `id` names the user; only the other fields the form sent are the changes (trap #18).
+    const { id, ...changes } = input
+    return usersService.update(getDb(), actor, id, changes)
+  })
+
+  handle(IPC.usersSetPassword, SetUserPasswordInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    return usersService.setPassword(getDb(), actor, input.id, input.password)
+  })
+
+  handle(IPC.usersSetPin, SetUserPinInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    // pin === null CLEARS it. Digits + exact length are checked by the service against security.pinLength.
+    return usersService.setPin(getDb(), actor, input.id, input.pin)
+  })
+
+  handle(IPC.usersDeactivate, UserIdInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    return usersService.deactivate(getDb(), actor, input.id)
+  })
+
+  handle(IPC.usersReactivate, UserIdInput, (input) => {
+    const actor = session.requirePermissionOf('user.manage')
+    assertWritable()
+    return usersService.reactivate(getDb(), actor, input.id)
   })
 
   // ═══════════════════════════════════════════════════════════════════════════

@@ -147,12 +147,33 @@ const api: PosApi = {
     applyImport: () => ipcRenderer.invoke(IPC.openingApplyImport)
   },
 
-  // Note what is NOT here: any way to set what a customer owes. That figure is DERIVED from the
-  // ledger, exactly as stock is derived from the movements. `creditLimit` is a limit, not a balance.
+  // Note what is NOT here: any way to set what a customer owes. That figure is DERIVED from the ledger,
+  // exactly as stock is derived from movements — `balance`, `listWithBalances` and `ledger` recompute it
+  // on read, they never write it. `creditLimit` is a limit, not a balance. `recordPayment` posts a
+  // repayment (DR cash/bank, CR receivable) — it lowers the derived balance, it does not set it.
   customers: {
     list: (input) => ipcRenderer.invoke(IPC.customersList, input),
+    listWithBalances: (input) => ipcRenderer.invoke(IPC.customersListWithBalances, input),
+    get: (input) => ipcRenderer.invoke(IPC.customersGet, input),
     create: (input) => ipcRenderer.invoke(IPC.customersCreate, input),
-    update: (input) => ipcRenderer.invoke(IPC.customersUpdate, input)
+    update: (input) => ipcRenderer.invoke(IPC.customersUpdate, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.customersDeactivate, input),
+    ledger: (input) => ipcRenderer.invoke(IPC.customersLedger, input),
+    balance: (input) => ipcRenderer.invoke(IPC.customersBalance, input),
+    recordPayment: (input) => ipcRenderer.invoke(IPC.customersRecordPayment, input)
+  },
+
+  // USERS & ROLES — OWNER ONLY, enforced in MAIN (this whitelist is a security boundary, but not THE
+  // one — the 'user.manage' gate lives in the handler). A password or PIN goes IN but never comes back;
+  // the renderer only ever learns whether a PIN is set (User.hasPin). A user is retired, never deleted.
+  users: {
+    list: (input) => ipcRenderer.invoke(IPC.usersList, input),
+    create: (input) => ipcRenderer.invoke(IPC.usersCreate, input),
+    update: (input) => ipcRenderer.invoke(IPC.usersUpdate, input),
+    setPassword: (input) => ipcRenderer.invoke(IPC.usersSetPassword, input),
+    setPin: (input) => ipcRenderer.invoke(IPC.usersSetPin, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.usersDeactivate, input),
+    reactivate: (input) => ipcRenderer.invoke(IPC.usersReactivate, input)
   },
 
   // THE TILL. Look at what a cart line CANNOT carry across this line: net, taxAmount, gross, unitCost,

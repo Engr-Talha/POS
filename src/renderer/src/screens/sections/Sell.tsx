@@ -44,6 +44,7 @@ import {
   Trash2,
   TriangleAlert,
   User,
+  UserPlus,
   UserX,
   X
 } from 'lucide-react'
@@ -68,7 +69,7 @@ import {
 import { formatMoney } from '@shared/money'
 import { formatQty, ONE_UNIT } from '@shared/qty'
 import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
-import { LookupCodeSelect, MoneyInput, QtyInput } from './ProductForm'
+import { LookupCodeSelect, LookupSelect, MoneyInput, QtyInput } from './ProductForm'
 
 /**
  * THE SELL SCREEN. THE APP.
@@ -900,7 +901,11 @@ export function Sell({
         size="lg"
         autoFocus
         disabled={readOnly}
-        placeholder={readOnly ? 'The licence has expired — the till is read-only' : 'Scan a barcode…'}
+        placeholder={
+          readOnly
+            ? 'The licence has expired — the till is read-only'
+            : 'Scan barcode or type item code / name'
+        }
         leftSection={<ScanLine size={22} />}
         rightSection={busy || retiering ? <Loader size="xs" /> : null}
         value={barcode}
@@ -2105,6 +2110,9 @@ function CustomerModal({
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [error, setError] = useState<string | null>(null)
+  /** The "+ New customer" flow, layered over this picker. It changes no `modal` state, so the parent's
+   *  refocus effect stays put until the whole picker closes — barcode focus is handed back only once. */
+  const [creating, setCreating] = useState(false)
 
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(search.trim()), 200)
@@ -2146,14 +2154,38 @@ function CustomerModal({
 
   return (
     <Modal opened onClose={onClose} title="Who is this sale for?" centered size="lg">
+      {/* THE "+ NEW CUSTOMER" FLOW. A wholesale customer who has never been here before can be added
+          without leaving the till — the sale was blocked on this before. Selecting the new customer
+          closes THIS picker too (onCreated → onPick → setModal(null)), so focus lands back on the
+          barcode field and the next scan is not lost. (Trap #19.) */}
+      <NewCustomerModal
+        opened={creating}
+        initialName={search.trim()}
+        onClose={() => setCreating(false)}
+        onCreated={(next) => {
+          setCreating(false)
+          onPick(next)
+        }}
+      />
+
       <Stack gap="md">
-        <TextInput
-          placeholder="Search by name or phone…"
-          leftSection={<Search size={16} />}
-          value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-          autoFocus
-        />
+        <Group gap={8} align="flex-end" wrap="nowrap">
+          <TextInput
+            style={{ flex: 1 }}
+            placeholder="Search by name or phone…"
+            leftSection={<Search size={16} />}
+            value={search}
+            onChange={(event) => setSearch(event.currentTarget.value)}
+            autoFocus
+          />
+          <Button
+            variant="light"
+            leftSection={<UserPlus size={16} />}
+            onClick={() => setCreating(true)}
+          >
+            New customer
+          </Button>
+        </Group>
 
         {error != null && (
           <Alert color="red" icon={<CircleAlert size={18} />}>
@@ -2176,15 +2208,22 @@ function CustomerModal({
             <Skeleton height={38} />
           </Stack>
         ) : rows.length === 0 ? (
-          <Stack align="center" gap={4} py="lg">
+          <Stack align="center" gap={8} py="lg">
             <User size={28} opacity={0.4} />
             <Text size="sm" c="dimmed">
               {debounced === '' ? 'No customers yet.' : 'Nobody matches that.'}
             </Text>
             <Text size="xs" c="dimmed" ta="center" maw={340}>
-              Customers are added by the owner, in the Opening setup. A cashier cannot invent one at the
-              till — that is how udhaar quietly gets written off to nobody.
+              Add them now so this sale has a name on it. A shop name, phone and type make them easy to
+              find next time.
             </Text>
+            <Button
+              variant="light"
+              leftSection={<UserPlus size={16} />}
+              onClick={() => setCreating(true)}
+            >
+              New customer
+            </Button>
           </Stack>
         ) : (
           <Stack gap={6}>
@@ -2223,6 +2262,141 @@ function CustomerModal({
           </Stack>
         )}
       </Stack>
+    </Modal>
+  )
+}
+
+/**
+ * ADD A CUSTOMER FROM THE TILL. A first-time wholesale/business customer used to block the sale — there
+ * was no way to name them without leaving the screen. This captures the least a real customer needs (a
+ * name, and — for a trade buyer — their shop name, phone and type), then hands the created record
+ * straight to `onCreated`, which selects them onto the sale.
+ *
+ * MAIN is the boundary, not this form. A permission refusal, or a field the service rejects, comes back
+ * as a Result error and shows here as a plain sentence with everything the cashier typed still intact —
+ * never a stack trace, never a silent failure. Only the four fields the task asks for are here; the
+ * credit limit, tax number and notes are set later on the full Customers screen. `creditLimit` is sent
+ * as 0 so a till-made customer starts with no udhaar allowance until the owner grants one.
+ */
+function NewCustomerModal({
+  opened,
+  initialName,
+  onClose,
+  onCreated
+}: {
+  opened: boolean
+  initialName: string
+  onClose: () => void
+  onCreated: (customer: Customer) => void
+}): React.JSX.Element {
+  const [name, setName] = useState(initialName)
+  const [businessName, setBusinessName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [typeLookupId, setTypeLookupId] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // A fresh form every time it opens, seeded with whatever they had typed into the search box.
+  useEffect(() => {
+    if (!opened) return
+    setName(initialName)
+    setBusinessName('')
+    setPhone('')
+    setTypeLookupId(null)
+    setError(null)
+    setBusy(false)
+  }, [opened, initialName])
+
+  const valid = name.trim() !== ''
+
+  async function save(): Promise<void> {
+    if (!valid || busy) return
+    setBusy(true)
+    setError(null)
+
+    const result = await window.pos.customers.create({
+      name: name.trim(),
+      businessName: businessName.trim() === '' ? null : businessName.trim(),
+      phone: phone.trim() === '' ? null : phone.trim(),
+      typeLookupId,
+      creditLimit: 0
+    })
+
+    setBusy(false)
+
+    if (!result.ok) {
+      setError(result.error.userMessage)
+      return
+    }
+
+    notifications.show({
+      color: 'teal',
+      icon: <CircleCheck size={18} />,
+      title: 'Customer added',
+      message: `${result.data.name} is now on this sale.`
+    })
+    onCreated(result.data)
+  }
+
+  return (
+    <Modal opened={opened} onClose={onClose} title="New customer" centered size="md">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          void save()
+        }}
+      >
+        <Stack gap="md">
+          <TextInput
+            label="Customer name"
+            placeholder="e.g. Muhammad Rashid"
+            value={name}
+            onChange={(event) => setName(event.currentTarget.value)}
+            required
+            data-autofocus
+            autoFocus
+          />
+
+          <TextInput
+            label="Shop / business name"
+            description="For a wholesale or trade customer — printed on their invoice."
+            placeholder="e.g. Rashid Kiryana Store"
+            value={businessName}
+            onChange={(event) => setBusinessName(event.currentTarget.value)}
+          />
+
+          <TextInput
+            label="Phone"
+            description="What tells two customers with the same name apart."
+            placeholder="03xx-xxxxxxx"
+            value={phone}
+            onChange={(event) => setPhone(event.currentTarget.value)}
+          />
+
+          <LookupSelect
+            listKey="customer_type"
+            label="Type"
+            placeholder="Retail, wholesale, staff…"
+            value={typeLookupId}
+            onChange={setTypeLookupId}
+          />
+
+          {error != null && (
+            <Alert color="red" icon={<CircleAlert size={18} />}>
+              {error}
+            </Alert>
+          )}
+
+          <Group justify="flex-end">
+            <Button variant="default" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={busy} disabled={!valid} leftSection={<UserPlus size={16} />}>
+              Add customer
+            </Button>
+          </Group>
+        </Stack>
+      </form>
     </Modal>
   )
 }

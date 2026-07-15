@@ -3,6 +3,8 @@ import type { ItemType, StockMovement } from './catalog'
 import type { OpeningSummary } from './opening'
 import { PRICE_TIERS, SaleLineInput, type SaleDetail } from './sales'
 import type { TaxMode } from './tax'
+import { ROLES } from './rbac'
+import type { Customer } from './customers'
 
 /**
  * THE IPC CONTRACT. The one place the renderer and the main process agree on.
@@ -124,13 +126,31 @@ export const IPC = {
   openingPreviewImport: 'opening:previewImport',
   openingApplyImport: 'opening:applyImport',
 
-  // ── Customers ──────────────────────────────────────────────────────────────
-  // They exist now because opening udhaar has to be owed BY SOMEBODY. Note what is missing: any way
-  // to write a balance. What a customer owes is DERIVED from the ledger, exactly as stock is derived
-  // from the movements.
+  // ── Customers & the udhaar ledger (Phase 7) ────────────────────────────────
+  // What a customer OWES is DERIVED from the ledger (opening + credit sales − payments), never stored,
+  // exactly as stock is derived from movements. There is no channel that writes a balance, and there
+  // never will be: `balance`, `listWithBalances` and `ledger` all recompute on read (CLAUDE.md trap #17).
   customersList: 'customers:list',
+  customersListWithBalances: 'customers:listWithBalances',
+  customersGet: 'customers:get',
   customersCreate: 'customers:create',
   customersUpdate: 'customers:update',
+  customersDeactivate: 'customers:deactivate',
+  customersLedger: 'customers:ledger',
+  customersBalance: 'customers:balance',
+  customersRecordPayment: 'customers:recordPayment',
+
+  // ── Users & roles — OWNER ONLY ('user.manage'), enforced in MAIN ────────────
+  // Managing staff is the shop's keys: who may sell, void, override a price. A user is NEVER deleted
+  // (last year's sale carries their name) — they are retired and restored. The shop must always keep an
+  // active owner; the service refuses the write that would strand it. A password/PIN goes in, never out.
+  usersList: 'users:list',
+  usersCreate: 'users:create',
+  usersUpdate: 'users:update',
+  usersSetPassword: 'users:setPassword',
+  usersSetPin: 'users:setPin',
+  usersDeactivate: 'users:deactivate',
+  usersReactivate: 'users:reactivate',
 
   // ── SELLING — the till ─────────────────────────────────────────────────────
   //
@@ -708,6 +728,76 @@ export type CompleteSaleResponse = {
   drawer: DrawerOutcome
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// CUSTOMERS & USERS — the leftover inputs, and one mirrored result type
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The customer CREATE / UPDATE / PAYMENT / LEDGER schemas are the canonical Phase-7 contract and live in
+// '@shared/customers'; the LIST / GET schemas live in '@shared/opening'. The handlers import those
+// straight. Defined HERE are only the leftovers that had no home: the plain-id customer writes, and the
+// user-admin inputs — because services/users.ts keeps its own schemas PRIVATE, and an IPC input MUST be
+// a schema (the renderer is not trusted, and neither is a future LAN client).
+
+/** Retire a customer — never delete; last year's credit sale still points at the row. */
+export const CustomerDeactivateInput = z.object({ id: RowId })
+
+/** What a customer owes RIGHT NOW — derived on read. Just the id; the figure comes back as a number. */
+export const CustomerBalanceInput = z.object({ customerId: RowId })
+
+/**
+ * THE CUSTOMERS LIST WITH BALANCES — mirrored from services/customer-ledger.ts, because `shared/` cannot
+ * import from `main/`. The handler is annotated with this, so if the service's shape ever drifts the
+ * BUILD BREAKS here rather than the screen rendering a blank balance column. (Same device as
+ * ScannedItem / StockAdjustResult.) `balance` is 2-dp money; positive = the customer owes the shop.
+ */
+export type CustomerWithBalance = Customer & { balance: number }
+
+// ── Users & roles — OWNER ONLY ─────────────────────────────────────────────────
+// The SERVICE does the real validation — length against the `security.*` SETTINGS, username
+// uniqueness, the last-owner guard, PIN collision. These schemas are the gate at the boundary. Password
+// length is deliberately NOT bounded below here: the service enforces the minimum against
+// `security.minPasswordLength`, so an owner who demands 12-character passwords gets 12. (CLAUDE.md §4.)
+
+export const UserListInput = z.object({ page: Page, pageSize: PageSize })
+
+export const CreateUserInput = z.object({
+  username: z.string().trim().min(1, 'Please enter a username.').max(40),
+  fullName: z.string().trim().min(1, 'Please enter the full name of the staff member.').max(120),
+  role: z.enum(ROLES),
+  password: z.string().max(200, 'That password is too long.')
+})
+
+/** Edit — ONLY the fields the form sent (trap #18). `id` names the user; the rest are the changes. */
+export const UpdateUserInput = z.object({
+  id: RowId,
+  fullName: z
+    .string()
+    .trim()
+    .min(1, 'Please enter the full name of the staff member.')
+    .max(120)
+    .optional(),
+  role: z.enum(ROLES).optional()
+})
+
+export const SetUserPasswordInput = z.object({
+  id: RowId,
+  password: z.string().max(200, 'That password is too long.')
+})
+
+/**
+ * Set the counter quick-switch PIN, or CLEAR it with `pin: null`. The precise rule — digits only, and
+ * EXACTLY `security.pinLength` characters, and unique among active staff — is the service's, so the
+ * friendly "A PIN must be exactly 4 digits" message comes from there. `.nullable()` (not `.nullish()`)
+ * on purpose: clearing a PIN must be a DELIBERATE null, never a forgotten field.
+ */
+export const SetUserPinInput = z.object({
+  id: RowId,
+  pin: z.string().trim().max(20).nullable()
+})
+
+/** Retire or restore a staff member — never delete. */
+export const UserIdInput = z.object({ id: RowId })
+
 export type ActivateInput = z.infer<typeof ActivateInput>
 export type CreateFirstOwnerInput = z.infer<typeof CreateFirstOwnerInput>
 export type SignInInput = z.infer<typeof SignInInput>
@@ -736,3 +826,11 @@ export type ListHeldInput = z.infer<typeof ListHeldInput>
 export type OutstandingCreditInput = z.infer<typeof OutstandingCreditInput>
 export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
 export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
+export type CustomerDeactivateInput = z.infer<typeof CustomerDeactivateInput>
+export type CustomerBalanceInput = z.infer<typeof CustomerBalanceInput>
+export type UserListInput = z.infer<typeof UserListInput>
+export type CreateUserInput = z.infer<typeof CreateUserInput>
+export type UpdateUserInput = z.infer<typeof UpdateUserInput>
+export type SetUserPasswordInput = z.infer<typeof SetUserPasswordInput>
+export type SetUserPinInput = z.infer<typeof SetUserPinInput>
+export type UserIdInput = z.infer<typeof UserIdInput>

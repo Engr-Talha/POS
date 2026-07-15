@@ -1949,14 +1949,19 @@ function assertCreditRules(
  * (see customers.ts): a typed balance is one that can disagree with the invoices behind it, and then the
  * shop chases a customer for money the ledger says they do not owe.
  *
- *     opening udhaar  +  every credit payment on a COMPLETED sale
+ *     opening udhaar  +  every credit payment on a COMPLETED sale  −  every customer_payment received
  *
  * A voided sale is excluded, because it did not happen.
  *
- * >> PHASE 7: WHEN `customer_payments` EXISTS, SUBTRACT IT HERE. Until then, a customer who has paid the
- * >> shop back still shows the old debt, and their credit limit bites sooner than it should. That is the
- * >> safe direction to be wrong in, and it is the only direction available before the ledger screen
- * >> exists. It is not a place to invent a number.
+ * THIS IS THE ONE FUNCTION that says what a customer owes, and it is used from BOTH sides of the debt:
+ * the credit-limit check here in the sale path, and `balance()` on the customer-ledger screen
+ * (customer-ledger.ts delegates straight to it). One source of truth means the two can never disagree —
+ * a payment taken on the ledger screen lowers the very number the till checks the limit against, and it
+ * reconciles to the paisa with GL Accounts Receivable (opening DR + credit-sale DR − payment CR).
+ *
+ * Migration 0009 (Phase 7) added `customer_payments`; the third term below is that table, finally
+ * closing the note this function used to carry. Every committed customer payment posts CR Receivable, so
+ * subtracting the payment amounts here is exactly what keeps this figure equal to the ledger account.
  */
 export function outstandingCredit(db: DB, customerId: number): number {
   const opening = db
@@ -1975,7 +1980,14 @@ export function outstandingCredit(db: DB, customerId: number): number {
     .pluck()
     .get(customerId) as number
 
-  return opening + onCredit
+  // Udhaar PAID BACK. Every row here posted DR Cash/Bank CR Receivable (customer-ledger.ts), so it
+  // lowers what the customer owes by exactly its amount — whichever screen recorded it.
+  const paidBack = db
+    .prepare('SELECT COALESCE(SUM(amount), 0) FROM customer_payments WHERE customer_id = ?')
+    .pluck()
+    .get(customerId) as number
+
+  return opening + onCredit - paidBack
 }
 
 // ── Writing the rows ─────────────────────────────────────────────────────────
