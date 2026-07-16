@@ -302,6 +302,38 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Returns to supplier done** (v0.14.0). The mirror of a customer return, pointing the other way: stock
+  goes BACK out and either lowers what the shop owes or brings a refund in. Migration 0016
+  (`purchase_returns` + `purchase_return_lines`), with `purchase_return_reason` seeded as its own editable
+  list. **Goods leave at the cost they came in at** — each line copies the purchase line's FROZEN 4-dp
+  `unit_cost` and reads back the negative movement's frozen `value_minor` for its total, so buying 10@Rs60
+  then 10@Rs80 (average Rs70) and sending back one of the FIRST tins credits Rs 60, not Rs 70, and
+  `GL Inventory === SUM(value_minor)` still holds by construction. One balanced journal: CR Inventory
+  (Σ frozen line values) + CR Input Tax (pro-rata, omitted when the bill reclaimed none) DR the settlement —
+  `supplier_credit` → Payable (the common case), `refund` → the tender (a method resolving to
+  Payable/Receivable is refused: a refund is real money, and taking it off the bill is its own settlement).
+  Input tax is apportioned by **cumulative differencing**, so a bill sent back in pieces sums back to its
+  `tax_total` to the paisa with the final return taking the exact remainder — no stranded paisa. The
+  over-return guard sums every prior return of the line, inside the transaction.
+  **`supplier-ledger.balance()` and the statement now subtract `supplier_credit` returns** (trap #17), and
+  the audit's own catch was the *second* reader: **`reports.supplierAging` still summed only payments**, so
+  the aging report chased a distributor for Rs 240 of goods already taken back while GL Payable and the
+  supplier ledger both correctly said Rs 360 — the trial balance stayed green throughout, and only the
+  `Σ aging === GL Payable` reconciliation caught it. Fixed, bounded to `asOf` like its siblings, with two
+  regression tests (credit reduces the bill; a cash refund must NOT). A `refund` return never touches
+  Payables. The Balance Sheet needed nothing — it reads the journals, which is the payoff of real
+  double-entry: only a report that recomputes payables independently can drift.
+- **Quotations done** (v0.13.0). They were already ~90% built (save/resume/convert, and a quote takes its
+  invoice number only on completion). Closed the two gaps that make them usable: **a printable QUOTATION**
+  (58/80mm — boxed heading, no invoice number, a labelled "Quote #142" reference, "Valid until", an EXPIRED
+  box, "not a receipt, no payment received"; reuses the receipt's own formatters so the two can never
+  disagree, pinned by a test) and **a validity date** (migration 0015 `sales.valid_until` + the
+  `selling.quoteValidDays` setting, default 7). INVARIANT: valid_until non-NULL IFF status='quote' — set on
+  quote, re-dated on re-quote, cleared on hold and on conversion; the SERVICE owns it (SQLite can't
+  ALTER-TABLE a CHECK) and tests prove both halves. `receiptFor` now refuses a quote/held cart — it would
+  have printed a *receipt* reading "(not issued yet)" for the number while everything else said SALE.
+  An expired quote is shown, never blocked — that's a conversation with the customer, not the till's call.
+  All three previews rendered and looked at (trap #14).
 - **Phase 7 Expenses done** (v0.12.0). The shop's NON-STOCK running costs (rent, wages, bills, transport)
   paid from cash or bank: one balanced journal, DR the mapped expense account (category → 5200/5210/5220/
   5230/5240, any other → General Expenses 5900) CR the tender; a 'credit'/on-account tender is refused (an

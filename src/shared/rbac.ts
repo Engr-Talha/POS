@@ -61,6 +61,10 @@ export const PERMISSIONS = {
   // cashier neither buys stock nor settles supplier accounts.
   'purchase.manage': 'manager', // create a purchase / GRN
   'purchase.view': 'manager', // read the purchase history
+  // Sending goods BACK to the supplier moves stock off the shelf and money off the bill, so it sits
+  // with the rest of buying: a manager's job, never a cashier's. (The customer-facing refund is
+  // `sale.refund` — a supervisor's — because it happens at the till, in front of the customer.)
+  'purchaseReturn.manage': 'manager', // send goods back to a supplier
   'supplier.manage': 'manager', // add / edit / retire a supplier
   'supplier.pay': 'manager', // pay down what the shop owes a supplier
   'supplier.view': 'manager', // read the supplier ledger / balances

@@ -103,7 +103,10 @@ export function SupplierBalanceText({
 const KIND_BADGE: Record<SupplierLedgerKind, { color: string; label: string }> = {
   opening: { color: 'gray', label: 'Opening' },
   purchase: { color: 'blue', label: 'Purchase' },
-  payment: { color: 'teal', label: 'Payment' }
+  payment: { color: 'teal', label: 'Payment' },
+  // Goods sent back and taken off the bill. Teal like a payment, because it LOWERS what the shop owes —
+  // the same convention the customer statement uses for a credit note.
+  return: { color: 'teal', label: 'Goods returned' }
 }
 
 const PAGE_SIZE = 50

@@ -32,11 +32,15 @@ import { z } from 'zod'
 
 /**
  * The kinds of line a supplier's statement is built from. An `opening` payable and a `purchase` on
- * account RAISE what the shop owes (a charge); a `payment` LOWERS it. The ledger service tags every
- * row so the screen can render and total them without re-deriving the kind. (Mirror of the customer
- * statement's kinds — there is no `return` here, purchase returns being a later table.)
+ * account RAISE what the shop owes (a charge); a `payment` and a `return` LOWER it. The ledger service
+ * tags every row so the screen can render and total them without re-deriving the kind. (The exact
+ * mirror of the customer statement's kinds.)
+ *
+ * `return` is a purchase return settled as 'supplier_credit' (migration 0016) — goods sent back and
+ * taken off the bill, which posts DR Payable. A return settled as a 'refund' came back as real money and
+ * never touched the supplier's account, so it never appears on the statement.
  */
-export const SUPPLIER_LEDGER_KINDS = ['opening', 'purchase', 'payment'] as const
+export const SUPPLIER_LEDGER_KINDS = ['opening', 'purchase', 'payment', 'return'] as const
 export type SupplierLedgerKind = (typeof SUPPLIER_LEDGER_KINDS)[number]
 
 // ── Row types ────────────────────────────────────────────────────────────────
@@ -103,11 +107,14 @@ export type SupplierPayment = {
  */
 export type SupplierLedgerRow = {
   kind: SupplierLedgerKind
-  /** The id of the underlying row: opening_payables.id, purchases.id, or supplier_payments.id. */
+  /**
+   * The id of the underlying row: opening_payables.id, purchases.id, supplier_payments.id, or
+   * purchase_returns.id — whichever table this row's `kind` names.
+   */
   refId: number
   /** ISO8601 — when this entry is dated. The statement is ordered by it. */
   at: string
-  /** Cashier-readable: the supplier's invoice number, "Opening balance", or the payment method. */
+  /** Readable: the supplier's invoice number, "Opening balance", a returned-goods note, or the method. */
   description: string
   /** 2-dp money. What this row ADDED to what the shop owes. 0 on a payment row. */
   charge: number

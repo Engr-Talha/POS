@@ -183,6 +183,16 @@ const api: PosApi = {
     get: (input) => ipcRenderer.invoke(IPC.purchaseGet, input)
   },
 
+  // Goods going BACK to the supplier, and the credit that follows. `create` sends only WHICH purchase
+  // line and HOW MANY — never a cost or a total: main copies the purchase line's frozen unit_cost and
+  // decides every figure. The actor and the clock are MAIN's too.
+  purchaseReturns: {
+    create: (input) => ipcRenderer.invoke(IPC.purchaseReturnCreate, input),
+    returnableLines: (input) => ipcRenderer.invoke(IPC.purchaseReturnReturnableLines, input),
+    list: (input) => ipcRenderer.invoke(IPC.purchaseReturnList, input),
+    get: (input) => ipcRenderer.invoke(IPC.purchaseReturnGet, input)
+  },
+
   // The running account the shop keeps WITH each supplier, and the dues it pays back. `recordPayment`'s
   // userId and timestamp come from MAIN's session and clock — never the renderer.
   supplierLedger: {

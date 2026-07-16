@@ -5,6 +5,7 @@ import * as reports from './reports'
 import * as sales from './sales'
 import * as returns from './returns'
 import * as purchases from './purchases'
+import * as purchaseReturns from './purchase-returns'
 import * as stock from './stock'
 import * as ledger from './ledger'
 import * as shifts from './shifts'
@@ -536,6 +537,78 @@ describe('supplier aging', () => {
     expect(oldRow.d90plus).toBe(50_000)
 
     expect(report.totals.total).toBe(85_000)
+    expect(report.totals.total).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
+  })
+
+  /**
+   * REGRESSION — goods sent back on credit must come OFF the aging report.
+   *
+   * A 'supplier_credit' return DEBITS Payable, exactly as a payment does. This report was summing only
+   * `supplier_payments` as credits, so it kept chasing the distributor for stock they had already taken
+   * back: GL Payable and the supplier ledger said Rs 360, the aging report said Rs 600. The trial
+   * balance stayed green throughout — nothing but this reconciliation catches it. (CLAUDE.md trap #17.)
+   */
+  it('takes a supplier_credit return off the bill, and still ties to GL Payable', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const acme = makeSupplier('Acme')
+
+    purchaseOnAccount(acme, p, 10, 600_000, at('2026-07-15')) // 10 tins @ Rs 60 = Rs 600 owed
+    const purchaseId = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    const lineId = t.db
+      .prepare('SELECT id FROM purchase_lines WHERE purchase_id = ?')
+      .pluck()
+      .get(purchaseId) as number
+
+    // 4 tins damaged, sent back and taken off the bill: Rs 240 of the Rs 600.
+    purchaseReturns.createPurchaseReturn(
+      t.db,
+      owner,
+      {
+        purchaseId,
+        lines: [{ purchaseLineId: lineId, qtyM: 4 * ONE_UNIT }],
+        settlement: 'supplier_credit',
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+
+    const report = reports.supplierAging(t.db, { asOf: '2026-07-15' })
+    const row = report.rows.find((r) => r.supplierId === acme)!
+
+    expect(row.total, 'the return did not come off the aging report').toBe(36_000) // 600 − 240
+    expect(row.total).toBe(supplierLedger.balance(t.db, acme))
+    expect(report.totals.total).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
+  })
+
+  /** A 'refund' return came back as real money and never touched Payable — it must NOT credit the bill. */
+  it('leaves the bill alone when the supplier refunded cash instead', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const acme = makeSupplier('Acme')
+
+    purchaseOnAccount(acme, p, 10, 600_000, at('2026-07-15'))
+    const purchaseId = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    const lineId = t.db
+      .prepare('SELECT id FROM purchase_lines WHERE purchase_id = ?')
+      .pluck()
+      .get(purchaseId) as number
+
+    purchaseReturns.createPurchaseReturn(
+      t.db,
+      owner,
+      {
+        purchaseId,
+        lines: [{ purchaseLineId: lineId, qtyM: 4 * ONE_UNIT }],
+        settlement: 'refund',
+        refundMethodLookupId: cash(),
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+
+    const report = reports.supplierAging(t.db, { asOf: '2026-07-15' })
+    const row = report.rows.find((r) => r.supplierId === acme)!
+
+    expect(row.total, 'a cash refund must not reduce what the shop owes on the bill').toBe(60_000)
     expect(report.totals.total).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
   })
 })

@@ -37,6 +37,7 @@ import {
   PrintReceiptInput,
   PrintQuotationInput,
   ReturnableLinesInput,
+  ReturnablePurchaseLinesInput,
   CustomerDeactivateInput,
   CustomerBalanceInput,
   UserListInput,
@@ -122,6 +123,11 @@ import {
   type SupplierWithBalance
 } from '@shared/suppliers'
 import { CreatePurchaseInput, ListPurchasesInput, GetPurchaseInput } from '@shared/purchases'
+import {
+  CreatePurchaseReturnInput,
+  ListPurchaseReturnsInput,
+  GetPurchaseReturnInput
+} from '@shared/purchase-returns'
 import { CreateExpenseInput, ListExpensesInput, GetExpenseInput } from '@shared/expenses'
 import {
   CreateProductInput,
@@ -174,6 +180,7 @@ import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
 import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
+import * as purchaseReturnsService from '../services/purchase-returns'
 import * as shiftsService from '../services/shifts'
 import * as expensesService from '../services/expenses'
 import * as printer from '../printing/printer'
@@ -1461,6 +1468,49 @@ export function registerIpcHandlers(): void {
   handle(IPC.purchaseGet, GetPurchaseInput, (input) => {
     session.requirePermissionOf('purchase.view')
     return purchasesService.getPurchase(getDb(), input.id)
+  })
+
+  // ── Returns to supplier — goods going BACK, and the credit that follows ─────
+  //
+  // The mirror of the `returns:*` handlers below, pointing the other way. THE RENDERER SENDS INTENT,
+  // MAIN DECIDES THE MONEY: a line says WHICH purchase line the goods came in on and HOW MANY go back —
+  // never what they are worth. The service copies the purchase line's FROZEN 4-dp unit_cost, records the
+  // negative movement at THAT cost onto the batch the goods arrived on, reads the movement's own frozen
+  // value back as the line total, hands the input tax back pro-rata, posts ONE balanced journal
+  // (CR Inventory + CR Input Tax, DR Payable or the refund tender) and AUDITS ITSELF with
+  // 'purchase.return' — so NOT ONE handler here logs a second row (ipc/audit-contract.test.ts).
+  //
+  //   create   'purchaseReturn.manage' — a manager's job, like the purchase it reverses — AND
+  //            assertWritable(): an expired shop cannot send goods back until it renews.
+  //   reads    'purchase.view' and NOTHING else. No assertWritable() — an expired shop must still look a
+  //            bill up and browse what it sent back. Its data is never hostage. (CLAUDE.md §6)
+
+  handle(IPC.purchaseReturnCreate, CreatePurchaseReturnInput, (input) => {
+    const user = session.requirePermissionOf('purchaseReturn.manage')
+    assertWritable()
+    // ONE transaction: the negative movements at the frozen cost, the pro-rata input tax, the balanced
+    // journal, audit 'purchase.return'. The service does it all and audits itself — no second row here.
+    return purchaseReturnsService.createPurchaseReturn(getDb(), user, input)
+  })
+
+  /**
+   * What can still go back on a purchase: received / already returned / returnable per line, with the
+   * frozen cost the goods will leave at. 'purchase.view' — the same gate as `purchase:get`, which this
+   * is built on: reading a bill back is reading a bill back.
+   */
+  handle(IPC.purchaseReturnReturnableLines, ReturnablePurchaseLinesInput, (input) => {
+    session.requirePermissionOf('purchase.view')
+    return purchaseReturnsService.returnablePurchaseLines(getDb(), input.purchaseId)
+  })
+
+  handle(IPC.purchaseReturnList, ListPurchaseReturnsInput, (input) => {
+    session.requirePermissionOf('purchase.view')
+    return purchaseReturnsService.listPurchaseReturns(getDb(), input)
+  })
+
+  handle(IPC.purchaseReturnGet, GetPurchaseReturnInput, (input) => {
+    session.requirePermissionOf('purchase.view')
+    return purchaseReturnsService.getPurchaseReturn(getDb(), input)
   })
 
   // ── The supplier ledger — the running account, and the dues paid back ──────

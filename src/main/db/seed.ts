@@ -57,6 +57,15 @@ const SEED_LOOKUPS: Record<string, SeedLookup[]> = {
     { code: 'not_needed', label: 'No longer needed' },
     { code: 'expired', label: 'Expired' }
   ],
+  // Why stock went BACK to the supplier (0016). Their own list, editable in Manage Lists.
+  purchase_return_reason: [
+    { code: 'damaged', label: 'Damaged in transit' },
+    { code: 'wrong_item', label: 'Wrong item delivered' },
+    { code: 'expired', label: 'Expired / near expiry' },
+    { code: 'short_dated', label: 'Short-dated stock' },
+    { code: 'not_ordered', label: 'Not ordered' },
+    { code: 'quality', label: 'Quality problem' }
+  ],
   discount_reason: [
     { code: 'regular_customer', label: 'Regular customer' },
     { code: 'bulk', label: 'Bulk purchase' },

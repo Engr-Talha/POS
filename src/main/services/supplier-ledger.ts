@@ -28,7 +28,10 @@ import { accountForPaymentMethod } from './sales'
  * ── WHAT THE SHOP OWES IS DERIVED, NEVER STORED ────────────────────────────────────────────────────
  * Exactly as stock is the sum of its movements (CLAUDE.md §4), what the shop owes a supplier is:
  *
- *       opening payable  +  Σ (purchase.grand_total − purchase.paid_total)  −  Σ supplier_payments
+ *       opening payable
+ *     + Σ (purchase.grand_total − purchase.paid_total)
+ *     − Σ supplier_payments
+ *     − Σ purchase_returns settled as 'supplier_credit'
  *
  * There is no balance column, and there never will be. `balance()` recomputes on read. Positive = the
  * shop owes the supplier; negative = the supplier owes the shop (an overpayment, which is allowed).
@@ -39,6 +42,7 @@ import { accountForPaymentMethod } from './sales'
  *       opening payable       CR Payable   (opening journal)
  *       purchase on account   CR Payable   (the purchase's journal, its unpaid remainder)
  *       supplier payment      DR Payable   (recordPayment, below)
+ *       return on credit      DR Payable   (purchase-returns.ts, settlement 'supplier_credit')
  *
  * So the sum of every supplier's balance equals the GL Payable account balance. A standing test asserts
  * it after every scenario. Payable is a LIABILITY (credit-natured), so `accountBalance` returns
@@ -57,11 +61,14 @@ import { accountForPaymentMethod } from './sales'
  * WHAT THE SHOP OWES THIS SUPPLIER RIGHT NOW. Positive = the shop owes them; negative = they owe the
  * shop (the shop overpaid, which is allowed — see recordPayment).
  *
- *       opening payable  +  Σ (purchase.grand_total − purchase.paid_total)  −  Σ supplier_payments
+ *       opening payable
+ *     + Σ (purchase.grand_total − purchase.paid_total)
+ *     − Σ supplier_payments
+ *     − Σ purchase_returns settled as 'supplier_credit'
  *
  * Recomputed on read, never stored (CLAUDE.md §4, trap #17). Correct no matter which screen recorded
- * the payment, because every screen writes to the same three tables this reads — and it reconciles, to
- * the paisa, with GL Accounts Payable.
+ * the payment or the return, because every screen writes to the same four tables this reads — and it
+ * reconciles, to the paisa, with GL Accounts Payable.
  */
 export function balance(db: DB, supplierId: number): number {
   const opening = db
@@ -85,7 +92,26 @@ export function balance(db: DB, supplierId: number): number {
     .pluck()
     .get(supplierId) as number
 
-  return opening + onAccount - paidBack
+  // GOODS SENT BACK, TAKEN OFF THE BILL. A 'supplier_credit' return posts DR Payable for its grand total
+  // (purchase-returns.ts) — the shop owes that much less. Leave it out and this screen chases a
+  // distributor for money the GL says is no longer owed, and Σ balances stops equalling GL Payable while
+  // the trial balance stays green. That is CLAUDE.md trap #17, and it is exactly the bug the
+  // customer-returns audit found; it is not repeated here.
+  //
+  // A 'refund' return took real money back through a tender (DR Cash/Bank) and never touched Payables,
+  // so it is deliberately NOT in this sum. The supplier is joined through the return's PURCHASE, which is
+  // the only thing that says whose goods these were (migration 0016 — a return is never re-pointed).
+  const returnedOnCredit = db
+    .prepare(
+      `SELECT COALESCE(SUM(pr.grand_total), 0)
+         FROM purchase_returns pr
+         JOIN purchases p ON p.id = pr.purchase_id
+        WHERE p.supplier_id = ? AND pr.settlement = 'supplier_credit'`
+    )
+    .pluck()
+    .get(supplierId) as number
+
+  return opening + onAccount - paidBack - returnedOnCredit
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -96,7 +122,7 @@ export function balance(db: DB, supplierId: number): number {
  * The sources a supplier's statement is built from, merged into one chronological list. Each row is
  * either a CHARGE (opening balance, purchase on account — raises what the shop owes) or a PAYMENT
  * (lowers it). `kind_rank` breaks a same-instant tie deterministically: opening before purchase before
- * payment, so the running balance is stable and repeatable across pages.
+ * payment before return, so the running balance is stable and repeatable across pages.
  *
  *   opening   dated to the go-live date (the accounting date of the opening journal) so it always sorts
  *             first — it is the oldest thing on the account.
@@ -105,6 +131,9 @@ export function balance(db: DB, supplierId: number): number {
  *             account, so it is not on the statement. This is exactly what the purchase's journal
  *             credited to Payable, which keeps the statement reconciled with the GL.
  *   payment   one row per supplier_payment.
+ *   return    one row per purchase return settled as 'supplier_credit', carrying its grand_total as a
+ *             PAYMENT — exactly what the return's journal debited to Payable, and exactly the set
+ *             balance() subtracts, so the running balance still ends on balance().
  */
 const LEDGER_UNION = `
   SELECT 'opening' AS kind, 0 AS kind_rank, op.id AS ref_id,
@@ -133,6 +162,23 @@ const LEDGER_UNION = `
     FROM supplier_payments sp
     LEFT JOIN lookups ml ON ml.id = sp.method_lookup_id
    WHERE sp.supplier_id = @supplierId
+
+  UNION ALL
+
+  -- GOODS SENT BACK, TAKEN OFF THE BILL. A 'supplier_credit' return posts DR Payable for its grand_total
+  -- (purchase-returns.ts) — the same effect a payment has — so it is a PAYMENT line here, LOWERING what
+  -- the shop owes. A 'refund' return took real money back through a tender and never touched Payables,
+  -- so it is not on this statement. This is exactly the set balance() subtracts, so the running balance
+  -- still ends on balance(). The supplier comes from the return's PURCHASE — the only thing that says
+  -- whose goods these were. (Mirrors customer-ledger's credit-note line; CLAUDE.md trap #17.)
+  SELECT 'return' AS kind, 3 AS kind_rank, pr.id AS ref_id, pr.at AS at,
+         0 AS charge, pr.grand_total AS payment,
+         p.supplier_invoice_no AS invoice_no, NULL AS method_label, NULL AS cheque_no,
+         NULL AS wallet_ref, pr.reason_text AS note
+    FROM purchase_returns pr
+    JOIN purchases p ON p.id = pr.purchase_id
+   WHERE p.supplier_id = @supplierId
+     AND pr.settlement = 'supplier_credit'
 `
 
 type LedgerUnionRow = {
@@ -149,10 +195,14 @@ type LedgerUnionRow = {
   note: string | null
 }
 
-/** Cashier-readable: the supplier's bill number, "Opening balance", or the payment method. */
+/** Readable: the supplier's bill number, "Opening balance", a debit note, or the payment method. */
 function describeRow(row: LedgerUnionRow): string {
   if (row.kind === 'opening') return row.note ? `Opening balance — ${row.note}` : 'Opening balance'
   if (row.kind === 'purchase') return row.invoice_no ? `Bill ${row.invoice_no}` : `Purchase #${row.ref_id}`
+  if (row.kind === 'return') {
+    const against = row.invoice_no ? ` — bill ${row.invoice_no}` : ''
+    return row.note ? `Goods returned${against} (${row.note})` : `Goods returned${against}`
+  }
 
   const label = row.method_label ?? 'Payment'
   const reference = row.cheque_no

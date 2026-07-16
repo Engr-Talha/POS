@@ -40,6 +40,7 @@ import type {
   PrintReceiptInput,
   PrintQuotationInput,
   ReturnableLinesInput,
+  ReturnablePurchaseLinesInput,
   CompleteSaleResponse,
   PrintOutcome,
   DrawerOutcome,
@@ -130,6 +131,14 @@ import type {
   PurchaseDetail,
   PurchaseListItem
 } from './purchases'
+import type {
+  CreatePurchaseReturnInput,
+  ListPurchaseReturnsInput,
+  GetPurchaseReturnInput,
+  PurchaseReturnDetail,
+  PurchaseReturnListItem,
+  ReturnablePurchase
+} from './purchase-returns'
 import type {
   Shift,
   ShiftDetail,
@@ -524,6 +533,44 @@ export interface PosApi {
     /** The purchases list — paginated and indexed, newest first. Filterable by supplier and date range. */
     list: (input: ListPurchasesInput) => Promise<Result<PagedResult<PurchaseListItem>>>
     get: (input: GetPurchaseInput) => Promise<Result<PurchaseDetail>>
+  }
+
+  /**
+   * RETURNS TO SUPPLIER — goods going BACK to where they came from, and the credit that follows.
+   *
+   * `returns` reflected: a customer return takes stock IN and pays money OUT; this sends stock BACK OUT
+   * and either lowers what the shop OWES ('supplier_credit' → DR Payable) or brings a refund IN
+   * ('refund' → DR Cash/Bank).
+   *
+   * THE RENDERER SENDS INTENT, MAIN DECIDES THE MONEY. A line says WHICH purchase line the goods came in
+   * on and HOW MANY go back — never what they are worth. GOODS LEAVE AT THE COST THEY CAME IN AT: main
+   * copies the purchase line's FROZEN 4-dp unit_cost (buy 10 @ Rs 60 then 10 @ Rs 80 and send one of the
+   * FIRST tins back → Inventory falls by Rs 60, not the Rs 70 average), and reads the movement's own
+   * frozen value back as the line total. Every figure a screen shows is MAIN's — the renderer never
+   * computes a total (CLAUDE.md §4).
+   *
+   * `create` is the ONLY write: 'purchaseReturn.manage' + assertWritable, enforced in MAIN. The three
+   * reads are 'purchase.view' and keep working on an expired licence — an expired shop can still look a
+   * bill up and browse what it sent back. (CLAUDE.md §6.)
+   */
+  purchaseReturns: {
+    /**
+     * SEND GOODS BACK. ONE transaction: a negative 'purchase_return' movement per line at the purchase
+     * line's frozen cost onto the batch it arrived on, the input tax handed back pro-rata
+     * (remainder-on-last, so a bill returned in pieces sums back to its tax_total exactly), one balanced
+     * journal (CR Inventory + CR Input Tax, DR Payable or the refund tender), audited with a reason code.
+     */
+    create: (input: CreatePurchaseReturnInput) => Promise<Result<PurchaseReturnDetail>>
+    /**
+     * THE RETURN-TO-SUPPLIER SCREEN'S FIRST MOVE: look a purchase up and see, per line, what was received,
+     * what has already gone back, and what remains returnable — with the frozen cost the goods will leave
+     * at, so the picker can show what the credit is worth before anything is committed.
+     */
+    returnableLines: (input: ReturnablePurchaseLinesInput) => Promise<Result<ReturnablePurchase>>
+    /** The returns-to-supplier history — paginated and indexed. Filterable by purchase, supplier and date. */
+    list: (input: ListPurchaseReturnsInput) => Promise<Result<PagedResult<PurchaseReturnListItem>>>
+    /** One return, with its lines and the joined labels — the detail view and the debit note. */
+    get: (input: GetPurchaseReturnInput) => Promise<Result<PurchaseReturnDetail>>
   }
 
   /**

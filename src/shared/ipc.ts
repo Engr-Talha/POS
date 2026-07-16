@@ -160,6 +160,24 @@ export const IPC = {
   purchaseList: 'purchase:list',
   purchaseGet: 'purchase:get',
 
+  // ── RETURNS TO SUPPLIER — goods going BACK, and the credit that follows ──────
+  //
+  // The mirror of `returns:*`, pointing the other way: a customer return takes stock IN and pays money
+  // OUT; this sends stock BACK OUT and either lowers what the shop OWES ('supplier_credit' → DR Payable)
+  // or brings a refund IN ('refund' → DR Cash/Bank). THE RENDERER SENDS INTENT, MAIN DECIDES THE MONEY:
+  // a line says WHICH purchase line the goods came in on and HOW MANY go back — never what they are
+  // worth. Main copies the purchase line's FROZEN 4-dp unit_cost, records the negative movement at THAT
+  // cost and reads the movement's own frozen value back as the line total, so a tampered renderer cannot
+  // send Rs 60 of tins back for a Rs 5,000 credit behind a balanced journal.
+  //
+  // `create` is the only WRITE — 'purchaseReturn.manage' (a manager's job, like the purchase it reverses)
+  // plus assertWritable(). The three reads take 'purchase.view' and NOT assertWritable(): an expired shop
+  // must still look a bill up and browse what it sent back. (CLAUDE.md §4, §6.)
+  purchaseReturnCreate: 'purchaseReturn:create',
+  purchaseReturnReturnableLines: 'purchaseReturn:returnableLines',
+  purchaseReturnList: 'purchaseReturn:list',
+  purchaseReturnGet: 'purchaseReturn:get',
+
   supplierLedgerBalance: 'supplierLedger:balance',
   supplierLedgerLedger: 'supplierLedger:ledger',
   supplierLedgerListWithBalances: 'supplierLedger:listWithBalances',
@@ -775,6 +793,25 @@ export const ReturnableLinesInput = z.object({
   ])
 })
 
+// ═════════════════════════════════════════════════════════════════════════════
+// RETURNS TO SUPPLIER — the same leftover, mirrored
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// CreatePurchaseReturnInput / ListPurchaseReturnsInput / GetPurchaseReturnInput are the canonical
+// contract and live in '@shared/purchase-returns'; the handlers import those verbatim. This is the
+// leftover, for the same reason as ReturnableLinesInput above: `returnablePurchaseLines(db, purchaseId)`
+// takes a plain `number`, and an IPC input MUST be a schema — the renderer is not trusted, and neither
+// is a future LAN client.
+
+/**
+ * THE RETURN-TO-SUPPLIER SCREEN'S FIRST MOVE — look a purchase up to see what may still go back.
+ *
+ * Only an id, no union: unlike a customer holding a receipt, this flow starts from the purchase the
+ * manager already has open on screen. The supplier's own bill number is not unique across suppliers —
+ * two distributors may both issue "INV-001" — so it is not a lookup key here.
+ */
+export const ReturnablePurchaseLinesInput = z.object({ purchaseId: RowId })
+
 // ── What the scanner gives back ──────────────────────────────────────────────
 
 /**
@@ -998,6 +1035,7 @@ export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
 export type PrintQuotationInput = z.infer<typeof PrintQuotationInput>
 export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
 export type ReturnableLinesInput = z.infer<typeof ReturnableLinesInput>
+export type ReturnablePurchaseLinesInput = z.infer<typeof ReturnablePurchaseLinesInput>
 export type CustomerDeactivateInput = z.infer<typeof CustomerDeactivateInput>
 export type CustomerBalanceInput = z.infer<typeof CustomerBalanceInput>
 export type SupplierDeactivateInput = z.infer<typeof SupplierDeactivateInput>

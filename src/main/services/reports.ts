@@ -540,12 +540,20 @@ export function customerAging(db: DB, raw: unknown): CustomerAgingReport {
  *
  * The go-live date carries the opening payable; each purchase that left something owing carries its own
  * date and its UNPAID remainder (grand_total − paid_total) — exactly what the supplier balance sums.
+ *
+ * Goods sent BACK on credit (purchase_returns settled 'supplier_credit') DEBIT Payable, so they are a
+ * CREDIT here alongside payments — the shop owes that much less. Leave them out and this report chases a
+ * distributor for stock they already took back. A 'refund' return came back as real money and never
+ * touched Payable, so it is deliberately excluded. (CLAUDE.md trap #17 — same set `supplier-ledger`
+ * subtracts, which is what keeps Σ aging === GL Payable.)
  */
 export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
   const { asOf } = parseOrThrow(AsOfInput, raw, 'reports.supplierAging')
 
   const goLive = openingDate(db)
 
+  // A supplier with a return needs no fourth source here: a return is reachable only from the purchase
+  // it reverses (migration 0016), so its supplier is already in the purchases branch.
   const supplierIds = db
     .prepare(
       `SELECT DISTINCT id FROM (
@@ -576,6 +584,14 @@ export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
   const paymentsUpTo = db.prepare(
     'SELECT COALESCE(SUM(amount), 0) FROM supplier_payments WHERE supplier_id = @supplierId AND at < @bound'
   )
+  // Goods sent back ON CREDIT by asOf — a debit to Payable, so a credit here (see the note above). The
+  // supplier comes from the return's PURCHASE, the only thing that says whose goods these were.
+  const creditReturnsUpTo = db.prepare(
+    `SELECT COALESCE(SUM(pr.grand_total), 0)
+       FROM purchase_returns pr
+       JOIN purchases p ON p.id = pr.purchase_id
+      WHERE p.supplier_id = @supplierId AND pr.settlement = 'supplier_credit' AND pr.at < @bound`
+  )
   const nameOf = db.prepare('SELECT name FROM suppliers WHERE id = ?')
 
   const rows: SupplierAgingRow[] = []
@@ -592,7 +608,9 @@ export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
     }
 
     const totalCharges = charges.reduce((sum, charge) => sum + charge.amount, 0)
-    const credits = paymentsUpTo.pluck().get({ supplierId, bound }) as number
+    const credits =
+      (paymentsUpTo.pluck().get({ supplierId, bound }) as number) +
+      (creditReturnsUpTo.pluck().get({ supplierId, bound }) as number)
     const balance = totalCharges - credits // what the shop owes AS OF asOf; === GL payable then
     if (balance === 0) continue
 

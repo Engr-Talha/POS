@@ -12,6 +12,7 @@ import {
   Skeleton,
   Stack,
   Table,
+  Tabs,
   Text,
   TextInput,
   Textarea,
@@ -35,6 +36,7 @@ import {
   Trash2,
   TriangleAlert,
   Truck,
+  Undo2,
   User as UserIcon,
   X
 } from 'lucide-react'
@@ -53,6 +55,7 @@ import { formatCost } from '@shared/cost'
 import { formatQty } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
 import { CostInput, MoneyInput, QtyInput, useLookupList } from './ProductForm'
+import { PurchaseReturnHistory, PurchaseReturnModal } from './PurchaseReturn'
 
 /**
  * PURCHASES — a goods-received note (GRN). The mirror of a sale, pointing the other way: a sale takes
@@ -133,6 +136,13 @@ export function Purchases({
 }): React.JSX.Element {
   const [view, setView] = useState<View>({ mode: 'list' })
   const canManage = roleCan(userRole, 'purchase.manage')
+  // Sending goods back is its own permission — a manager's, like the purchase it reverses. Enforced in
+  // MAIN; hiding the button here is a courtesy, not a control (CLAUDE.md §4).
+  const canReturn = roleCan(userRole, 'purchaseReturn.manage')
+
+  // Bumped when a return commits, so the returns-to-supplier history re-pulls even though it is mounted
+  // on the other tab — the drawer that recorded it lives over on this one.
+  const [returnsKey, setReturnsKey] = useState(0)
 
   if (view.mode === 'new') {
     return (
@@ -145,12 +155,31 @@ export function Purchases({
   }
 
   return (
-    <PurchaseList
-      readOnly={readOnly}
-      currencySymbol={currencySymbol}
-      canManage={canManage}
-      onNew={() => setView({ mode: 'new' })}
-    />
+    <Tabs defaultValue="purchases" keepMounted={false}>
+      <Tabs.List mb="lg">
+        <Tabs.Tab value="purchases" leftSection={<ShoppingCart size={15} />}>
+          Purchases
+        </Tabs.Tab>
+        <Tabs.Tab value="returns" leftSection={<Undo2 size={15} />}>
+          Returns to supplier
+        </Tabs.Tab>
+      </Tabs.List>
+
+      <Tabs.Panel value="purchases">
+        <PurchaseList
+          readOnly={readOnly}
+          currencySymbol={currencySymbol}
+          canManage={canManage}
+          canReturn={canReturn}
+          onNew={() => setView({ mode: 'new' })}
+          onReturned={() => setReturnsKey((key) => key + 1)}
+        />
+      </Tabs.Panel>
+
+      <Tabs.Panel value="returns">
+        <PurchaseReturnHistory reloadKey={returnsKey} currencySymbol={currencySymbol} />
+      </Tabs.Panel>
+    </Tabs>
   )
 }
 
@@ -164,12 +193,17 @@ function PurchaseList({
   readOnly,
   currencySymbol,
   canManage,
-  onNew
+  canReturn,
+  onNew,
+  onReturned
 }: {
   readOnly: boolean
   currencySymbol: string
   canManage: boolean
+  canReturn: boolean
   onNew: () => void
+  /** A committed return is money and stock moving — the returns history reloads with it. */
+  onReturned: () => void
 }): React.JSX.Element {
   const [rows, setRows] = useState<PurchaseListItem[] | null>(null)
   const [total, setTotal] = useState(0)
@@ -394,7 +428,10 @@ function PurchaseList({
 
       <PurchaseDetailDrawer
         purchaseId={selectedId}
+        readOnly={readOnly}
         currencySymbol={currencySymbol}
+        canReturn={canReturn}
+        onReturned={onReturned}
         onClose={() => setSelectedId(null)}
       />
     </Stack>
@@ -407,15 +444,27 @@ function PurchaseList({
 
 function PurchaseDetailDrawer({
   purchaseId,
+  readOnly,
   currencySymbol,
+  canReturn,
+  onReturned,
   onClose
 }: {
   purchaseId: number | null
+  readOnly: boolean
   currencySymbol: string
+  canReturn: boolean
+  /** A committed return changes this bill's returnable quantities — the history reloads with it. */
+  onReturned: () => void
   onClose: () => void
 }): React.JSX.Element {
   const [purchase, setPurchase] = useState<PurchaseDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [returning, setReturning] = useState(false)
+
+  // Bumped after a return commits, to re-pull this bill. The lines themselves never change — a purchase
+  // is frozen — but re-reading keeps the drawer honest if anything else about it moves.
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     if (purchaseId === null) {
@@ -438,7 +487,7 @@ function PurchaseDetailDrawer({
     return () => {
       cancelled = true
     }
-  }, [purchaseId])
+  }, [purchaseId, reloadKey])
 
   const owed = purchase ? purchase.grandTotal - purchase.paidTotal : 0
 
@@ -597,8 +646,49 @@ function PurchaseDetailDrawer({
               </Stack>
             </div>
           )}
+
+          {/* ── Send goods back ──────────────────────────────────────────── */}
+          {/* The flow lives HERE, on the bill the goods arrived on — that is where the shopkeeper
+              already is, and the purchase carries the supplier, the frozen costs and the tax pool.
+              Gated 'purchaseReturn.manage' + assertWritable in MAIN; this button is the courtesy. */}
+          <Divider />
+          <Group justify="space-between" align="center" wrap="nowrap">
+            <Text size="xs" c="dimmed" maw={320}>
+              Something wrong with this delivery? Send it back — the goods leave at the cost they came in
+              at, and the credit comes off what you owe.
+            </Text>
+            <Tooltip
+              label={
+                readOnly
+                  ? 'Your licence has expired — returns are paused'
+                  : 'Only a manager can send goods back'
+              }
+              disabled={canReturn && !readOnly}
+            >
+              <Button
+                variant="light"
+                leftSection={<Undo2 size={16} />}
+                disabled={readOnly || !canReturn}
+                onClick={() => setReturning(true)}
+              >
+                Return to supplier
+              </Button>
+            </Tooltip>
+          </Group>
         </Stack>
       )}
+
+      <PurchaseReturnModal
+        purchaseId={purchaseId}
+        opened={returning}
+        readOnly={readOnly}
+        currencySymbol={currencySymbol}
+        onClose={() => setReturning(false)}
+        onDone={() => {
+          setReloadKey((key) => key + 1)
+          onReturned()
+        }}
+      />
     </Drawer>
   )
 }
