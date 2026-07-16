@@ -129,6 +129,7 @@ import {
   GetPurchaseReturnInput
 } from '@shared/purchase-returns'
 import { CreateExpenseInput, ListExpensesInput, GetExpenseInput } from '@shared/expenses'
+import { AdjustPointsInput, LoyaltyBalanceInput, LoyaltyHistoryInput } from '@shared/loyalty'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -183,6 +184,7 @@ import * as returnsService from '../services/returns'
 import * as purchaseReturnsService from '../services/purchase-returns'
 import * as shiftsService from '../services/shifts'
 import * as expensesService from '../services/expenses'
+import * as loyaltyService from '../services/loyalty'
 import * as printer from '../printing/printer'
 import * as reportsService from '../services/reports'
 import { reportToXlsxBuffer } from '../services/reports-excel'
@@ -2195,5 +2197,38 @@ export function registerIpcHandlers(): void {
   handle(IPC.expenseGet, GetExpenseInput, (input) => {
     session.requirePermissionOf('expense.view')
     return expensesService.getExpense(getDb(), input.id)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // LOYALTY POINTS — a liability booked when EARNED; the balance is DERIVED (migration 0017)
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // There is no earn and no redeem handler ON PURPOSE. Points are earned BY a sale and spent as a
+  // TENDER on one, so both ride inside `sale:complete` and are written in that sale's ONE transaction.
+  // A standalone endpoint would be a way to mint or spend a liability with no sale behind it.
+  //
+  //   loyalty.view     read a balance / a statement   (reads  — NO assertWritable(): an expired shop
+  //                                                    still reads its own books, CLAUDE.md §6)
+  //   loyalty.adjust   the owner's hand correction    (WRITE  — assertWritable())
+
+  handle(IPC.loyaltyBalance, LoyaltyBalanceInput, (input) => {
+    session.requirePermissionOf('loyalty.view')
+    return loyaltyService.balance(getDb(), input)
+  })
+
+  handle(IPC.loyaltyHistory, LoyaltyHistoryInput, (input) => {
+    session.requirePermissionOf('loyalty.view')
+    return loyaltyService.history(getDb(), input)
+  })
+
+  handle(IPC.loyaltyAdjust, AdjustPointsInput, (input) => {
+    // Moving a liability by hand is the OWNER's call, and the UI is not a security boundary.
+    const user = session.requirePermissionOf('loyalty.adjust')
+    assertWritable()
+
+    // ONE transaction: the movement → the balanced journal → the audit row. THE SERVICE AUDITS ITSELF
+    // ('loyalty.adjust') from inside it, and enforces the reason code against the owner's own live
+    // lookups list — do not log a second row here.
+    return loyaltyService.adjustPoints(getDb(), user, input)
   })
 }

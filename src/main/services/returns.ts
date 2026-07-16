@@ -24,6 +24,7 @@ import { SALE_REF_TYPE } from '@shared/sales'
 import * as audit from './audit'
 import * as auth from './auth'
 import * as ledger from './ledger'
+import * as loyalty from './loyalty'
 import * as sales from './sales'
 import * as stock from './stock'
 import { openShiftId } from './shift-id'
@@ -493,6 +494,20 @@ export function createReturn(db: DB, actor: User, rawInput: unknown, now = new D
     if (journalId != null) {
       db.prepare('UPDATE returns SET journal_id = ? WHERE id = ?').run(journalId, returnId)
     }
+
+    // ── The points for goods that came back ────────────────────────────────
+    // In THIS transaction: a return and its points are one act. Without it a customer buys Rs 1000 of
+    // goods, earns 1000 points, returns the lot for a full refund and KEEPS the points — free money, over
+    // and over, with the trial balance green the whole time because the liability really is owed. It just
+    // should never have been booked. (CLAUDE.md trap #17: the earn was right when the sale happened; this
+    // is the path that keeps it right afterwards.) A no-op when the sale earned nothing — loyalty off, or
+    // a walk-in. Proportional to the NET going back, which is the basis the points were earned on.
+    loyalty.clawbackForReturn(
+      db,
+      actor,
+      { saleId: sale.id, returnId, returnedNet: subtotalNet, saleNet: sale.subtotalNet },
+      now
+    )
 
     // ── WHO did WHAT, WHY, and against WHICH sale (CLAUDE.md §4) ────────────
     audit.record(

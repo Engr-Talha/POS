@@ -75,6 +75,15 @@ export const PERMISSIONS = {
   'expense.view': 'manager',
   'report.view': 'manager',
 
+  // Loyalty — points are a LIABILITY (migration 0017), so moving one BY HAND is the owner's call and
+  // nobody else's: an adjust writes off, or invents, money the shop owes its customers, and it is the
+  // one loyalty path with no sale behind it to justify the number. Earning and redeeming are not here
+  // on purpose — they are consequences of a sale, guarded by `sale.create`, not separate acts.
+  // Reading a balance is a CASHIER's: the till must be able to tell a customer what their points are
+  // worth before they decide to spend them.
+  'loyalty.adjust': 'owner',
+  'loyalty.view': 'cashier',
+
   // Administration
   'user.manage': 'owner',
   'settings.manage': 'owner',

@@ -418,6 +418,15 @@ const MoneyMinor = z.number().int().min(0)
 /** Integer money that must actually be an amount. A zero payment is not a payment. */
 const PositiveMoneyMinor = z.number().int().positive('Please enter an amount greater than zero.')
 const RowId = z.number().int().positive()
+/**
+ * WHOLE LOYALTY POINTS — a count of promises, not money and not a quantity. It is NOT scaled: not minor
+ * units, not thousandths. Its rupee value is `points × loyalty.redeemValueMinor`, decided in MAIN.
+ * (shared/loyalty.ts states the same rule; this is the sale's own door for it.)
+ */
+const PositiveInt = z
+  .number()
+  .int('Points must be a whole number.')
+  .positive('Please enter a number of points greater than zero.')
 /** A lookups(id) — payment methods are chosen by ID. */
 const LookupId = z.number().int().positive()
 /**
@@ -601,7 +610,17 @@ export const DiscardSaleInput = z.object({ id: RowId })
 export const CompleteSaleInput = z.object({
   ...CartShape,
 
-  payments: z.array(SalePaymentInput).min(1, 'Please take a payment.'),
+  /**
+   * The money that crossed the counter. It may legitimately be EMPTY — and only since points became a
+   * tender (migration 0017): a customer with enough points can pay for the whole sale with them and
+   * hand over nothing, exactly as if they had paid the lot in cash.
+   *
+   * "A sale must be paid for" is therefore NOT a rule about this array's length, and it never really
+   * was — an array of one Rs 1 payment against a Rs 500 sale would satisfy `.min(1)` and still be
+   * short. The real rule is arithmetic (tendered >= the grand total), it counts the points, and
+   * `complete()` in MAIN enforces it in one place with a sentence that says how much is missing.
+   */
+  payments: z.array(SalePaymentInput),
 
   /**
    * The SUPERVISOR who approved a discount above the threshold
@@ -629,7 +648,21 @@ export const CompleteSaleInput = z.object({
    * The customer is over their credit limit and the cashier has chosen to continue. Meaningful only
    * when `selling.creditLimit` is 'warn'; when it is 'block', MAIN refuses.
    */
-  acceptOverCreditLimit: z.boolean().default(false)
+  acceptOverCreditLimit: z.boolean().default(false),
+
+  /**
+   * LOYALTY POINTS SPENT ON THIS SALE — a TENDER, not a discount (migration 0017).
+   *
+   * The renderer sends WHOLE POINTS and nothing else. It never sends a rupee figure: MAIN values them
+   * at `loyalty.redeemValueMinor`, freezes that value onto the movement, and tenders THAT — a renderer
+   * that could send the money could tell the shop what its own points are worth. The points pay for
+   * the goods exactly as cash does, so revenue and output tax are untouched and the frozen lines are
+   * never recomputed. (CLAUDE.md §4 — the renderer sends intent, MAIN decides the money.)
+   *
+   * Requires a named customer, loyalty switched on, and at least `loyalty.minPointsToRedeem` — all
+   * enforced in MAIN by the loyalty service, never here and never by the UI.
+   */
+  redeemPoints: PositiveInt.nullish()
 })
 
 // ── Void ─────────────────────────────────────────────────────────────────────

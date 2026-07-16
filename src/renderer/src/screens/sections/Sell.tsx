@@ -25,6 +25,7 @@ import {
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
+  Award,
   Ban,
   Banknote,
   CircleAlert,
@@ -55,6 +56,7 @@ import type { Customer } from '@shared/opening'
 import type { Role } from '@shared/rbac'
 import { ROLE_RANK } from '@shared/rbac'
 import type { CompleteSaleResponse, ScannedItem } from '@shared/ipc'
+import type { LoyaltyBalance } from '@shared/loyalty'
 import type { PriceTier, SaleLineInput, SaleListItem } from '@shared/sales'
 import type { TaxMode } from '@shared/tax'
 import { extendPrice } from '@shared/pricing'
@@ -152,6 +154,13 @@ type SellSettings = {
   discountApprovalAmount: number
   wholesaleTierRole: Role
   priceOverrideRole: Role
+  /**
+   * LOYALTY. Off by default — a shop that does not run points must never see any of it. Hiding it is a
+   * COURTESY: MAIN refuses a redemption when the scheme is off whatever this screen draws.
+   */
+  loyaltyEnabled: boolean
+  /** The floor before points can be SPENT. MAIN enforces it; we grey the button and say why. */
+  loyaltyMinPointsToRedeem: number
   scanner: ScannerProfile
 }
 
@@ -170,6 +179,8 @@ function readSettings(raw: Record<string, unknown>): SellSettings {
     discountApprovalAmount: get<number>('selling.discountApprovalAmount'),
     wholesaleTierRole: get<Role>('selling.wholesaleTierRole'),
     priceOverrideRole: get<Role>('selling.priceOverrideRole'),
+    loyaltyEnabled: get<boolean>('loyalty.enabled'),
+    loyaltyMinPointsToRedeem: get<number>('loyalty.minPointsToRedeem'),
     scanner: {
       terminator: get<ScannerProfile['terminator']>('scanner.terminator'),
       prefix: get<string>('scanner.prefix'),
@@ -263,6 +274,12 @@ export function Sell({
 
   const [customer, setCustomer] = useState<Customer | null>(null)
   const [outstanding, setOutstanding] = useState<number | null>(null)
+
+  /**
+   * The selected customer's POINTS — read from MAIN when they are picked, never worked out here. Null
+   * while unknown (nobody chosen, loyalty off, or the read failed): the chip simply does not draw.
+   */
+  const [points, setPoints] = useState<LoyaltyBalance | null>(null)
 
   /** The parked cart we are ringing up, if any. Completing it CONVERTS it — it does not leave a twin. */
   const [resumedSaleId, setResumedSaleId] = useState<number | null>(null)
@@ -741,15 +758,26 @@ export function Sell({
     [cartPayload, fail, clearSale, refocus, printQuotation]
   )
 
-  const pickCustomer = useCallback(async (next: Customer | null): Promise<void> => {
-    setCustomer(next)
-    setOutstanding(null)
-    if (next == null) return
+  const pickCustomer = useCallback(
+    async (next: Customer | null): Promise<void> => {
+      setCustomer(next)
+      setOutstanding(null)
+      setPoints(null)
+      if (next == null) return
 
-    // What they already owe, read BEFORE we add to it — so the cashier sees the udhaar before giving more.
-    const result = await window.pos.sales.outstandingCredit({ customerId: next.id })
-    if (result.ok) setOutstanding(result.data)
-  }, [])
+      // What they already owe, read BEFORE we add to it — so the cashier sees the udhaar before giving more.
+      const result = await window.pos.sales.outstandingCredit({ customerId: next.id })
+      if (result.ok) setOutstanding(result.data)
+
+      // ...and what they have SAVED UP. Only worth asking when the shop actually runs the scheme.
+      // A failure here is silent on purpose: it must never stop the customer being served. The chip
+      // stays hidden, and MAIN is the one that decides a redemption anyway.
+      if (settings?.loyaltyEnabled !== true) return
+      const balance = await window.pos.loyalty.balance({ customerId: next.id })
+      if (balance.ok) setPoints(balance.data)
+    },
+    [settings?.loyaltyEnabled]
+  )
 
   /**
    * Pick a parked cart back up. Two reads: `resume` gives the CART LINES main will re-price, and `get`
@@ -1301,6 +1329,19 @@ export function Sell({
                   {customer.creditLimit > 0 && ` of a ${money(customer.creditLimit)} limit`}
                 </Text>
               )}
+
+              {/* WHAT THEY HAVE SAVED UP. Only when the shop runs the scheme and they actually have
+                  some — "0 points" is noise at a till. The VALUE is MAIN's figure, never one worked
+                  out here. Spending them happens at Pay, where the rest of the tenders are. */}
+              {settings?.loyaltyEnabled === true && points != null && points.points > 0 && (
+                <Group gap={6} wrap="nowrap">
+                  <Award size={14} color="var(--mantine-color-violet-6)" />
+                  <Text size="xs" c="violet">
+                    {points.points.toLocaleString('en-US')} points
+                    {points.valueMinor > 0 && ` — worth ${money(points.valueMinor)}`}
+                  </Text>
+                </Group>
+              )}
             </Stack>
           </Card>
 
@@ -1557,6 +1598,7 @@ export function Sell({
           totals={totals}
           customer={customer}
           outstanding={outstanding}
+          points={points}
           shortages={shortages}
           money={money}
           onClose={() => setModal(null)}
@@ -2665,6 +2707,7 @@ function PaymentModal({
   totals,
   customer,
   outstanding,
+  points,
   shortages,
   money,
   onClose,
@@ -2676,6 +2719,8 @@ function PaymentModal({
   totals: CartMath
   customer: Customer | null
   outstanding: number | null
+  /** The customer's points, as MAIN reported them. Null = nobody chosen, or the shop runs no scheme. */
+  points: LoyaltyBalance | null
   shortages: Shortage[]
   money: (minor: number) => string
   onClose: () => void
@@ -2707,6 +2752,16 @@ function PaymentModal({
   const [error, setError] = useState<string | null>(null)
   const [accepted, setAccepted] = useState(false)
 
+  /**
+   * POINTS BEING SPENT ON THIS SALE — a TENDER, not a discount. 0 = none.
+   *
+   * We send this COUNT and nothing else: MAIN values it, freezes the value onto the movement and
+   * tenders it. The rupee figures below are a PREVIEW for the cashier, computed from MAIN's own
+   * `points.valueMinor` (the whole balance's worth) so the screen and the till agree — but the sale is
+   * settled on MAIN's number, never on this one.
+   */
+  const [redeemPoints, setRedeemPoints] = useState(0)
+
   // The supervisor-approval prompt. Non-null when main has said this sale needs approval; it holds
   // the reason to show, and the PIN the supervisor types. The PIN never leaves this component except
   // as the argument to complete() — it is not stored, not logged, not put in the payload state.
@@ -2717,8 +2772,55 @@ function PaymentModal({
   const codeOf = (tender: Tender): string | null =>
     tender.methodLookupId == null ? null : (byId.get(tender.methodLookupId)?.code ?? null)
 
-  const paidTotal = tenders.reduce((sum, tender) => sum + tender.amount, 0)
+  // ── POINTS AS A TENDER ─────────────────────────────────────────────────────
+  //
+  // Shown only when the shop runs the scheme, a customer is named, and they have enough to reach the
+  // shop's own minimum. Every one of those is re-checked in MAIN — this just keeps a control the
+  // cashier cannot use off a busy screen.
+  const loyaltyOffered =
+    settings.loyaltyEnabled &&
+    customer != null &&
+    points != null &&
+    points.points >= settings.loyaltyMinPointsToRedeem &&
+    points.valueMinor > 0
+
+  /** What ONE point is worth, from MAIN's own figures. Never a rate this screen read from settings. */
+  const perPoint = points != null && points.points > 0 ? points.valueMinor / points.points : 0
+
+  /** The PREVIEW of what the points being spent are worth. MAIN freezes the real figure. */
+  const redeemValue = Math.round(redeemPoints * perPoint)
+
+  // Points buy GOODS — they are never paid out as change (MAIN refuses it too). So the most that can
+  // be spent is the smaller of what they have and what the sale is worth, floored to whole points.
+  const maxRedeemablePoints = Math.min(
+    points?.points ?? 0,
+    perPoint > 0 ? Math.floor(totals.grandTotal / perPoint) : 0
+  )
+
+  const paidTotal = tenders.reduce((sum, tender) => sum + tender.amount, 0) + redeemValue
   const changeDue = paidTotal - totals.grandTotal
+
+  /**
+   * SPEND POINTS, AND TAKE THE REST IN MONEY.
+   *
+   * The modal opens with one tender pre-filled to the WHOLE total, because that is the common sale. If
+   * the points were simply added on top of it, the cashier would take the full amount in cash AND the
+   * points — the customer pays twice and the screen shows change that is not due. So applying points
+   * moves the SINGLE money tender down to what is actually left to pay.
+   *
+   * Only when there is exactly one tender: once the cashier has split the payment by hand they have
+   * said how the money is made up, and silently rewriting one of their rows is worse than leaving the
+   * arithmetic to them — the "Still to pay" line already tells them what is short.
+   */
+  function applyPoints(next: number): void {
+    setRedeemPoints(next)
+
+    if (tenders.length !== 1) return
+    const value = Math.round(next * perPoint)
+    setTenders((rows) =>
+      rows.map((row) => ({ ...row, amount: Math.max(0, totals.grandTotal - value) }))
+    )
+  }
 
   // Cash is NET OF THE CHANGE handed back — so change can only ever come out of a cash payment. Main
   // refuses anything else (it would post a negative debit to Cash); say so before it does.
@@ -2736,10 +2838,24 @@ function PaymentModal({
     settings.creditLimit !== 'ignore' &&
     (outstanding ?? 0) + creditTotal > customer.creditLimit
 
+  // POINTS CAN PAY FOR THE WHOLE SALE, and then there is no money to take: the one tender sits at zero
+  // and is dropped before it is sent (main requires every payment to be an actual amount). Only then —
+  // a zero row with nothing else covering the sale is still a mistake to point out.
+  const moneyTenders = tenders.filter((tender) => tender.amount > 0)
+  const pointsCoverAll = redeemValue >= totals.grandTotal && moneyTenders.length === 0
+
   const problems: string[] = []
   if (tenders.some((tender) => tender.methodLookupId == null)) problems.push('Choose how they are paying.')
-  if (tenders.some((tender) => tender.amount <= 0)) problems.push('Every payment needs an amount.')
+  if (!pointsCoverAll && tenders.some((tender) => tender.amount <= 0)) {
+    problems.push('Every payment needs an amount.')
+  }
   if (changeDue < 0) problems.push(`Still ${money(-changeDue)} to pay.`)
+  if (redeemPoints > 0 && redeemPoints < settings.loyaltyMinPointsToRedeem) {
+    problems.push(`Points can only be used ${settings.loyaltyMinPointsToRedeem} at a time or more.`)
+  }
+  if (redeemPoints > (points?.points ?? 0)) problems.push('They do not have that many points.')
+  // Points buy goods; the shop never hands them back as cash. MAIN refuses this outright.
+  if (redeemValue > totals.grandTotal) problems.push('Those points are worth more than this sale.')
   if (changeDue > cashTendered) problems.push('Change can only be given out of a cash payment.')
   if (creditTotal > 0 && customer == null && settings.requireCustomerForCredit) {
     problems.push('A credit (udhaar) sale must name a customer. Close this and press F9.')
@@ -2765,7 +2881,9 @@ function PaymentModal({
 
     const result = await window.pos.sales.complete({
       ...buildPayload(),
-      payments: tenders.map((tender) => ({
+      // Only the money that is ACTUALLY changing hands. A zero row is not a payment — it is what is
+      // left when points have covered the whole sale, and main rightly refuses one.
+      payments: moneyTenders.map((tender) => ({
         methodLookupId: tender.methodLookupId!,
         amount: tender.amount,
         chequeNo: tender.chequeNo.trim() === '' ? null : tender.chequeNo.trim(),
@@ -2779,7 +2897,10 @@ function PaymentModal({
       // The cashier has SEEN the warning and chosen to go ahead. Main flags and audits the sale either
       // way — and refuses outright if the shop's policy is 'block', whatever we send.
       acceptNegativeStock: accepted || force,
-      acceptOverCreditLimit: accepted || force
+      acceptOverCreditLimit: accepted || force,
+      // THE POINTS BEING SPENT — a COUNT, never a rupee figure. MAIN values them, freezes that value,
+      // and tenders it. Null when none are being used, so a sale that redeems nothing writes nothing.
+      redeemPoints: redeemPoints > 0 ? redeemPoints : null
     })
 
     setBusy(false)
@@ -2895,6 +3016,63 @@ function PaymentModal({
               </Stack>
             </Group>
           </Card>
+
+          {/* ── POINTS: A TENDER, NOT A DISCOUNT ──────────────────────────────
+              The points PAY for the goods, exactly as the cash below does — the sale's revenue and
+              its tax are untouched. Hidden entirely unless the shop runs the scheme and this customer
+              has enough to reach the minimum. We send a POINT COUNT; every figure here is a preview
+              built from MAIN's own valuation, and MAIN freezes the real one. */}
+          {loyaltyOffered && (
+            <Card withBorder padding="sm" bg="var(--mantine-color-violet-light)">
+              <Stack gap={8}>
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap={8} wrap="nowrap">
+                    <Award size={18} color="var(--mantine-color-violet-6)" />
+                    <Text size="sm" fw={600}>
+                      {customer.name} has {points.points.toLocaleString('en-US')} points
+                    </Text>
+                  </Group>
+                  <Text size="xs" c="dimmed">
+                    worth {money(points.valueMinor)}
+                  </Text>
+                </Group>
+
+                <Group gap={8} align="flex-end" wrap="nowrap">
+                  <TextInput
+                    style={{ flex: 1 }}
+                    label="Points to use"
+                    description={
+                      redeemPoints > 0
+                        ? `Pays ${money(redeemValue)} of this sale`
+                        : `${settings.loyaltyMinPointsToRedeem} or more at a time`
+                    }
+                    inputMode="numeric"
+                    value={redeemPoints === 0 ? '' : String(redeemPoints)}
+                    placeholder="0"
+                    onChange={(event) => {
+                      // Whole points only — they are a COUNT of promises, not money and not a
+                      // quantity, so there is nothing to scale and nothing after a decimal point.
+                      const digits = event.currentTarget.value.replace(/[^\d]/g, '')
+                      applyPoints(digits === '' ? 0 : Number(digits))
+                    }}
+                  />
+                  <Button
+                    variant="light"
+                    color="violet"
+                    disabled={maxRedeemablePoints < settings.loyaltyMinPointsToRedeem}
+                    onClick={() => applyPoints(maxRedeemablePoints)}
+                  >
+                    Use max
+                  </Button>
+                  {redeemPoints > 0 && (
+                    <Button variant="subtle" color="gray" onClick={() => applyPoints(0)}>
+                      Clear
+                    </Button>
+                  )}
+                </Group>
+              </Stack>
+            </Card>
+          )}
 
           {/* ── The tenders. A split payment is several rows. ─────────────────── */}
           <Stack gap={8}>

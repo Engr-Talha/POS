@@ -8,6 +8,7 @@ import * as ledger from './ledger'
 import * as settings from './settings'
 import * as catalog from './catalog'
 import * as customerLedger from './customer-ledger'
+import * as loyalty from './loyalty'
 import { ACC } from '../db/chart-of-accounts'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
@@ -1047,6 +1048,139 @@ describe('returns audit regressions', () => {
     expect(line.productId).toBeNull() // an open item
     expect(line.stockable).toBe(false) // no shelf -> the UI shows "not stocked", not "damaged"
     expect(line.restocked).toBe(false) // and nothing was put back
+    holds(t)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LOYALTY POINTS FOR GOODS THAT CAME BACK — the clawback (regression)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * REGRESSION — A CUSTOMER MUST NOT KEEP POINTS FOR GOODS THEY GAVE BACK.
+ *
+ * Found by auditing loyalty (v0.15.0): `returns.ts` never touched the points, so a customer could buy
+ * Rs 1000 of goods, earn 1000 points, return the lot for a full refund and KEEP the points — free money,
+ * repeatable for as long as they liked. The trial balance stayed green the whole time, because the
+ * liability really was owed; it just should never have been booked. That is CLAUDE.md trap #17: the earn
+ * was right when the sale happened, and this is the path that keeps it right afterwards.
+ */
+describe('loyalty points and a return', () => {
+  const pointsOf = (customerId: number): number => loyalty.pointsBalance(t.db, customerId)
+  const glLoyalty = (): number => ledger.accountBalance(t.db, ACC.LOYALTY)
+
+  beforeEach(() => {
+    settings.set(t.db, 'loyalty.enabled', true, new Date('2026-01-01T00:00:00.000Z'))
+  })
+
+  it('claws the points back when the goods come back, and lands the liability on zero', () => {
+    const productId = makeProduct({ name: 'Rice 1kg', retailPrice: RS_100, taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+    const customerId = makeCustomer('Regular Rashid')
+
+    // Rs 1000 net, to a named customer -> 1000 points, Rs 1000 of liability.
+    const sale = sell(productId, 10, 100_000, { customerId })
+    expect(pointsOf(customerId)).toBe(1000)
+    expect(glLoyalty()).toBe(100_000)
+
+    // Everything comes back.
+    returns.createReturn(t.db, supervisor, {
+      saleId: sale.id,
+      lines: [{ saleLineId: sale.lines[0]!.id, qtyM: 10 * ONE_UNIT }],
+      settlement: 'refund',
+      refundMethodLookupId: cash(),
+      reasonCode: 'not_needed'
+    })
+
+    expect(pointsOf(customerId), 'the customer KEPT points for goods they returned').toBe(0)
+    expect(glLoyalty(), 'the liability is still standing with no points behind it').toBe(0)
+    holds(t)
+  })
+
+  /** Proportional, and the LAST return takes the exact remainder — no point left alive, none over-taken. */
+  it('claws back proportionally across several returns, summing back exactly', () => {
+    const productId = makeProduct({ name: 'Rice 1kg', retailPrice: RS_100, taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+    const customerId = makeCustomer('Regular Rashid')
+
+    const sale = sell(productId, 3, 30_000, { customerId }) // Rs 300 -> 300 points
+    expect(pointsOf(customerId)).toBe(300)
+
+    const back = (qty: number): void => {
+      returns.createReturn(t.db, supervisor, {
+        saleId: sale.id,
+        lines: [{ saleLineId: sale.lines[0]!.id, qtyM: qty * ONE_UNIT }],
+        settlement: 'refund',
+        refundMethodLookupId: cash(),
+        reasonCode: 'not_needed'
+      })
+    }
+
+    back(1)
+    expect(pointsOf(customerId), 'a third back -> a third of the points gone').toBe(200)
+    holds(t)
+
+    back(1)
+    expect(pointsOf(customerId)).toBe(100)
+    holds(t)
+
+    back(1) // the last one: fully returned, so the remainder — whatever the rounding did on the way
+    expect(pointsOf(customerId), 'a fully returned sale must leave no points behind').toBe(0)
+    expect(glLoyalty()).toBe(0)
+    holds(t)
+  })
+
+  /** A walk-in earned nothing, so there is nothing to claw back — and the return must not break. */
+  it('does nothing when the sale earned nothing (a walk-in)', () => {
+    const productId = makeProduct({ name: 'Rice 1kg', retailPrice: RS_100, taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+    const sale = sell(productId, 2, 20_000) // no customer
+
+    returns.createReturn(t.db, supervisor, {
+      saleId: sale.id,
+      lines: [{ saleLineId: sale.lines[0]!.id, qtyM: 2 * ONE_UNIT }],
+      settlement: 'refund',
+      refundMethodLookupId: cash(),
+      reasonCode: 'not_needed'
+    })
+
+    expect(glLoyalty()).toBe(0)
+    holds(t)
+  })
+
+  /**
+   * The points were already SPENT. The clawback must not drive the balance negative: what they spent is
+   * real money the shop handed over, and taking it back by force is the owner's decision to make by hand
+   * (with a reason, through adjustPoints), not this path's.
+   */
+  it('never drives the balance negative when the points are already spent', () => {
+    const productId = makeProduct({ name: 'Rice 1kg', retailPrice: RS_100, taxRateBp: 0 })
+    openingStock(productId, 20 * ONE_UNIT)
+    const customerId = makeCustomer('Regular Rashid')
+
+    const sale = sell(productId, 10, 100_000, { customerId }) // 1000 points
+    expect(pointsOf(customerId)).toBe(1000)
+
+    // They spend the lot on a second sale (1000 points = Rs 1000 at the default rate).
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      redeemPoints: 1000,
+      payments: []
+    })
+    expect(pointsOf(customerId)).toBe(0)
+
+    // Now they return the FIRST sale. There are no points left to take.
+    returns.createReturn(t.db, supervisor, {
+      saleId: sale.id,
+      lines: [{ saleLineId: sale.lines[0]!.id, qtyM: 10 * ONE_UNIT }],
+      settlement: 'refund',
+      refundMethodLookupId: cash(),
+      reasonCode: 'not_needed'
+    })
+
+    expect(pointsOf(customerId), 'the balance must never go negative').toBe(0)
+    expect(glLoyalty()).toBeGreaterThanOrEqual(0)
     holds(t)
   })
 })

@@ -302,6 +302,38 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Loyalty done** (v0.15.0). Migration 0017 (`loyalty_movements` + account 5300 Loyalty Points Expense);
+  the four `loyalty.*` settings already existed and are the business rules — the scheme is OFF until a shop
+  turns it on, and everything hides when it is. Two decisions drive the whole design:
+  **(1) Points are a LIABILITY booked when EARNED, not when redeemed** (earn DR 5300 CR 2200). Book them
+  only at redemption and every P&L until then overstates profit by the promises quietly piling up, and the
+  day a big customer cashes them the shop takes a hit it never saw coming.
+  **(2) Redemption is a TENDER, not a discount** — points PAY for goods, they do not cut their price. So
+  revenue and OUTPUT TAX are unchanged and the frozen sale lines are untouched. As a discount it would
+  understate revenue AND under-collect the government's sales tax on every single redemption.
+  The balance is DERIVED (`SUM(loyalty_movements.points)`) — no `customers.points` column, ever — and each
+  movement freezes its rupee value at the rate in force THEN, so a later rate change cannot rewrite history.
+  **The rate-change engine is the subtle part:** a redeeming customer gets TODAY's rate, but the liability
+  is released FIFO at the rate each batch was BOOKED at, and the difference books to 5300 (the cost of a
+  rate change lands in the P&L of the month it was changed). Settling at today's rate would drive 2200
+  negative. The standing invariant is therefore `Σ(points × the rate they were BOOKED at) === GL 2200` —
+  NOT the current rate, which cannot tie to a FIFO-frozen liability. Earning is on the sale's NET, ex-tax,
+  and excludes the points-funded portion (or points breed points, and rewards would track the tax rate).
+  Earn/redeem ride INSIDE `sales.complete()`'s existing transaction — a sale and its points are one atomic
+  act — and `voidSale` claws both back; the builder's first version missed the earn's own journal (the
+  sale's contra filters `ref_type='sale'` and never sees it), which a test caught. **No report needed
+  changing** — the P&L and balance sheet walk `accountActivity` by account TYPE, so a new account lands in
+  them by construction; that property is now pinned by a test, since it is exactly what `supplierAging`
+  (which recomputes) could not do. **A REAL MONEY LEAK was found and fixed before shipping:** the builder
+  scoped "a return of a points-earning sale" OUT, and it turned out to be free money — buy Rs 1000 of
+  goods, earn 1000 points, return the lot for a full refund, KEEP the points, repeat forever; the trial
+  balance stayed green because the liability really was owed, it just should never have been booked. Now
+  `returns.ts` calls `loyalty.clawbackForReturn` INSIDE the return's own transaction: proportional to the
+  NET going back (the basis the points were earned on), remainder-on-last so a sale returned in pieces
+  claws back exactly what it earned, released FIFO at the rate each batch was BOOKED at, and CAPPED at the
+  balance so a customer who already SPENT the points is never driven negative (taking those back is the
+  owner's call by hand, with a reason). Four regression tests. Same trap #17 shape as the last three
+  phases — a derived value must be correct from EVERY path that can change it.
 - **Returns to supplier done** (v0.14.0). The mirror of a customer return, pointing the other way: stock
   goes BACK out and either lowers what the shop owes or brings a refund in. Migration 0016
   (`purchase_returns` + `purchase_return_lines`), with `purchase_return_reason` seeded as its own editable

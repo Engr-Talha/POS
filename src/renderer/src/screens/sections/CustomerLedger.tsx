@@ -19,6 +19,7 @@ import {
 import { notifications } from '@mantine/notifications'
 import {
   ArrowLeft,
+  Award,
   Building2,
   CircleAlert,
   HandCoins,
@@ -35,7 +36,14 @@ import type {
   CustomerLedgerPage,
   CustomerLedgerRow
 } from '@shared/customers'
+import type {
+  LoyaltyBalance,
+  LoyaltyMovementRow,
+  LoyaltyMovementType,
+  PagedResult
+} from '@shared/loyalty'
 import { formatMoney } from '@shared/money'
+import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 import { Paginator } from '../../components/Paginator'
 import { LookupSelect, MoneyInput, useLookupList } from './ProductForm'
 
@@ -410,6 +418,9 @@ export function CustomerLedger({
         )}
       </Card>
 
+      {/* ── Their POINTS. Draws nothing at all when the shop runs no scheme. ── */}
+      <LoyaltyPanel customerId={customerId} currencySymbol={currencySymbol} />
+
       <RecordPaymentModal
         opened={paying}
         onClose={() => setPaying(false)}
@@ -419,6 +430,199 @@ export function CustomerLedger({
         onRecorded={afterPayment}
       />
     </Stack>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LOYALTY — the points balance and the statement that explains it
+// ═════════════════════════════════════════════════════════════════════════════
+
+const MOVEMENT_BADGE: Record<LoyaltyMovementType, { color: string; label: string }> = {
+  earn: { color: 'violet', label: 'Earned' },
+  redeem: { color: 'blue', label: 'Used' },
+  expire: { color: 'gray', label: 'Expired' },
+  adjust: { color: 'orange', label: 'Adjusted' }
+}
+
+/**
+ * ONE CUSTOMER'S POINTS — the derived balance, what it is worth today, and a paginated history of every
+ * promise made, spent, expired or corrected (migration 0017).
+ *
+ * IT HIDES ITSELF ENTIRELY when `loyalty.enabled` is off: a shop that does not run points must never see
+ * a points panel, an empty table or a "0 points" line. It reads the setting itself rather than taking it
+ * as a prop, so the whole feature is one component the ledger drops in and forgets.
+ *
+ * Every figure comes from MAIN — the balance is SUM(movements), never a stored column, and the VALUE is
+ * MAIN's valuation at the current rate. Nothing here does loyalty arithmetic.
+ */
+function LoyaltyPanel({
+  customerId,
+  currencySymbol
+}: {
+  customerId: number
+  currencySymbol: string
+}): React.JSX.Element | null {
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [balance, setBalance] = useState<LoyaltyBalance | null>(null)
+  const [history, setHistory] = useState<PagedResult<LoyaltyMovementRow> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE)
+
+  // Does this shop even run a loyalty scheme? Asked once, before anything else is fetched.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const result = await window.pos.settings.getAll()
+      if (cancelled) return
+      if (!result.ok) {
+        setEnabled(false) // cannot tell — draw nothing rather than half a panel
+        return
+      }
+      setEnabled(
+        (result.data['loyalty.enabled'] ?? REGISTRY_DEFAULTS['loyalty.enabled']) === true
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const load = useCallback(async (): Promise<void> => {
+    setError(null)
+    const [balanceResult, historyResult] = await Promise.all([
+      window.pos.loyalty.balance({ customerId }),
+      window.pos.loyalty.history({ customerId, page, pageSize })
+    ])
+
+    if (!balanceResult.ok) {
+      setError(balanceResult.error.userMessage)
+      return
+    }
+    if (!historyResult.ok) {
+      setError(historyResult.error.userMessage)
+      return
+    }
+    setBalance(balanceResult.data)
+    setHistory(historyResult.data)
+  }, [customerId, page, pageSize])
+
+  useEffect(() => {
+    if (enabled !== true) return
+    void load()
+  }, [enabled, load])
+
+  // The shop runs no scheme (or we could not tell): draw NOTHING. Not an empty card, not a zero.
+  if (enabled !== true) return null
+
+  return (
+    <Card withBorder padding="lg">
+      <Group justify="space-between" align="center" mb="md" wrap="nowrap">
+        <Group gap={8} wrap="nowrap">
+          <Award size={18} opacity={0.7} />
+          <Text fw={600}>Loyalty points</Text>
+        </Group>
+
+        {balance && (
+          <Group gap={8} align="baseline" wrap="nowrap">
+            <Text fw={700} size="xl" c={balance.points > 0 ? 'violet' : 'dimmed'}>
+              {balance.points.toLocaleString('en-US')}
+            </Text>
+            <Text size="sm" c="dimmed">
+              {balance.points === 1 ? 'point' : 'points'}
+              {balance.points > 0 && ` — worth ${formatMoney(balance.valueMinor, { symbol: currencySymbol })}`}
+            </Text>
+          </Group>
+        )}
+      </Group>
+
+      {error ? (
+        <Alert color="red" icon={<CircleAlert size={18} />} title="The points could not be loaded">
+          {error}
+          <Group mt="sm">
+            <Button size="xs" variant="default" onClick={() => void load()}>
+              Try again
+            </Button>
+          </Group>
+        </Alert>
+      ) : !history ? (
+        <Stack gap={10}>
+          <Skeleton height={34} />
+          <Skeleton height={30} />
+          <Skeleton height={30} />
+        </Stack>
+      ) : history.rows.length === 0 ? (
+        <Stack align="center" gap="xs" py="xl">
+          <Award size={32} opacity={0.5} />
+          <Text fw={600}>No points yet</Text>
+          <Text size="sm" c="dimmed" ta="center" maw={440}>
+            Points are earned when this customer buys something with their name on the sale, and can be
+            used to pay at the till.
+          </Text>
+        </Stack>
+      ) : (
+        <>
+          <Table.ScrollContainer minWidth={640}>
+            <Table striped withTableBorder>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Date</Table.Th>
+                  <Table.Th>Detail</Table.Th>
+                  <Table.Th ta="right">Points</Table.Th>
+                  <Table.Th ta="right">Value</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {history.rows.map((row) => {
+                  const badge = MOVEMENT_BADGE[row.type]
+                  return (
+                    <Table.Tr key={row.id}>
+                      <Table.Td>
+                        <Text size="sm">{new Date(row.at).toLocaleDateString()}</Text>
+                      </Table.Td>
+                      <Table.Td>
+                        <Group gap={8} wrap="nowrap">
+                          <Badge size="xs" variant="light" color={badge.color}>
+                            {badge.label}
+                          </Badge>
+                          {/* The reason LABEL, never the code — and the free text the owner typed. */}
+                          <Text size="sm" c="dimmed">
+                            {row.reasonLabel ?? row.reasonText ?? (row.userName ?? '')}
+                          </Text>
+                        </Group>
+                      </Table.Td>
+                      <Table.Td ta="right">
+                        {/* The sign IS the story: gained or gone. */}
+                        <Text size="sm" fw={600} c={row.points > 0 ? 'violet' : 'dimmed'}>
+                          {row.points > 0 ? '+' : ''}
+                          {row.points.toLocaleString('en-US')}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td ta="right">
+                        <Text size="sm" c="dimmed">
+                          {formatMoney(row.valueMinor, { symbol: currencySymbol })}
+                        </Text>
+                      </Table.Td>
+                    </Table.Tr>
+                  )
+                })}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+
+          <Paginator
+            page={page}
+            pageSize={pageSize}
+            total={history.total}
+            onPage={setPage}
+            onPageSize={setPageSize}
+            unit="entry"
+            units="entries"
+          />
+        </>
+      )}
+    </Card>
   )
 }
 

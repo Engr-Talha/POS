@@ -326,7 +326,27 @@ export const IPC = {
   // working on an expired licence: it can still browse and export what it spent. (CLAUDE.md §6)
   expenseCreate: 'expense:create',
   expenseList: 'expense:list',
-  expenseGet: 'expense:get'
+  expenseGet: 'expense:get',
+
+  // ── LOYALTY POINTS (migration 0017) — what the shop OWES its regulars, in points ──────────────────
+  //
+  // A point is a PROMISE, and a promise is a LIABILITY (ACC.LOYALTY 2200) booked the moment it is
+  // EARNED — never when it is redeemed. The balance is DERIVED: SUM(loyalty_movements.points), never a
+  // `customers.points` column (CLAUDE.md §4, the same law as stock).
+  //
+  // EARNING AND REDEEMING ARE NOT HERE, AND THAT IS THE DESIGN. They are not free-standing acts a
+  // renderer may ask for: points are earned BY a sale and spent as a TENDER ON one, so they ride inside
+  // `sale:complete` (which sends `redeemPoints` — a POINT COUNT, never a rupee figure) and are written
+  // inside that sale's ONE transaction. An endpoint that could mint or spend points on its own would be
+  // a way to move a liability with no sale behind it.
+  //
+  // balance / history are READS gated 'loyalty.view' (cashier — the till must show what a customer has)
+  // and take NO assertWritable(): an expired shop still reads its own books (CLAUDE.md §6). adjust is
+  // the owner's hand correction — 'loyalty.adjust' (owner) + assertWritable(), a reason code from the
+  // live lookups list, and audited by the service itself.
+  loyaltyBalance: 'loyalty:balance',
+  loyaltyHistory: 'loyalty:history',
+  loyaltyAdjust: 'loyalty:adjust'
 } as const
 
 export type SystemInfo = {

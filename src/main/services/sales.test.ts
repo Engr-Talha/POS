@@ -2609,3 +2609,412 @@ describe('a serial-tracked item', () => {
     everythingHolds(t, owner)
   })
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LOYALTY POINTS ON A SALE — earned as a promise, spent as a TENDER (migration 0017)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Every scenario here also runs the five standing assertions in `afterEach` — including the trial
+ * balance. That is the point: loyalty adds legs to the sale's journal and a whole liability of its own,
+ * and none of it is allowed to knock the books out of balance.
+ */
+describe('loyalty points on a sale', () => {
+  /** Turn the scheme on. OFF is the default, so a test that wants points must say so. */
+  function enableLoyalty(options: { perRupee?: number; redeemValue?: number; minToRedeem?: number } = {}): void {
+    settings.set(t.db, 'loyalty.enabled', true)
+    settings.set(t.db, 'loyalty.pointsPerCurrencyUnit', options.perRupee ?? 1)
+    settings.set(t.db, 'loyalty.redeemValueMinor', options.redeemValue ?? 100)
+    settings.set(t.db, 'loyalty.minPointsToRedeem', options.minToRedeem ?? 100)
+  }
+
+  function pointsOf(customerId: number): number {
+    return t.db
+      .prepare('SELECT COALESCE(SUM(points), 0) FROM loyalty_movements WHERE customer_id = ?')
+      .pluck()
+      .get(customerId) as number
+  }
+
+  // ── EARNING ────────────────────────────────────────────────────────────────
+
+  it('earns points on the NET, ex-tax value — and books the promise as a liability', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    // 2 @ Rs 100 = Rs 200 net, Rs 34 tax, Rs 234 gross.
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+
+    // ON THE NET, NOT THE GROSS: 200 points, not 234. The shop never owned the output tax, so it does
+    // not reward out of it — and the rate of reward cannot depend on the tax rate.
+    expect(pointsOf(customerId)).toBe(200)
+
+    // The promise is money owed NOW: DR Loyalty Expense · CR Loyalty Liability, at Rs 1.00 a point.
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(20_000)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY_EXPENSE)).toBe(20_000)
+    everythingHolds(t, owner)
+  })
+
+  it('earns NOTHING when loyalty is switched off — the default', () => {
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+
+    expect(pointsOf(customerId)).toBe(0)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(0)
+    everythingHolds(t, owner)
+  })
+
+  it('earns NOTHING for a walk-in — nobody could ever claim it', () => {
+    enableLoyalty()
+    const productId = makeProduct({ retailPrice: RS_100 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+
+    expect(t.db.prepare('SELECT COUNT(*) FROM loyalty_movements').pluck().get()).toBe(0)
+    everythingHolds(t, owner)
+  })
+
+  // ── REDEEMING: A TENDER, NOT A DISCOUNT ────────────────────────────────────
+
+  /**
+   * THE CENTRAL ASSERTION OF THE WHOLE FEATURE. Points pay for the goods; they do not discount them.
+   * Revenue and OUTPUT TAX must come out identical to the same sale paid entirely in cash — if they do
+   * not, the shop is under-declaring tax on every redemption.
+   */
+  it('redeems as a TENDER: revenue and output tax are UNCHANGED, and the liability is settled', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    // Bank 200 points on a first sale (Rs 200 net → 200 pts, booked at Rs 1.00 = Rs 200 liability).
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+    expect(pointsOf(customerId)).toBe(200)
+
+    const salesBefore = ledger.accountBalance(t.db, ACC.SALES)
+    const taxBefore = ledger.accountBalance(t.db, ACC.OUTPUT_TAX)
+
+    // A second Rs 234 sale, Rs 100 of it paid with 100 points, Rs 134 in cash.
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 13_400 }],
+      redeemPoints: 100
+    })
+
+    // THE FROZEN LINES ARE UNTOUCHED — the customer bought Rs 234 of goods and the paper says so.
+    expect(sale.grandTotal).toBe(23_400)
+    expect(sale.subtotalNet).toBe(20_000)
+    expect(sale.taxTotal).toBe(3_400)
+
+    // REVENUE AND TAX ARE FULL — exactly as if it had all been cash. This is the whole design.
+    expect(ledger.accountBalance(t.db, ACC.SALES) - salesBefore).toBe(20_000)
+    expect(ledger.accountBalance(t.db, ACC.OUTPUT_TAX) - taxBefore).toBe(3_400)
+
+    // ── THE LIABILITY, POINT BY POINT ──
+    //
+    //   200 pt   banked by the first sale
+    //   −100 pt  spent here: the liability is SETTLED by the tender, at the rate it was booked at
+    //   +114 pt  earned on the part the customer funded THEMSELVES:
+    //              the Rs 100 of points is tax-INCLUSIVE (it is money off the Rs 234 total), so it is
+    //              scaled into net terms by the sale's own net:gross —  100 × 200/234 = Rs 85.47 —
+    //              leaving Rs 114.53 of net that the cash paid for, which floors to 114 whole points.
+    //   = 214 pt at Rs 1.00 = Rs 214.00
+    expect(pointsOf(customerId)).toBe(214)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(21_400)
+    everythingHolds(t, owner)
+  })
+
+  /**
+   * Points must not breed points. The part of the sale the customer paid FOR with points earns nothing,
+   * or spending points would earn points that could be spent to earn points.
+   */
+  it('does not earn points on the part paid for WITH points', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    // Bank 200 points (Rs 200 net, no tax → 200 pts).
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 20_000 }]
+    })
+
+    // A Rs 200 sale: Rs 100 in points, Rs 100 in cash. Only the CASH half earns.
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 10_000 }],
+      redeemPoints: 100
+    })
+
+    // 200 earned − 100 spent + 100 earned on the cash-funded half = 200.
+    expect(pointsOf(customerId)).toBe(200)
+    everythingHolds(t, owner)
+  })
+
+  it('refuses to pay points out as change', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 100_000 }]
+    })
+    expect(pointsOf(customerId)).toBe(1000) // Rs 1000 of points
+
+    // A Rs 100 sale, trying to spend Rs 500 of points on it: the difference must not come back as cash.
+    expectUserMessage(
+      () =>
+        sales.complete(t.db, cashier, {
+          customerId,
+          lines: [{ productId, qtyM: 1 * ONE_UNIT }],
+          payments: [],
+          redeemPoints: 500
+        }),
+      /worth .* which is more than this sale|cannot be paid out as change/i
+    )
+
+    expect(pointsOf(customerId)).toBe(1000) // nothing moved
+    everythingHolds(t, owner)
+  })
+
+  it('lets points pay for the WHOLE sale, with no money at all', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 100_000 }]
+    })
+
+    // A Rs 100 sale paid entirely with 100 points, and NO payment rows at all.
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 1 * ONE_UNIT }],
+      payments: [],
+      redeemPoints: 100
+    })
+
+    expect(sale.grandTotal).toBe(10_000)
+    expect(sale.payments).toHaveLength(0)
+    expect(sale.changeDue).toBe(0)
+    everythingHolds(t, owner)
+  })
+
+  it('refuses a sale with no payment and no points', () => {
+    const productId = makeProduct({ retailPrice: RS_100 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    expectUserMessage(
+      () => sales.complete(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }], payments: [] }),
+      /take a payment/i
+    )
+  })
+
+  it('refuses points on a sale with no customer named', () => {
+    enableLoyalty()
+    const productId = makeProduct({ retailPrice: RS_100 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    expectUserMessage(
+      () =>
+        sales.complete(t.db, cashier, {
+          lines: [{ productId, qtyM: ONE_UNIT }],
+          payments: [{ methodLookupId: cash(), amount: 11_700 }],
+          redeemPoints: 100
+        }),
+      /names the customer|choose who/i
+    )
+  })
+
+  it('refuses fewer points than the shop minimum, and rolls the whole sale back', () => {
+    enableLoyalty({ minToRedeem: 100 })
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 100_000 }]
+    })
+
+    const stockBefore = onHand(productId)
+    const salesCountBefore = t.db.prepare('SELECT COUNT(*) FROM sales').pluck().get()
+
+    expectUserMessage(
+      () =>
+        sales.complete(t.db, cashier, {
+          customerId,
+          lines: [{ productId, qtyM: 1 * ONE_UNIT }],
+          payments: [{ methodLookupId: cash(), amount: 5_000 }],
+          redeemPoints: 50 // below the minimum of 100
+        }),
+      /100 at a time or more/i
+    )
+
+    // NOTHING happened: no sale, no stock movement, no invoice number burned.
+    expect(onHand(productId)).toBe(stockBefore)
+    expect(t.db.prepare('SELECT COUNT(*) FROM sales').pluck().get()).toBe(salesCountBefore)
+    everythingHolds(t, owner)
+  })
+
+  // ── THE VOID CLAWBACK (CLAUDE.md trap #17) ─────────────────────────────────
+
+  /**
+   * A cancelled sale must not leave points behind it. Otherwise a cashier mints points by ringing a
+   * sale up and voiding it — and the liability the shop carries is for promises it never made.
+   */
+  it('CLAWS BACK the points a voided sale earned', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+    expect(pointsOf(customerId)).toBe(200)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(20_000)
+
+    sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'customer_changed_mind' })
+
+    // THE POINTS ARE GONE, and so is the liability — the promise was never made.
+    expect(pointsOf(customerId)).toBe(0)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(0)
+    everythingHolds(t, owner)
+  })
+
+  /** The mirror image: a void must GIVE BACK what the cancelled sale spent, or the customer is robbed. */
+  it('GIVES BACK the points a voided sale spent', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 100_000 }]
+    })
+    expect(pointsOf(customerId)).toBe(1000)
+
+    // Spend 500 of them on a Rs 500 sale.
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 5 * ONE_UNIT }],
+      payments: [],
+      redeemPoints: 500
+    })
+    expect(pointsOf(customerId)).toBe(500) // 1000 − 500 spent, and it earned nothing (all points-funded)
+
+    sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'customer_changed_mind' })
+
+    // THE SPENT POINTS COME BACK. The sale never happened.
+    expect(pointsOf(customerId)).toBe(1000)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(100_000)
+    everythingHolds(t, owner)
+  })
+
+  /**
+   * REGRESSION. The two halves of a sale's points DO NOT live in the same journal, and the first cut of
+   * this code assumed they did: a redemption's DR is a leg of the SALE's journal (so voidSale's contra
+   * already reverses it), but an EARN posts a journal of its OWN, with ref_type 'loyalty' — which the
+   * contra never sees, because it only mirrors the sale's. The points went to zero and the LIABILITY
+   * STAYED ON THE BOOKS at full value, with the trial balance still balancing perfectly.
+   *
+   * So: void a sale that BOTH earned and spent points, and assert the liability lands exactly where it
+   * started. Reverse the earn twice and it goes negative; reverse it not at all and it stays high.
+   */
+  it('lands the liability back on EXACTLY where it started when a sale that earned AND spent is voided', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+
+    const pointsBefore = pointsOf(customerId)
+    const liabilityBefore = ledger.accountBalance(t.db, ACC.LOYALTY)
+    const expenseBefore = ledger.accountBalance(t.db, ACC.LOYALTY_EXPENSE)
+
+    // This one both SPENDS 100 points and EARNS on the cash-funded remainder.
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 13_400 }],
+      redeemPoints: 100
+    })
+    expect(pointsOf(customerId)).not.toBe(pointsBefore) // it really did move
+
+    sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'customer_changed_mind' })
+
+    // EVERYTHING back exactly where it was — the points, the liability AND the expense.
+    expect(pointsOf(customerId)).toBe(pointsBefore)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY)).toBe(liabilityBefore)
+    expect(ledger.accountBalance(t.db, ACC.LOYALTY_EXPENSE)).toBe(expenseBefore)
+    everythingHolds(t, owner)
+  })
+
+  it('leaves the ORIGINAL movements untouched — the points ledger is append-only', () => {
+    enableLoyalty()
+    const customerId = makeCustomer('Rashid')
+    const productId = makeProduct({ retailPrice: RS_100, taxRateBp: 0, isTaxExempt: true })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      customerId,
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 20_000 }]
+    })
+
+    const earn = t.db
+      .prepare("SELECT id, points FROM loyalty_movements WHERE type = 'earn'")
+      .get() as { id: number; points: number }
+
+    sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'customer_changed_mind' })
+
+    // The earn row is still there, still positive — the reversal is a NEW row, not an edit.
+    const after = t.db
+      .prepare('SELECT points FROM loyalty_movements WHERE id = ?')
+      .get(earn.id) as { points: number }
+    expect(after.points).toBe(earn.points)
+    expect(t.db.prepare('SELECT COUNT(*) FROM loyalty_movements').pluck().get()).toBe(2)
+    everythingHolds(t, owner)
+  })
+})

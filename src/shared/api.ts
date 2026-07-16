@@ -195,6 +195,13 @@ import type {
   ExpenseDetail,
   ExpenseList
 } from './expenses'
+import type {
+  AdjustPointsInput,
+  LoyaltyBalance,
+  LoyaltyBalanceInput,
+  LoyaltyHistoryInput,
+  LoyaltyMovementRow
+} from './loyalty'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -920,5 +927,37 @@ export interface PosApi {
     list: (input: ListExpensesInput) => Promise<Result<ExpenseList>>
     /** ONE expense in full — the row plus its category / method labels and who recorded it. */
     get: (input: GetExpenseInput) => Promise<Result<ExpenseDetail>>
+  }
+
+  /**
+   * LOYALTY POINTS — what the shop owes its regulars (migration 0017).
+   *
+   * NO earn, NO redeem. Points are earned BY a sale and spent as a TENDER on one, so both ride inside
+   * `sales.complete` (which takes `redeemPoints` — a POINT COUNT; MAIN decides what it is worth) and
+   * are written in that sale's ONE transaction. A standalone endpoint would let a renderer mint or
+   * spend a liability with no sale behind it.
+   *
+   * Everything here hides when `loyalty.enabled` is off — a shop that does not run loyalty never sees
+   * it. That is a COURTESY, not a control: MAIN refuses a redemption when the scheme is off regardless
+   * of what any screen shows (CLAUDE.md §4).
+   */
+  loyalty: {
+    /**
+     * ONE customer's points: the DERIVED balance (SUM of their movements — there is no stored column)
+     * and what it is worth TODAY at the current redeem rate. Gated 'loyalty.view' (cashier) — the till
+     * has to show a customer what they have.
+     */
+    balance: (input: LoyaltyBalanceInput) => Promise<Result<LoyaltyBalance>>
+    /**
+     * Their points STATEMENT — paginated, newest first, filterable by date: every promise made, spent,
+     * expired or corrected, with who did it and why. A read; it still works on an expired licence.
+     */
+    history: (input: LoyaltyHistoryInput) => Promise<Result<PagedResult<LoyaltyMovementRow>>>
+    /**
+     * The OWNER's hand correction — signed: positive gives points (goodwill), negative takes them back.
+     * Requires a reason from the live lookups('adjustment_reason') list and is audited. Owner only,
+     * enforced in MAIN.
+     */
+    adjust: (input: AdjustPointsInput) => Promise<Result<LoyaltyMovementRow>>
   }
 }

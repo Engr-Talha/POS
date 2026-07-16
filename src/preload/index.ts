@@ -303,6 +303,16 @@ const api: PosApi = {
     create: (input) => ipcRenderer.invoke(IPC.expenseCreate, input),
     list: (input) => ipcRenderer.invoke(IPC.expenseList, input),
     get: (input) => ipcRenderer.invoke(IPC.expenseGet, input)
+  },
+
+  // LOYALTY POINTS — what the shop owes its regulars. NO earn and NO redeem here, on purpose: points are
+  // earned BY a sale and spent as a TENDER on one, so both ride inside `sale:complete` and land in that
+  // sale's ONE transaction. `balance` and `history` are reads; `adjust` is the owner's hand correction
+  // (gated 'loyalty.adjust' + assertWritable() in MAIN, not by this whitelist).
+  loyalty: {
+    balance: (input) => ipcRenderer.invoke(IPC.loyaltyBalance, input),
+    history: (input) => ipcRenderer.invoke(IPC.loyaltyHistory, input),
+    adjust: (input) => ipcRenderer.invoke(IPC.loyaltyAdjust, input)
   }
 }
 

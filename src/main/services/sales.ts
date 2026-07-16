@@ -41,6 +41,7 @@ import * as audit from './audit'
 import * as auth from './auth'
 import * as catalog from './catalog'
 import * as ledger from './ledger'
+import * as loyalty from './loyalty'
 import * as settings from './settings'
 import * as stock from './stock'
 import { openShiftId } from './shift-id'
@@ -1313,21 +1314,81 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
   )
   const customerId = assertCreditRules(db, creditTotal, input)
 
-  // ── 5. The money that actually crossed the counter ────────────────────────
-  const paidTotal = sum(payments.map((payment) => payment.amount))
-  const changeDue = paidTotal - priced.grandTotal
-
-  if (changeDue < 0) {
+  // ── 4b. LOYALTY POINTS SPENT — A TENDER, NOT A DISCOUNT (migration 0017) ──
+  //
+  // Points PAY for goods; they do not reduce their price. So this is priced like a payment line and
+  // NOTHING above this point moves: the lines, the tax and the grand total are already frozen and are
+  // not touched. MAIN decides the money — the renderer sent a POINT COUNT, never a rupee figure.
+  //
+  // Valued BEFORE the transaction so a customer who has too few points, or is below the shop's
+  // minimum, gets a sentence they can act on rather than a rolled-back sale. The movement itself is
+  // written INSIDE the transaction below, where the sale and its points land together or not at all.
+  const redeemPoints = input.redeemPoints ?? null
+  if (redeemPoints != null && customerId == null) {
     throw new AppError(
       ErrorCode.VALIDATION,
-      `The payment is short by ${money(db, -changeDue)}. Please take the rest, or add it as Credit (Udhaar).`,
-      `paid ${paidTotal} < grand total ${priced.grandTotal}`
+      'Points can only be used on a sale that names the customer. Please choose who this is for.',
+      `redeemPoints=${redeemPoints} with no customer on the sale`
+    )
+  }
+  const redeemValue = redeemPoints != null ? loyalty.valueOfRedemption(db, customerId!, redeemPoints) : 0
+
+  // ── 5. The money that actually crossed the counter ────────────────────────
+  //
+  // TWO DIFFERENT FIGURES, AND THEY MUST NOT BE CONFLATED.
+  //
+  //   paidTotal      the MONEY. It is what gets stored, and migration 0007 defines it exactly:
+  //                  paid_total = SUM(sale_payments.amount). Points are NOT money and never appear
+  //                  in sale_payments, so they are NOT in here — folding them in would break that
+  //                  identity, and with it `change_due = paid_total − grand_total`.
+  //   tenderedTotal  what the sale has been SETTLED with: the money PLUS the points. This is what the
+  //                  sale is measured against, because points genuinely pay for goods.
+  const paidTotal = sum(payments.map((payment) => payment.amount))
+  const tenderedTotal = paidTotal + redeemValue
+
+  // CHANGE COMES OUT OF THE MONEY, NOT OUT OF THE POINTS. Change is what is handed back from the note
+  // the customer produced, so it is measured on the MONEY — that is what keeps the stored
+  // `change_due = paid_total − grand_total` true, and it is why points cannot leak out of the drawer.
+  const changeDue = Math.max(0, paidTotal - priced.grandTotal)
+
+  // A SALE IS TENDERED FOR — in money, in points, or in both. The schema no longer counts the payment
+  // rows (points can legitimately pay for everything, leaving none), so the rule is stated here, where
+  // it can count what the points are worth. The shortfall check below catches every sale that is
+  // partly paid; this catches the one it cannot see — a Rs 0 document with nothing tendered at all,
+  // which is not a sale, it is an empty piece of paper with an invoice number on it.
+  if (payments.length === 0 && redeemValue <= 0) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      'Please take a payment.',
+      'sale.complete with no payments and no points redeemed'
+    )
+  }
+
+  if (tenderedTotal < priced.grandTotal) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `The payment is short by ${money(db, priced.grandTotal - tenderedTotal)}. Please take the rest, or add it as Credit (Udhaar).`,
+      `tendered ${tenderedTotal} (money ${paidTotal} + points ${redeemValue}) < grand total ${priced.grandTotal}`
     )
   }
 
   const cashTendered = sum(
     payments.filter((payment) => payment.account === ACC.CASH).map((payment) => payment.amount)
   )
+
+  // POINTS ARE NOT CASHED OUT. Points buy GOODS. Spending more of them than the sale is worth would
+  // mean the shop owes the difference — and the only way to settle it is out of the drawer, which turns
+  // a loyalty scheme into a cash machine. The customer keeps the excess points instead; they are not
+  // lost, they are simply not spent today. (`changeDue` is measured on the MONEY, so the excess could
+  // never actually reach the customer — but it would leave the sale over-tendered and the books asked
+  // to balance against a promise nobody redeemed. Refused here, in the cashier's own words.)
+  if (redeemValue > 0 && redeemValue > priced.grandTotal) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `Those points are worth ${money(db, redeemValue)}, which is more than this sale of ${money(db, priced.grandTotal)}. Points cannot be paid out as change — please use fewer.`,
+      `redeemValue ${redeemValue} exceeds grand total ${priced.grandTotal}; refusing to pay points out as change`
+    )
+  }
 
   // Change comes out of the drawer, so there has to be cash in the drawer to give it from. Anything
   // else is a data-entry mistake, and it would post a NEGATIVE debit to Cash.
@@ -1436,6 +1497,22 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
       }
     }
 
+    // ── 6b. POINTS SPENT — the movement, inside THIS transaction ─────────────
+    //
+    // One atomic act: if anything below fails, the points are still on the customer's card. The
+    // service froze the value at today's rate and hands back the legs to post; it deliberately posts
+    // NO journal of its own, because the DR to the liability is THIS sale's tender leg and only
+    // balances against the revenue the sale is about to credit.
+    const redemption =
+      redeemPoints != null
+        ? loyalty.redeemForSale(
+            db,
+            actor,
+            { customerId: customerId!, saleId, points: redeemPoints },
+            now
+          )
+        : null
+
     // ── 7. THE JOURNAL (see §3 of the header — it balances as algebra) ───────
     const journalLines: ledger.JournalLineInput[] = []
 
@@ -1451,6 +1528,12 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
     for (const [account, amount] of byAccount) {
       if (amount > 0) journalLines.push({ account, debit: amount })
     }
+
+    // DR the loyalty liability — THE POINTS' TENDER LEG, exactly like the cash leg above. The shop
+    // settles what it promised; the goods are paid for with it, so revenue and output tax below are
+    // untouched. The service builds the legs (it releases the liability at the rate it was BOOKED at
+    // and books any rate change as expense — its decision 3), so that reasoning stays in one place.
+    if (redemption) journalLines.push(...loyalty.journalLines(redemption))
 
     // DR what discounting COST — line discounts and the cart discount alike, at their ex-tax value.
     // Contra-income, so the owner can SEE it in one place instead of it vanishing into a smaller Sales
@@ -1480,6 +1563,28 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
       lines: journalLines
     })
 
+    // The movement carries the journal that settled it — a committed movement always has one
+    // (migration 0017). It has to happen HERE: the journal did not exist until the line above.
+    if (redemption) loyalty.attachJournal(db, redemption.id, journalId)
+
+    // ── 7b. POINTS EARNED — the promise this sale made ───────────────────────
+    //
+    // Inside the SAME transaction, so a sale and its points are one atomic act: a second transaction
+    // could half-fail and leave a sale that earned nothing, or points for a sale that rolled back.
+    //
+    // A NO-OP when loyalty is off or nobody is named — the service returns null and posts nothing,
+    // which is the honest answer that this sale made no promise. It posts its own balanced journal
+    // (DR Loyalty Expense · CR Loyalty Liability); that is a SEPARATE event from the sale's own
+    // journal above and does not touch the sale's figures, its legs or its tax.
+    if (customerId != null) {
+      loyalty.earnForSale(
+        db,
+        actor,
+        { customerId, saleId, netAmount: earnableNet(priced, redemption?.valueMinor ?? 0) },
+        now
+      )
+    }
+
     // ── 8. WHO did WHAT, and WHY ─────────────────────────────────────────────
     writeSaleAuditTrail(db, actor, {
       saleId,
@@ -1499,6 +1604,42 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
   const sale = getById(db, saleId)
 
   return { sale, receipt: buildReceipt(db, sale, false), journalId }
+}
+
+/**
+ * WHAT THIS SALE EARNS POINTS ON — the NET, ex-tax value the customer funded THEMSELVES.
+ *
+ * The loyalty service's decision 1 makes both subtractions deliberate, and this is where the SALE — the
+ * only thing that knows its own frozen figures — computes them:
+ *
+ *   NOT ON TAX. `subtotalNet` is already the sale's net of every discount, before tax. The shop never
+ *   owned the output tax; rewarding out of it would buy loyalty with the government's money and would
+ *   make the reward depend on the tax rate, so a zero-rated item would earn less for the same spend.
+ *
+ *   NOT ON THE POINTS-FUNDED PART. Otherwise points breed points: spend 100, earn some back, spend
+ *   those, forever — a liability that compounds because of the way it is spent.
+ *
+ * THE CONVERSION IS THE WHOLE POINT OF THIS FUNCTION. The redemption is a TENDER, so `redeemedGross` is
+ * money-off-the-total: it is tax-INCLUSIVE, like the Rs 500 note beside it. `subtotalNet` is tax-
+ * EXCLUSIVE. Subtracting one from the other directly would take the tax off twice on the points-funded
+ * portion and quietly under-reward every redeeming customer. So the tender is scaled into net terms by
+ * the sale's OWN net:gross ratio — its own frozen integers, never today's tax settings, and never a
+ * per-line recomputation (the points paid for the whole basket, not for any one line).
+ *
+ * Floors at zero: the guard in complete() already refuses a redemption worth more than the sale, and a
+ * negative basis would be meaningless anyway. `grandTotal` of 0 (a wholly-discounted cart) short-circuits
+ * rather than dividing by zero.
+ */
+function earnableNet(priced: PricedCart, redeemedGross: number): number {
+  if (redeemedGross <= 0) return priced.subtotalNet
+  if (priced.grandTotal <= 0) return 0
+
+  // The net hiding inside the points-funded gross, at this sale's own blended tax rate. Multiply
+  // before divide, and FLOOR — a rounded-up deduction would shave the reward, and flooring the
+  // deduction leaves the last paisa of doubt with the customer, which is where it belongs.
+  const redeemedNet = Math.floor((redeemedGross * priced.subtotalNet) / priced.grandTotal)
+
+  return Math.max(0, priced.subtotalNet - redeemedNet)
 }
 
 /** The money a movement moved, as IT froze it (migration 0006). Read, never recomputed. */
@@ -2497,6 +2638,16 @@ export function voidSale(
         )
       })
     }
+
+    // ── The POINTS go back, exactly as the stock does ────────────────────────
+    //
+    // A cancelled sale never happened, so it cannot leave points behind it. The customer must not keep
+    // what a voided sale earned (otherwise points are minted by ringing a sale up and cancelling it),
+    // and must get back what a voided sale spent. The balance is SUM(movements), so the service writes
+    // the mirror movements at their own frozen values — it posts NO journal, because the contra above
+    // has already reversed both the earn's legs and the redemption's tender leg by mirroring the
+    // original journal. (CLAUDE.md trap #17: derived state, correct from EVERY path.)
+    loyalty.reverseForSale(db, actor, input.id, now)
 
     // A serialised item goes back INTO stock — or that phone could never be sold to anybody else.
     db.prepare(

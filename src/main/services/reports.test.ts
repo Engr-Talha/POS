@@ -6,6 +6,7 @@ import * as sales from './sales'
 import * as returns from './returns'
 import * as purchases from './purchases'
 import * as purchaseReturns from './purchase-returns'
+import * as loyalty from './loyalty'
 import * as stock from './stock'
 import * as ledger from './ledger'
 import * as shifts from './shifts'
@@ -788,6 +789,48 @@ describe('profit and loss', () => {
     const july = reports.profitAndLoss(t.db, { from: '2026-07-01', to: '2026-07-31' })
     expect(june.netRevenue).toBe(10_000)
     expect(july.netRevenue).toBe(10_000)
+  })
+
+  /**
+   * A NEW JOURNAL LEG MUST REACH THE REPORTS WITHOUT ANYONE EDITING THEM.
+   *
+   * Loyalty (migration 0017) added ACC.LOYALTY (2200, liability) and ACC.LOYALTY_EXPENSE (5300). Neither
+   * is named anywhere in reports.ts — the P&L and the balance sheet walk `accountActivity` by account
+   * TYPE, so a new account lands in them by construction. That is the whole reason the buying side's
+   * `supplierAging` could drift and these cannot: aging RECOMPUTES a balance from source tables, while
+   * these READ the journals. This pins that property, so a future "optimisation" into a hardcoded
+   * account list fails loudly here instead of silently dropping a real cost off the shop's P&L.
+   */
+  it('a new account (loyalty) reaches the P&L and the balance sheet with no report change', () => {
+    settings.set(t.db, 'loyalty.enabled', true, NOW)
+    const customerId = makeCustomer('Regular Rashid')
+
+    // 500 points granted by hand = a Rs 500 promise, expensed the moment it is made.
+    loyalty.adjustPoints(
+      t.db,
+      owner,
+      { customerId, points: 500, reasonCode: 'data_entry', reasonText: 'goodwill' },
+      NOW
+    )
+
+    const liability = ledger.accountBalance(t.db, ACC.LOYALTY)
+    expect(liability).toBe(50_000)
+    // The standing loyalty invariant: what the customer holds === what the GL says the shop owes.
+    expect(loyalty.pointsValue(t.db, customerId), 'points value !== GL Loyalty').toBe(liability)
+
+    const pnl = reports.profitAndLoss(t.db, { from: '2026-01-01', to: FAR })
+    expect(
+      pnl.expenses.find((r) => r.code === ACC.LOYALTY_EXPENSE)?.amount,
+      'loyalty expense missing from the P&L'
+    ).toBe(liability)
+
+    const bs = reports.balanceSheet(t.db, { asOf: FAR })
+    expect(
+      bs.liabilities.find((r) => r.code === ACC.LOYALTY)?.amount,
+      'the loyalty liability is missing from the balance sheet'
+    ).toBe(liability)
+
+    holds(t)
   })
 })
 

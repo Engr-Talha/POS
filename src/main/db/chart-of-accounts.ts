@@ -34,6 +34,7 @@ export const ACC = {
 
   COGS: '5000', // cost of goods sold
   STOCK_ADJUSTMENT: '5100', // shrinkage, damage, stock-take corrections
+  LOYALTY_EXPENSE: '5300', // what points cost the shop — expensed as EARNED, not as redeemed
   EXPENSE_GENERAL: '5900'
 } as const
 
@@ -78,6 +79,9 @@ const ACCOUNTS: SeedAccount[] = [
   { code: '5220', name: 'Utilities (Bills)', type: 'expense' },
   { code: '5230', name: 'Transport', type: 'expense' },
   { code: '5240', name: 'Repairs & Maintenance', type: 'expense' },
+  // Points are promised at the till and paid for later. The cost lands here the moment they are EARNED,
+  // so the P&L never overstates profit by the liability quietly building up on 2200. (Migration 0017.)
+  { code: ACC.LOYALTY_EXPENSE, name: 'Loyalty Points Expense', type: 'expense', system: true },
   { code: ACC.EXPENSE_GENERAL, name: 'General Expenses', type: 'expense', system: true }
 ]
 
