@@ -21,13 +21,19 @@ import { formatQty } from '@shared/qty'
  * HTML (trap #11).
  */
 
-const WIDTHS: Record<ReceiptWidth, { paper: string; body: string; chars: number }> = {
+/**
+ * EXPORTED for the QUOTATION (./quotation.ts), which is a different document printed on the same
+ * paper by the same printer. Sharing these is not tidiness — it is the guarantee that a quote and the
+ * sale it becomes can never format one number two ways. The customer holds the quote up next to the
+ * receipt; "Rs 3,999.00" against "3999" is a phone call, and "1.234 kg" against "1 kg" is a refund.
+ */
+export const WIDTHS: Record<ReceiptWidth, { paper: string; body: string; chars: number }> = {
   // Printable area is narrower than the paper — the head does not reach the edge.
   '58mm': { paper: '58mm', body: '48mm', chars: 32 },
   '80mm': { paper: '80mm', body: '72mm', chars: 48 }
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -36,17 +42,24 @@ function escapeHtml(text: string): string {
 }
 
 /** A row of dashes, the full width of the paper. Cheaper than a border, and it prints crisply. */
-function rule(chars: number, char = '-'): string {
+export function rule(chars: number, char = '-'): string {
   return char.repeat(chars)
 }
 
-function formatRate(bp: number): string {
+export function formatRate(bp: number): string {
   // 1700 -> "17%", 1750 -> "17.5%". Basis points in, human out.
   const percent = bp / 100
   return `${Number.isInteger(percent) ? percent : percent.toFixed(1)}%`
 }
 
-function lineHtml(line: ReceiptLine, symbol: string): string {
+/**
+ * ONE PRINTED LINE — name, the optional second-language name, qty x unit price, and the amount.
+ *
+ * SHARED WITH THE QUOTATION, deliberately: an offer's lines and the receipt's lines are the same
+ * lines, and they are built from the same `ReceiptLine` shape by this same function. That is what
+ * makes "the price you were quoted is the price you paid" checkable by eye at the counter.
+ */
+export function lineHtml(line: ReceiptLine): string {
   const qty = formatQty(line.qtyM)
   const uom = line.uom ? ` ${escapeHtml(line.uom)}` : ''
 
@@ -77,6 +90,7 @@ export function renderReceiptHtml(data: ReceiptData, width: ReceiptWidth = '80mm
   const w = WIDTHS[width]
   const symbol = data.currencySymbol
   const money = (n: number): string => formatMoney(n, { grouping: false })
+
 
   const paid = data.payments.reduce((sum, p) => sum + p.amount, 0)
 
@@ -196,7 +210,7 @@ ${
 
 <div class="rule">${rule(w.chars)}</div>
 
-${data.lines.map((line) => lineHtml(line, symbol)).join('')}
+${data.lines.map((line) => lineHtml(line)).join('')}
 
 <div class="rule">${rule(w.chars)}</div>
 

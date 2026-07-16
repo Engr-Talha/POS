@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import { PRICE_ENTRY_MODES } from './catalog'
 import type { TaxMode } from './tax'
+// A quotation prints the SAME line and tax-summary shapes a receipt does — one definition, so the offer
+// and the sale it becomes can never disagree about what a line looked like. (See QuotationData.)
+import type { ReceiptLine, ReceiptTaxSummaryRow } from './receipt'
 
 /**
  * THE SELLING CONTRACT — the types and input schemas main and renderer agree on. (Migration 0007.)
@@ -136,6 +139,24 @@ export type Sale = {
   /** An EXCHANGE is a return and a sale sharing this id. Not a foreign key — a correlation id. */
   exchangeGroupId: number | null
 
+  /**
+   * THE DAY THE OFFER LAPSES — ISO 'YYYY-MM-DD', a DAY and not an instant. (Migration 0015.)
+   *
+   * NON-NULL IF AND ONLY IF `status === 'quote'`. A held cart, a completed sale and a voided sale all
+   * carry NULL: it is an OFFER's expiry, not a document's, so the moment the quote becomes the sale
+   * (the SAME row — PLAN.md §2) money has changed hands and the date is meaningless. `complete()`
+   * clears it.
+   *
+   * SQLite cannot bolt a table CHECK on with ALTER TABLE, so THE SERVICE OWNS THAT INVARIANT
+   * (`saveQuote` sets it, `hold`/`complete` clear it) and a test proves it holds across all three
+   * paths. It is called out here, and in the migration, so the next reader does not assume the
+   * database is guarding it.
+   *
+   * Nothing is BLOCKED when it lapses — an expired quote is a conversation with the customer ("this
+   * price was good until the 14th"), not something the till should refuse.
+   */
+  validUntil: string | null
+
   createdAt: string
 }
 
@@ -251,6 +272,10 @@ export type SaleListItem = Pick<
   | 'hadNegativeStock'
   | 'customerId'
   | 'userId'
+  // The quote tray's whole job: "which of my open quotes are about to lapse". Narrow as this list is,
+  // it cannot answer that without the date, and loading the full SaleDetail for a tray of quotes to
+  // read one column would defeat the point of the list being narrow. NULL on every non-quote row.
+  | 'validUntil'
 > & {
   customerName?: string | null
   cashierName?: string | null
@@ -279,6 +304,66 @@ export type SaleTotals = {
   grandTotal: number
   paidTotal: number
   changeDue: number
+}
+
+/**
+ * WHAT A QUOTATION PRINTS. A DIFFERENT DOCUMENT FROM A RECEIPT — deliberately not a `ReceiptData`.
+ *
+ * A receipt is proof that money changed hands. A quotation is an OFFER, and it must never be mistakable
+ * for the other: this is why the type refuses to carry the fields that would let it pretend.
+ *
+ *   NO invoiceNo    a quote HAS no number, and that is the mechanism that keeps numbering gapless
+ *                   (PLAN.md §1/§2) — it draws one only on completion. Leave the field on the type and
+ *                   the template prints a blank, or a placeholder, where a real invoice number goes.
+ *   NO payments     nothing has been paid.
+ *   NO changeDue    nothing has been tendered.
+ *   NO isDuplicate  a reprinted OFFER is not a second receipt for one sale. There is nothing to
+ *                   double-spend, so there is nothing to stamp DUPLICATE.
+ *
+ * What it carries instead is the thing a receipt has no concept of: HOW LONG THE PRICE HOLDS.
+ *
+ * The lines and the money are the SAME SHAPES the receipt uses (`ReceiptLine`, `ReceiptTaxSummaryRow`)
+ * and are built by the same code, so a quote and the sale it becomes can never disagree about a
+ * pricedQty or an apportioned cart discount.
+ */
+export type QuotationData = {
+  shop: {
+    name: string
+    address?: string | null
+    phone?: string | null
+    taxNumber?: string | null
+  }
+
+  /** The DOCUMENT id — NOT an invoice number. A quote has no invoice number, by design. */
+  quoteId: number
+  /** When the offer was made (the quote's own timestamp). */
+  at: string
+  /** Who offered it. */
+  cashierName: string
+  customerName?: string | null
+
+  /**
+   * THE DAY THE PRICE STOPS HOLDING — ISO 'YYYY-MM-DD'. Never null on a printable quotation: a quote
+   * always has one (the service's invariant), and an offer with no stated expiry is the promise this
+   * whole feature exists to stop the shop making.
+   */
+  validUntil: string
+  /** `validUntil` is in the past. The paper says so plainly — the till still refuses nothing. */
+  isExpired: boolean
+
+  lines: ReceiptLine[]
+
+  /** Ex-tax, and it reconciles exactly as the receipt does:
+   *  subtotalNet − cartDiscount + taxTotal === grandTotal. */
+  subtotalNet: number
+  cartDiscount: number
+  taxTotal: number
+  grandTotal: number
+
+  taxSummary: ReceiptTaxSummaryRow[]
+
+  currencySymbol: string
+  footer?: string | null
 }
 
 /** Every list in this app is paginated — assume years of sales. (CLAUDE.md §4) */
@@ -605,6 +690,14 @@ export const SaleReceiptInput = z.object({
   isDuplicate: z.boolean().default(true)
 })
 
+/**
+ * PRINT THE QUOTATION — the offer, on paper, in the customer's hand.
+ *
+ * No `isDuplicate`: re-printing an OFFER is not re-printing a receipt. There is no sale to double-count
+ * and no money to be claimed twice, so there is nothing to stamp. (See `QuotationData`.)
+ */
+export const SaleQuotationInput = z.object({ id: RowId })
+
 // ── Inferred input types ─────────────────────────────────────────────────────
 
 export type OpenItemInput = z.infer<typeof OpenItemInput>
@@ -620,3 +713,4 @@ export type SaleGetInput = z.infer<typeof SaleGetInput>
 export type SaleByInvoiceNoInput = z.infer<typeof SaleByInvoiceNoInput>
 export type SaleListInput = z.infer<typeof SaleListInput>
 export type SaleReceiptInput = z.infer<typeof SaleReceiptInput>
+export type SaleQuotationInput = z.infer<typeof SaleQuotationInput>

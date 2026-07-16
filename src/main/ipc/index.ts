@@ -35,6 +35,7 @@ import {
   OutstandingCreditInput,
   OpenDrawerInput,
   PrintReceiptInput,
+  PrintQuotationInput,
   ReturnableLinesInput,
   CustomerDeactivateInput,
   CustomerBalanceInput,
@@ -65,6 +66,7 @@ import {
   SaleByInvoiceNoInput,
   SaleGetInput,
   SaleListInput,
+  SaleQuotationInput,
   SaveQuoteInput,
   VoidSaleInput,
   type SaleDetail,
@@ -411,6 +413,36 @@ async function printSaleReceipt(
       printerName: null,
       problem:
         'The sale is saved, but the receipt could not be prepared. Please try printing it again from the sales list.'
+    }
+  }
+}
+
+/**
+ * Build the QUOTATION from the DATABASE and print it. Never throws — same contract as the receipt above,
+ * and for a gentler reason: nothing is at stake but paper. No money has been taken and no number drawn.
+ *
+ * `quotationFor()` REFUSES anything that is not a quote — a completed sale gets a receipt, not an offer
+ * with a validity date stapled to money the shop has already banked. That check lives in the service, so
+ * the paper and the refusal come from the same call.
+ */
+async function printSaleQuotation(
+  db: ReturnType<typeof getDb>,
+  actor: Parameters<typeof salesService.quotationFor>[1],
+  saleId: number
+): Promise<PrintOutcome> {
+  try {
+    const quotation = salesService.quotationFor(db, actor, { id: saleId })
+    return await printer.printQuotation(quotation, printOptions(db))
+  } catch (error) {
+    const technical = error instanceof Error ? error.message : String(error)
+    log.error(`[printer] could not build the quotation for sale ${saleId}: ${technical}`)
+
+    return {
+      printed: false,
+      copies: 0,
+      printerName: null,
+      problem:
+        'The quotation is saved, but it could not be prepared for printing. Please try again from the Quotations list.'
     }
   }
 }
@@ -1737,6 +1769,23 @@ export function registerIpcHandlers(): void {
     return salesService.outstandingCredit(getDb(), input.customerId)
   })
 
+  /**
+   * THE OFFER, AS DATA. A READ — no assertWritable().
+   *
+   * Nothing about it changes the books: a quote draws no number, moves no stock and posts no journal, so
+   * there is nothing for read-only mode to protect. An expired shop showing a customer a quote it already
+   * saved is the export §6 explicitly keeps working; refusing it would hold their own offer hostage.
+   *
+   * `sale.create` — the CASHIER's gate, matching `sale:get`, which this is the quote-shaped twin of. The
+   * cashier who saved the quote is the one standing in front of the customer asking for it back.
+   *
+   * The service refuses anything that is not a quote. That check is in MAIN, not here and not in the UI.
+   */
+  handle(IPC.saleQuotation, SaleQuotationInput, (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    return salesService.quotationFor(getDb(), user, input)
+  })
+
   // ═══════════════════════════════════════════════════════════════════════════
   // RETURNS — goods coming BACK, and the money that goes back with them
   //
@@ -1839,6 +1888,32 @@ export function registerIpcHandlers(): void {
     // PrintReceiptInput. The only original is the one sale:complete prints as it creates the sale.
     return printSaleReceipt(getDb(), user, input.id, true)
   })
+
+  /**
+   * PRINT THE QUOTATION FOR A QUOTE — the thing a quote could not do before.
+   *
+   * IT TAKES A SALE ID, NOT A QUOTATION, exactly as printReceipt does: main reads the quote from the
+   * database and builds the paper from the frozen lines. A tampered renderer cannot print its own prices
+   * on the shop's paper and call it the shop's offer.
+   *
+   * NO assertWritable(), for the same reason the receipt reprint has none — and less is at stake here
+   * than there. Handing a customer a quote takes no money, moves no stock and posts no journal; it is an
+   * export of something the shop already saved. (See the block comment above.)
+   *
+   * NOT AUDITED, and that is deliberate. A reprint is logged because "print it again" is how ONE SALE'S
+   * receipt reaches two customers' hands — there is a number and money behind it to be double-claimed.
+   * An offer has neither. Printing it twice is a shopkeeper handing out a second price list.
+   *
+   * `printed: false` is not an error. The quote is saved regardless; the screen offers Print again.
+   */
+  handle<PrintQuotationInput, PrintOutcome>(
+    IPC.printQuotation,
+    PrintQuotationInput,
+    async (input) => {
+      const user = session.requirePermissionOf('sale.create')
+      return printSaleQuotation(getDb(), user, input.id)
+    }
+  )
 
   /**
    * OPENING THE TILL WITH NO SALE BEHIND IT.

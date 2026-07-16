@@ -1346,6 +1346,459 @@ describe('holding a cart', () => {
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
+// HOW LONG A QUOTATION HOLDS — valid_until (migration 0015)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE INVARIANT THE DATABASE CANNOT ENFORCE:
+ *
+ *     valid_until IS NOT NULL   ⟺   status = 'quote'
+ *
+ * SQLite cannot ALTER-TABLE a table CHECK on, so the SERVICE owns it (saveQuote sets it, hold and
+ * complete clear it) — which means a test has to be the thing that proves it. This one runs over EVERY
+ * sale in the database, not just the row the test was thinking about.
+ */
+function assertOnlyQuotesExpire(t: TestDb): void {
+  const rows = t.db.prepare('SELECT id, status, valid_until FROM sales').all() as Array<{
+    id: number
+    status: string
+    valid_until: string | null
+  }>
+
+  for (const row of rows) {
+    if (row.status === 'quote') {
+      expect(row.valid_until, `sale ${row.id}: a QUOTE with no expiry — the offer never lapses`).not.toBeNull()
+    } else {
+      expect(
+        row.valid_until,
+        `sale ${row.id}: a ${row.status} sale carrying an offer's expiry date`
+      ).toBeNull()
+    }
+  }
+}
+
+describe('how long a quotation holds', () => {
+  /** The quote tray and the printed document read this straight off the row. */
+  const validUntilOf = (id: number): string | null =>
+    t.db.prepare('SELECT valid_until FROM sales WHERE id = ?').pluck().get(id) as string | null
+
+  it("dates the offer from the shop's own setting, not a constant in the code", () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    // The registry default is 7 days. Saved on the 4th of March -> good until the 11th.
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+
+    expect(quote.validUntil).toBe('2026-03-11')
+    expect(validUntilOf(quote.id)).toBe('2026-03-11') // it is on the ROW, not just the return value
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('honours a CHANGED setting — one shop honours a price for a week, the next for a month', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    settings.set(t.db, 'selling.quoteValidDays', 30)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+
+    // 30 days from 4 March 2026 — across a month boundary, which is exactly where naive date maths
+    // ("month + 1") goes wrong.
+    expect(quote.validUntil).toBe('2026-04-03')
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('RE-SAVING a quote re-dates it — the offer is being made again, today', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const first = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+    expect(first.validUntil).toBe('2026-03-11')
+
+    // The customer came back a week later and asked for the same price on more of it. The cart is
+    // RE-PRICED on the way through, so carrying the old deadline forward would staple today's price to
+    // last week's expiry.
+    const again = sales.saveQuote(
+      t.db,
+      cashier,
+      { saleId: first.id, lines: [{ productId, qtyM: 3 * ONE_UNIT }] },
+      new Date(2026, 2, 11, 9, 0)
+    )
+
+    expect(again.id).toBe(first.id) // the same document, updated in place
+    expect(again.validUntil).toBe('2026-03-18') // RE-DATED from the new day
+    expect(sales.listHeld(t.db, 'quote')).toHaveLength(1) // not two
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('a HELD cart has NO expiry — a parked cart is not an offer', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const held = sales.hold(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+
+    // Nobody was promised anything: the customer is still in the shop, and complete() re-prices it.
+    expect(held.validUntil).toBeNull()
+    expect(validUntilOf(held.id)).toBeNull()
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('CONVERTING the quote to a sale CLEARS the expiry — money changed hands', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: 2 * ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+    expect(quote.validUntil).toBe('2026-03-11')
+
+    const { sale } = sales.complete(t.db, cashier, {
+      saleId: quote.id,
+      lines: sales.toCartLines(quote),
+      payments: [{ methodLookupId: cash(), amount: 20_000 }]
+    })
+
+    // The SAME row (PLAN.md §2) — so the expiry has to be cleared rather than left behind. An invoice
+    // with a use-by date on it is nonsense, and the quote tray's partial index (migration 0015) would
+    // otherwise go on treating this completed sale as a live quote: invoiced once, still waiting to be
+    // rung up again.
+    expect(sale.id).toBe(quote.id)
+    expect(sale.status).toBe('completed')
+    expect(sale.validUntil).toBeNull()
+    expect(validUntilOf(sale.id)).toBeNull()
+
+    // The tray is empty, and the index agrees there is nothing live.
+    expect(sales.listHeld(t.db, 'quote')).toHaveLength(0)
+    expect(
+      t.db
+        .prepare("SELECT COUNT(*) FROM sales WHERE status = 'quote' AND valid_until IS NOT NULL")
+        .pluck()
+        .get()
+    ).toBe(0)
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('the invariant holds across hold -> quote -> complete on one document', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    // Parked: no offer, no expiry.
+    const held = sales.hold(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+    expect(held.validUntil).toBeNull()
+    assertOnlyQuotesExpire(t)
+
+    // The customer asked for it in writing — the same cart becomes an OFFER, and gains a deadline.
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { saleId: held.id, lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+    expect(quote.id).toBe(held.id)
+    expect(quote.status).toBe('quote')
+    expect(quote.validUntil).toBe('2026-03-11')
+    assertOnlyQuotesExpire(t)
+
+    // They accepted. The offer becomes the sale, and the deadline goes.
+    const { sale } = sales.complete(t.db, cashier, {
+      saleId: quote.id,
+      lines: sales.toCartLines(quote),
+      payments: [{ methodLookupId: cash(), amount: 10_000 }]
+    })
+    expect(sale.id).toBe(held.id)
+    expect(sale.validUntil).toBeNull()
+    assertOnlyQuotesExpire(t)
+
+    everythingHolds(t, owner)
+  })
+
+  it('a quote going back to a HELD cart drops the expiry with the offer', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+    expect(quote.validUntil).toBe('2026-03-11')
+
+    // Re-parking the same document as a plain held cart withdraws the offer — so the date must go with
+    // it, or a held cart sits there carrying an expiry for a promise that no longer exists.
+    const held = sales.hold(t.db, cashier, {
+      saleId: quote.id,
+      lines: [{ productId, qtyM: ONE_UNIT }]
+    })
+
+    expect(held.id).toBe(quote.id)
+    expect(held.status).toBe('held')
+    expect(held.validUntil).toBeNull()
+
+    assertOnlyQuotesExpire(t)
+    everythingHolds(t, owner)
+  })
+
+  it('the sales LIST carries the date — the quote tray reads it without loading every line', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+
+    const [row] = sales.listHeld(t.db, 'quote')
+    expect(row!.id).toBe(quote.id)
+    expect(row!.validUntil).toBe('2026-03-11')
+
+    everythingHolds(t, owner)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// THE QUOTATION DOCUMENT — and the receipt path that must refuse a quote
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('printing a quotation', () => {
+  it('prints the lines, the totals and the date the price stops holding', () => {
+    const productId = makeProduct({ name: 'Rice', retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { customerId: makeCustomer('Imran'), lines: [{ productId, qtyM: 2 * ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+
+    const doc = sales.quotationFor(t.db, cashier, quote.id, new Date(2026, 2, 6, 9, 0))
+
+    expect(doc.quoteId).toBe(quote.id)
+    expect(doc.customerName).toBe('Imran')
+    expect(doc.cashierName).toBe(cashier.fullName)
+    expect(doc.shop.name).toBe(settings.get(t.db, 'shop.name', ''))
+
+    expect(doc.lines).toHaveLength(1)
+    expect(doc.lines[0]!.name).toBe('Rice')
+    expect(doc.lines[0]!.qtyM).toBe(2 * ONE_UNIT)
+    expect(doc.lines[0]!.unitPrice).toBe(RS_100)
+
+    // THE PAPER ADDS UP, exactly as the receipt's does.
+    expect(doc.subtotalNet - doc.cartDiscount + doc.taxTotal).toBe(doc.grandTotal)
+    expect(doc.grandTotal).toBe(quote.grandTotal)
+    expect(doc.taxSummary[0]!.taxRateBp).toBe(GST)
+
+    // The offer, and how long it holds.
+    expect(doc.validUntil).toBe('2026-03-11')
+    expect(doc.isExpired).toBe(false)
+
+    everythingHolds(t, owner)
+  })
+
+  it('says so plainly when the offer has lapsed — and still prints it', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(
+      t.db,
+      cashier,
+      { lines: [{ productId, qtyM: ONE_UNIT }] },
+      new Date(2026, 2, 4, 10, 30)
+    )
+
+    // The last day it holds — an offer good "until the 11th" is good for ALL of the 11th.
+    expect(sales.quotationFor(t.db, cashier, quote.id, new Date(2026, 2, 11, 23, 0)).isExpired).toBe(
+      false
+    )
+
+    // The day after. Nothing is BLOCKED: an expired quote is a conversation with the customer, not a
+    // lock the till should enforce. The paper simply says so.
+    const lapsed = sales.quotationFor(t.db, cashier, quote.id, new Date(2026, 2, 12, 9, 0))
+    expect(lapsed.isExpired).toBe(true)
+    expect(lapsed.grandTotal).toBe(quote.grandTotal) // it still prints the price that was promised
+
+    everythingHolds(t, owner)
+  })
+
+  it('a quotation is NOT a receipt — it carries no number, no payments, no change', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+    const doc = sales.quotationFor(t.db, cashier, quote.id)
+
+    // The fields that would let an offer masquerade as proof of payment are not on the type, and must
+    // not appear at runtime either.
+    const asRecord = doc as unknown as Record<string, unknown>
+    expect(asRecord['invoiceNo']).toBeUndefined()
+    expect(asRecord['payments']).toBeUndefined()
+    expect(asRecord['changeDue']).toBeUndefined()
+    expect(asRecord['isDuplicate']).toBeUndefined()
+
+    everythingHolds(t, owner)
+  })
+
+  it('REFUSES a completed sale — history gets a receipt, not an offer', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 10_000 }]
+    })
+
+    expectUserMessage(() => sales.quotationFor(t.db, cashier, sale.id), /not a quotation/)
+    everythingHolds(t, owner)
+  })
+
+  it('REFUSES a held cart — nobody has been offered anything', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const held = sales.hold(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+
+    expectUserMessage(() => sales.quotationFor(t.db, cashier, held.id), /not a quotation/)
+    everythingHolds(t, owner)
+  })
+
+  /**
+   * THE BUG THIS WHOLE GUARD EXISTS FOR.
+   *
+   * ReceiptData.invoiceNo is a plain string, and a quote has no number — so buildReceipt substituted
+   * "(not issued yet)" and printed a document whose every other word (the totals, the tax table, the
+   * shop's NTN) says SALE. The customer walks out holding what reads as a tax invoice for a sale that
+   * has not happened, against stock that has not moved and a journal that has not posted.
+   */
+  it('the RECEIPT path refuses a quote — it would print as a sale that never happened', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const quote = sales.saveQuote(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+
+    expectUserMessage(
+      () => sales.receiptFor(t.db, cashier, { id: quote.id }),
+      /No money has changed hands yet — print a quotation instead\./
+    )
+
+    // And it did not quietly log a reprint of a sale that never happened.
+    expect(auditRows('sale.reprint')).toHaveLength(0)
+
+    everythingHolds(t, owner)
+  })
+
+  it('the RECEIPT path refuses a held cart too', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const held = sales.hold(t.db, cashier, { lines: [{ productId, qtyM: ONE_UNIT }] })
+
+    expectUserMessage(
+      () => sales.receiptFor(t.db, cashier, { id: held.id }),
+      /no money has changed hands yet/i
+    )
+    expect(auditRows('sale.reprint')).toHaveLength(0)
+
+    everythingHolds(t, owner)
+  })
+
+  /** A void is HISTORY — money DID change hands, and it keeps its number forever. It still reprints. */
+  it('a VOIDED sale still reprints as a receipt', () => {
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 10_000 }]
+    })
+    sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'wrong_item' })
+
+    const receipt = sales.receiptFor(t.db, supervisor, { id: sale.id })
+    expect(receipt.invoiceNo).toBe(sale.invoiceNo)
+
+    everythingHolds(t, owner)
+  })
+
+  /**
+   * A quote and the sale it becomes are the SAME cart, and the customer holds both pieces of paper. A
+   * pack line is where they would drift: the line stores 24000 base units and PRICED as one carton.
+   */
+  it('the quotation and the receipt agree — same lines, same money, one implementation', () => {
+    const productId = makeProduct({ name: 'Cola', retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 100 * ONE_UNIT)
+
+    catalog.savePack(t.db, {
+      productId,
+      uomId: lookupId('uom', 'carton'),
+      packSize: 24 * ONE_UNIT, // a carton holds 24 pieces
+      retailPrice: 200_000, // priced in its own right
+      barcode: 'QUOTE-CARTON-24'
+    })
+    const scanned = sales.scanBarcode(t.db, 'QUOTE-CARTON-24')!
+
+    const quote = sales.saveQuote(t.db, cashier, {
+      lines: [{ productId, packId: scanned.packId, qtyM: scanned.qtyM }],
+      cartDiscount: 5_000
+    })
+
+    const doc = sales.quotationFor(t.db, cashier, quote.id)
+
+    const { sale, receipt } = sales.complete(t.db, cashier, {
+      saleId: quote.id,
+      lines: sales.toCartLines(quote),
+      cartDiscount: 5_000,
+      payments: [{ methodLookupId: cash(), amount: quote.grandTotal }]
+    })
+
+    expect(sale.id).toBe(quote.id) // the same document throughout
+
+    // A CARTON on the offer is a CARTON on the receipt — not 24 pieces at 1/24th the price.
+    expect(doc.lines[0]!.qtyM).toBe(receipt.lines[0]!.qtyM)
+    expect(doc.lines[0]!.qtyM).toBe(ONE_UNIT)
+    expect(doc.lines[0]!.unitPrice).toBe(receipt.lines[0]!.unitPrice)
+
+    // And the cart discount is apportioned identically — the figure the customer was promised is the
+    // figure they are charged, to the paisa.
+    expect(doc.subtotalNet).toBe(receipt.subtotalNet)
+    expect(doc.cartDiscount).toBe(receipt.cartDiscount)
+    expect(doc.taxTotal).toBe(receipt.taxTotal)
+    expect(doc.grandTotal).toBe(receipt.grandTotal)
+
+    everythingHolds(t, owner)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
 // VOID
 // ═════════════════════════════════════════════════════════════════════════════
 

@@ -325,6 +325,14 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
 
 ## 7. Deferred, deliberately
 
+- **Printed dates ignore the shop's country — they use the MACHINE's locale** (found while eyeballing the
+  quotation, medium; PRE-EXISTING and app-wide, not new). `shop.country` defaults to PK and its help says
+  it "sets the default tax rate and the date format", but **nothing reads a date format**: the receipt
+  (`new Date(data.at).toLocaleString()`) and the quotation (`toLocaleDateString()`) both take whatever the
+  OS locale is — so a Pakistani shop's paper currently prints **7/22/2026** (US m/d/y) instead of
+  22/07/2026. Ambiguous dates on a customer-facing offer are exactly where this bites. Fix with the
+  timezone work below: derive a date format from `shop.country` (or add an explicit `shop.dateFormat`) and
+  route EVERY printed/exported date through one formatter. Phase 10.
 - **Report date bucketing uses UTC, not the shop's local day** (reports audit, medium). A report's
   from/to/as-of are compared against UTC timestamps, so a sale in the local midnight–05:00 window (for
   PKT, UTC+5) can land on the neighbouring calendar day. For a shop that does not trade those hours the

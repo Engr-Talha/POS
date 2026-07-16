@@ -232,7 +232,8 @@ const api: PosApi = {
     list: (input) => ipcRenderer.invoke(IPC.saleList, input),
     get: (input) => ipcRenderer.invoke(IPC.saleGet, input),
     getByInvoiceNo: (input) => ipcRenderer.invoke(IPC.saleGetByInvoiceNo, input),
-    outstandingCredit: (input) => ipcRenderer.invoke(IPC.saleOutstandingCredit, input)
+    outstandingCredit: (input) => ipcRenderer.invoke(IPC.saleOutstandingCredit, input),
+    quotation: (input) => ipcRenderer.invoke(IPC.saleQuotation, input)
   },
 
   // RETURNS — the inverse of a sale. Look at what a return line CANNOT carry across this line: net,
@@ -246,11 +247,14 @@ const api: PosApi = {
     get: (input) => ipcRenderer.invoke(IPC.returnsGet, input)
   },
 
-  // The printer and the cash drawer. `printReceipt` takes a SALE ID — the renderer cannot hand main a
-  // receipt to print, because a renderer that could would be able to print a receipt for a sale that
-  // never happened. Main reads the sale from the database and builds the paper itself.
+  // The printer and the cash drawer. `printReceipt` and `printQuotation` BOTH take a SALE ID — the
+  // renderer cannot hand main a document to print, because a renderer that could would be able to print
+  // a receipt for a sale that never happened, or an "offer" at prices the shop never gave. Main reads the
+  // row from the database and builds the paper itself. They are two channels because they are two
+  // documents: main refuses to print a quote as a receipt, or a completed sale as an offer.
   printing: {
     printReceipt: (input) => ipcRenderer.invoke(IPC.printReceipt, input),
+    printQuotation: (input) => ipcRenderer.invoke(IPC.printQuotation, input),
     openDrawer: (input) => ipcRenderer.invoke(IPC.printOpenDrawer, input),
     listPrinters: () => ipcRenderer.invoke(IPC.printListPrinters)
   },

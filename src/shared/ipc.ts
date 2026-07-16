@@ -211,6 +211,16 @@ export const IPC = {
   saleGetByInvoiceNo: 'sale:getByInvoiceNo',
   saleOutstandingCredit: 'sale:outstandingCredit',
 
+  /**
+   * THE OFFER, AS DATA — for a screen that wants to show a quote before it prints one.
+   *
+   * A READ. It draws no number, moves no stock and posts no journal, because a quote has done none of
+   * those things. It REFUSES anything that is not a quote: a completed sale gets a RECEIPT, and printing
+   * history as an "offer" with a validity date on money the shop has already banked says something
+   * untrue. (services/sales.ts, quotationFor.)
+   */
+  saleQuotation: 'sale:quotation',
+
   // ── RETURNS — goods coming BACK, and the money that goes back with them ─────
   //
   // The inverse of a sale, and it obeys the same rules. THE RENDERER SENDS INTENT, MAIN DECIDES THE
@@ -231,6 +241,20 @@ export const IPC = {
   // the paper itself. Handing the renderer a "print this ReceiptData" endpoint would let a tampered
   // renderer print a receipt for a sale that never happened, with any total it liked.
   printReceipt: 'printing:printReceipt',
+  /**
+   * THE QUOTATION, ON PAPER — a SALE ID in, exactly as printReceipt takes one, and for exactly the same
+   * reason: main reads the quote from the database and builds the paper itself.
+   *
+   * A SEPARATE CHANNEL FROM printReceipt, not a flag on it. The two documents are two documents (see
+   * printing/quotation.ts): a receipt is proof money changed hands, a quotation is an offer with nothing
+   * paid. One channel behind an `isQuote` boolean is how a quote ends up printing as a receipt with a
+   * blank invoice number, which is the exact bug this feature exists to close. Main refuses to print a
+   * non-quote here, and refuses to print a quote as a receipt over there.
+   *
+   * No `isDuplicate`: re-printing an OFFER is not re-printing a receipt. There is no sale to double-count
+   * and no money to claim twice, so there is nothing to stamp and nothing to audit.
+   */
+  printQuotation: 'printing:printQuotation',
   printOpenDrawer: 'printing:openDrawer',
   printListPrinters: 'printing:listPrinters',
 
@@ -700,6 +724,19 @@ export const OutstandingCreditInput = z.object({ customerId: RowId })
 export const PrintReceiptInput = z.object({ id: RowId })
 
 /**
+ * PRINT THE QUOTATION FOR A QUOTE — the offer, in the customer's hand.
+ *
+ * A SALE ID, and nothing else, for the same reason PrintReceiptInput takes one: main reads the document
+ * out of the database and builds the paper itself. A "print this QuotationData" endpoint would let a
+ * tampered renderer print any prices it liked on the shop's own paper and call it the shop's offer.
+ *
+ * NO `isDuplicate`, and unlike the receipt's that is not a security decision — there is simply nothing to
+ * stamp. A reprinted OFFER is not a second receipt: no money has been taken, no number has been drawn,
+ * and there is nothing to double-count. (See QuotationData in shared/sales.ts.)
+ */
+export const PrintQuotationInput = z.object({ id: RowId })
+
+/**
  * OPENING THE TILL WITH NO SALE — a classic theft vector, and the reason this input exists at all.
  *
  * The reason code is REQUIRED, and MAIN checks it against the ACTIVE rows of the `no_sale_reason`
@@ -958,6 +995,7 @@ export type CartRemoveLineInput = z.infer<typeof CartRemoveLineInput>
 export type ListHeldInput = z.infer<typeof ListHeldInput>
 export type OutstandingCreditInput = z.infer<typeof OutstandingCreditInput>
 export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
+export type PrintQuotationInput = z.infer<typeof PrintQuotationInput>
 export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
 export type ReturnableLinesInput = z.infer<typeof ReturnableLinesInput>
 export type CustomerDeactivateInput = z.infer<typeof CustomerDeactivateInput>

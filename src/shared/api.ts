@@ -38,6 +38,7 @@ import type {
   OutstandingCreditInput,
   OpenDrawerInput,
   PrintReceiptInput,
+  PrintQuotationInput,
   ReturnableLinesInput,
   CompleteSaleResponse,
   PrintOutcome,
@@ -64,6 +65,8 @@ import type {
   SaleLineInput,
   SaleListInput,
   SaleListItem,
+  SaleQuotationInput,
+  QuotationData,
   SaveQuoteInput,
   VoidSaleInput
 } from './sales'
@@ -687,6 +690,15 @@ export interface PosApi {
     getByInvoiceNo: (input: SaleByInvoiceNoInput) => Promise<Result<SaleDetail>>
 
     /**
+     * THE OFFER, AS DATA — the quote-shaped twin of `get`, for a screen that wants to show a quotation
+     * before it prints one. A read: no number, no stock, no journal.
+     *
+     * It REFUSES anything that is not a quote. A completed sale gets a RECEIPT — an "offer" with a
+     * validity date on money the shop has already banked is a document that says something untrue.
+     */
+    quotation: (input: SaleQuotationInput) => Promise<Result<QuotationData>>
+
+    /**
      * What this customer already owes — read BEFORE taking a credit sale, so the cashier can see the
      * udhaar before adding to it. What happens when they are over their limit is the SETTING
      * `selling.creditLimit` (warn or block), enforced in MAIN.
@@ -747,6 +759,18 @@ export interface PosApi {
      * `printed: false` is not an error. It means the paper did not come out; the sale is untouched.
      */
     printReceipt: (input: PrintReceiptInput) => Promise<Result<PrintOutcome>>
+
+    /**
+     * Print the QUOTATION for a quote — the offer, in the customer's hand.
+     *
+     * A DIFFERENT DOCUMENT FROM A RECEIPT, which is why it is a different call: it prints QUOTATION, its
+     * validity date and "no payment has been received", and it carries no invoice number because a quote
+     * has none. Main refuses to print a non-quote here.
+     *
+     * Not stamped and not audited: a reprinted OFFER is not a second receipt — there is no money and no
+     * number to double-claim. `printed: false` is not an error; the quote is saved either way.
+     */
+    printQuotation: (input: PrintQuotationInput) => Promise<Result<PrintOutcome>>
 
     /**
      * A NO-SALE DRAWER OPEN — opening the till with no sale behind it.

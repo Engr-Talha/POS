@@ -4,9 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReceiptData, ReceiptWidth } from '@shared/receipt'
+import type { QuotationData } from '@shared/sales'
 import type { DrawerOutcome, PrintOutcome, PrinterInfo } from '@shared/ipc'
 import { AppError, ErrorCode } from '@shared/result'
 import { renderReceiptHtml } from './receipt'
+import { renderQuotationHtml } from './quotation'
 import log from '../logger'
 
 /**
@@ -183,6 +185,50 @@ export async function printReceipt(
       printerName,
       problem:
         'The sale is saved, but the receipt did not print. Check the printer is switched on, has paper, and is connected — then print it again.'
+    }
+  }
+}
+
+/**
+ * PRINT A QUOTATION — the offer, on the same thermal paper, from the same settings. NEVER THROWS.
+ *
+ * It is its own function for the same reason `renderQuotationHtml` is its own template: a quote and a
+ * receipt are two documents, and a shared function behind an `isQuote` flag is one forgotten `if` away
+ * from printing a blank invoice number on a document the customer reads as a bill.
+ *
+ * WHAT IS AT STAKE HERE IS LESS THAN A RECEIPT, AND THE RULE STILL HOLDS. No money has been taken and no
+ * number drawn, so a jam costs nothing but paper — but the caller is still told in a sentence rather than
+ * an exception, so the quote-saved toast can offer "Print again" exactly as the sale's does. Failing
+ * loudly here would be a red box over a cart the cashier has already parked safely.
+ */
+export async function printQuotation(
+  data: QuotationData,
+  options: PrintReceiptOptions
+): Promise<PrintOutcome> {
+  const copies = clampCopies(options.copies)
+  const deviceName = options.printerName.trim()
+  const printerName = deviceName === '' ? null : deviceName
+
+  try {
+    const html = renderQuotationHtml(data, options.width)
+    await printHtml(html, { deviceName, copies })
+
+    log.info(
+      `[printer] quotation #${data.quoteId} printed x${copies} on ` +
+        `${printerName ?? 'the system default printer'}`
+    )
+
+    return { printed: true, copies, printerName, problem: null }
+  } catch (error) {
+    const technical = error instanceof Error ? error.message : String(error)
+    log.error(`[printer] quotation #${data.quoteId} DID NOT PRINT: ${technical}`)
+
+    return {
+      printed: false,
+      copies: 0,
+      printerName,
+      problem:
+        'The quotation is saved, but it did not print. Check the printer is switched on, has paper, and is connected — then print it again from the Quotations list.'
     }
   }
 }

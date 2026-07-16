@@ -68,13 +68,29 @@ async function main() {
   mkdirSync(OUT, { recursive: true })
 
   // Built from the compiled main bundle so the preview is the SAME code the app prints with.
-  const { renderReceiptHtml } = require('../out/main/receipt-preview.js')
-  const { sampleReceipt } = require('../out/main/receipt-preview.js')
+  const {
+    renderReceiptHtml,
+    sampleReceipt,
+    renderQuotationHtml,
+    sampleQuotation
+  } = require('../out/main/receipt-preview.js')
 
   console.log('Rendering receipts...')
   await render('receipt-80mm', renderReceiptHtml(sampleReceipt(false), '80mm'), 80)
   await render('receipt-58mm', renderReceiptHtml(sampleReceipt(false), '58mm'), 58)
   await render('receipt-80mm-duplicate', renderReceiptHtml(sampleReceipt(true), '80mm'), 80)
+
+  // THE QUOTATION — a different document, and it gets looked at on both widths and in both states.
+  // The expired one especially: an EXPIRED stamp that overlaps the total is a document the shop
+  // cannot hand anybody, and no test string can tell me that.
+  console.log('Rendering quotations...')
+  await render('quotation-80mm', renderQuotationHtml(sampleQuotation(), '80mm'), 80)
+  await render('quotation-58mm', renderQuotationHtml(sampleQuotation(), '58mm'), 58)
+  await render(
+    'quotation-80mm-expired',
+    renderQuotationHtml(sampleQuotation({ isExpired: true }), '80mm'),
+    80
+  )
 
   app.quit()
 }

@@ -21,12 +21,14 @@ import {
   SaleByInvoiceNoInput,
   SaleGetInput,
   SaleListInput,
+  SaleQuotationInput,
   SaleReceiptInput,
   SaveQuoteInput,
   VoidSaleInput,
   formatInvoiceNo,
   type PagedResult,
   type PriceTier,
+  type QuotationData,
   type Sale,
   type SaleDetail,
   type SaleLine,
@@ -1066,9 +1068,42 @@ export function hold(db: DB, actor: User, raw: unknown, now = new Date()): SaleD
 /**
  * A QUOTATION — a price the shop offered, which may never become a sale. Like a held cart it takes no
  * number, moves no stock and posts no journal (PLAN.md §2). It draws a number only if it is completed.
+ *
+ * AND IT HAS A SHELF LIFE. A price with no expiry is a promise the shop cannot keep: quote a carton at
+ * today's cost, the distributor raises it next month, and the customer walks in waving a six-month-old
+ * slip. `valid_until` is TODAY + the shop's own `selling.quoteValidDays` — a setting, because one shop
+ * honours a price for a week and the next for a month (CLAUDE.md §4).
+ *
+ * RE-SAVING AN EXISTING QUOTE RE-DATES IT. The offer is being made AGAIN, today, at today's prices —
+ * `park()` re-prices the cart on the way through, so carrying the old expiry forward would staple
+ * today's price to last month's deadline.
  */
 export function saveQuote(db: DB, actor: User, raw: unknown, now = new Date()): SaleDetail {
   return park(db, actor, parseOrThrow(SaveQuoteInput, raw, 'sale.quote'), 'quote', now)
+}
+
+/**
+ * THE DAY A QUOTE SAVED *NOW* STOPS HOLDING — ISO 'YYYY-MM-DD'.
+ *
+ * A DAY, not an instant: an offer good "until the 14th" is good for all of the 14th. Computed off the
+ * quote's own date in LOCAL time, because "seven days" means seven days to the shopkeeper standing at
+ * the till, not seven days in UTC — near midnight those are different dates, and the one the customer
+ * reads off the paper is the local one.
+ */
+function quoteValidUntil(db: DB, now: Date): string {
+  const days = setting<number>(db, 'selling.quoteValidDays')
+
+  // Date-only arithmetic, so a DST shift cannot land this an hour short and lose a day.
+  const expiry = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days)
+
+  return toIsoDate(expiry)
+}
+
+/** A local Date -> ISO 'YYYY-MM-DD'. Never toISOString(), which would silently shift to UTC. */
+function toIsoDate(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
 }
 
 function park(
@@ -1097,7 +1132,13 @@ function park(
       priced,
       paidTotal: 0,
       changeDue: 0,
-      hadNegativeStock: false
+      hadNegativeStock: false,
+      // THE INVARIANT, one half of it: valid_until is non-NULL IFF status = 'quote'. A QUOTE gets a
+      // fresh expiry every time it is saved (re-saving RE-DATES: the offer is being made again today);
+      // a HELD cart gets NULL, because a parked cart is not an offer — nobody was promised anything,
+      // the customer is still in the shop, and complete() re-prices it anyway. The other half is in
+      // complete(), which clears it. SQLite cannot CHECK this via ALTER TABLE (migration 0015).
+      validUntil: status === 'quote' ? quoteValidUntil(db, now) : null
     })
 
     insertLines(db, saleId, priced, now)
@@ -1314,7 +1355,15 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
       priced,
       paidTotal,
       changeDue,
-      hadNegativeStock
+      hadNegativeStock,
+      // THE OTHER HALF OF THE INVARIANT: valid_until is non-NULL IFF status = 'quote'.
+      //
+      // This CLEARS it — and it has to, because a quote becomes the sale IN THE SAME ROW (PLAN.md §2).
+      // Money has changed hands; the offer's deadline is meaningless on an invoice, and a completed
+      // sale still carrying one would keep matching the quote tray's partial index (migration 0015) —
+      // the customer would be invoiced and the quote would still be sitting there, live, waiting to be
+      // rung up a second time.
+      validUntil: null
     })
 
     insertLines(db, saleId, priced, now)
@@ -2053,6 +2102,18 @@ type WriteSaleArgs = {
   paidTotal: number
   changeDue: number
   hadNegativeStock: boolean
+
+  /**
+   * THE OFFER'S EXPIRY — ISO 'YYYY-MM-DD' on a quote, NULL on everything else. (Migration 0015.)
+   *
+   * NOT optional, deliberately. Every caller must SAY which it is, because the one that matters is the
+   * one that clears it: `complete()` converts the quote row IN PLACE, so a field left off here would
+   * silently carry the offer's expiry onto a completed sale — an invoice with a use-by date on it, and
+   * a row the quote tray's partial index would go on treating as a live quote. Making it explicit is
+   * what makes the invariant (valid_until non-NULL IFF status='quote') a thing the type checker asks
+   * about at every call site, rather than a thing the next reader has to remember.
+   */
+  validUntil: string | null
 }
 
 /** Write the sale — converting the parked cart it came from, if there was one. */
@@ -2078,6 +2139,8 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
     paidTotal: args.paidTotal,
     changeDue: args.changeDue,
     hadNegativeStock: args.hadNegativeStock ? 1 : 0,
+    // Non-NULL only on a quote — and CLEARED here when that same row becomes the sale. (Migration 0015.)
+    validUntil: args.validUntil,
     // The OPEN shift this sale belongs to, or NULL if the till is not on a shift (migration 0012). A
     // leaf lookup (shift-id.ts) so recording the shift cannot form a sales↔shifts import cycle. Runs
     // inside the caller's transaction, so a resumed cart is stamped with the shift it is COMPLETED on.
@@ -2095,7 +2158,8 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
          at = @at, customer_id = @customerId, user_id = @userId, price_tier = @priceTier,
          status = @status, subtotal_net = @subtotalNet, cart_discount = @cartDiscount,
          tax_total = @taxTotal, grand_total = @grandTotal, paid_total = @paidTotal,
-         change_due = @changeDue, had_negative_stock = @hadNegativeStock, shift_id = @shiftId
+         change_due = @changeDue, had_negative_stock = @hadNegativeStock, shift_id = @shiftId,
+         valid_until = @validUntil
        WHERE id = @id`
     ).run({ ...values, id: args.parkedId })
 
@@ -2108,11 +2172,11 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
         `INSERT INTO sales
            (invoice_no, invoice_seq, invoice_year, at, customer_id, user_id, price_tier, status,
             subtotal_net, cart_discount, tax_total, grand_total, paid_total, change_due,
-            had_negative_stock, shift_id, created_at)
+            had_negative_stock, shift_id, valid_until, created_at)
          VALUES
            (@invoiceNo, @invoiceSeq, @invoiceYear, @at, @customerId, @userId, @priceTier, @status,
             @subtotalNet, @cartDiscount, @taxTotal, @grandTotal, @paidTotal, @changeDue,
-            @hadNegativeStock, @shiftId, @createdAt)`
+            @hadNegativeStock, @shiftId, @validUntil, @createdAt)`
       )
       .run({ ...values, createdAt: new Date().toISOString() }).lastInsertRowid
   )
@@ -2492,6 +2556,8 @@ type SaleRow = {
   voided_by: number | null
   voided_at: string | null
   exchange_group_id: number | null
+  /** ISO 'YYYY-MM-DD'. Non-NULL only on a quote (migration 0015). */
+  valid_until: string | null
   created_at: string
 }
 
@@ -2517,6 +2583,10 @@ function toSale(row: SaleRow): Sale {
     voidedByUserId: row.voided_by,
     voidedAt: row.voided_at,
     exchangeGroupId: row.exchange_group_id,
+    // A pre-0015 row has no column value at all; every existing row is NULL, which is true — they were
+    // quoted before the shop had a validity policy, and no quote is retroactively given a life it never
+    // had. `?? null` so an older DB read through a newer build cannot hand `undefined` to the renderer.
+    validUntil: row.valid_until ?? null,
     createdAt: row.created_at
   }
 }
@@ -2747,7 +2817,7 @@ export function list(db: DB, raw: unknown = {}): PagedResult<SaleListItem> {
   const rows = db
     .prepare(
       `SELECT s.id, s.invoice_no, s.at, s.status, s.grand_total, s.paid_total, s.price_tier,
-              s.had_negative_stock, s.customer_id, s.user_id,
+              s.had_negative_stock, s.customer_id, s.user_id, s.valid_until,
               c.name      AS customer_name,
               u.full_name AS cashier_name,
               (SELECT COUNT(*) FROM sale_lines l WHERE l.sale_id = s.id) AS line_count
@@ -2769,6 +2839,7 @@ export function list(db: DB, raw: unknown = {}): PagedResult<SaleListItem> {
     had_negative_stock: number
     customer_id: number | null
     user_id: number
+    valid_until: string | null
     customer_name: string | null
     cashier_name: string | null
     line_count: number
@@ -2789,6 +2860,9 @@ export function list(db: DB, raw: unknown = {}): PagedResult<SaleListItem> {
       hadNegativeStock: Boolean(row.had_negative_stock),
       customerId: row.customer_id,
       userId: row.user_id,
+      // What the quote tray is for: "which of my open quotes are about to lapse". NULL on every other
+      // row in this list, and `?? null` for the same reason toSale() does it — a pre-0015 database.
+      validUntil: row.valid_until ?? null,
       customerName: row.customer_name,
       cashierName: row.cashier_name,
       lineCount: row.line_count
@@ -2808,6 +2882,26 @@ export function list(db: DB, raw: unknown = {}): PagedResult<SaleListItem> {
 export function receiptFor(db: DB, actor: User, raw: unknown, now = new Date()): ReceiptData {
   const input = parseOrThrow(SaleReceiptInput, raw, 'sale.receipt')
   const sale = getById(db, input.id)
+
+  // A RECEIPT IS PROOF THAT MONEY CHANGED HANDS. A quote and a held cart are neither.
+  //
+  // Without this, a quote printed as a receipt: `buildReceipt` substitutes "(not issued yet)" for the
+  // invoice number a quote does not have, and every other word on the paper — the totals, the tax
+  // table, the shop's NTN — says SALE. The customer is handed something that reads as a tax invoice
+  // for a sale that has not happened, against stock that has not moved and a journal that has not
+  // posted. A quote has its OWN document; that is what quotationFor() is.
+  //
+  // A VOIDED sale still reprints, exactly as before: it is history — money DID change hands, and it
+  // keeps its number forever (see voidSale). Only the two pre-money states are refused.
+  if (sale.status === 'quote' || sale.status === 'held') {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      sale.status === 'quote'
+        ? 'No money has changed hands yet — print a quotation instead.'
+        : 'This cart is still parked — no money has changed hands yet, so there is no receipt to print.',
+      `sale ${sale.id} has status "${sale.status}"; a receipt requires a completed or voided sale`
+    )
+  }
 
   if (input.isDuplicate) {
     audit.record(
@@ -2854,6 +2948,65 @@ export function receiptFor(db: DB, actor: User, raw: unknown, now = new Date()):
  * the customer bought ONE CARTON at the carton's price, and that is what the paper says.
  */
 function buildReceipt(db: DB, sale: SaleDetail, isDuplicate: boolean): ReceiptData {
+  const { shop, lines, money: totals } = buildDocumentBody(db, sale)
+
+  return {
+    shop,
+
+    invoiceNo: sale.invoiceNo ?? '(not issued yet)',
+    at: sale.at,
+    cashierName: sale.cashierName ?? '',
+    customerName: sale.customerName ?? null,
+
+    lines,
+
+    // Ex-tax, and it reconciles: subtotalNet − cartDiscount + taxTotal === grandTotal.
+    subtotalNet: totals.subtotalNet,
+    cartDiscount: totals.cartDiscount,
+    taxTotal: totals.taxTotal,
+    grandTotal: totals.grandTotal,
+
+    taxSummary: totals.taxSummary,
+    payments: sale.payments.map(
+      (payment): ReceiptPayment => ({
+        method: sale.paymentMethodLabels?.[payment.methodLookupId] ?? 'Payment',
+        amount: payment.amount,
+        reference: payment.chequeNo ?? payment.walletRef ?? null
+      })
+    ),
+    changeDue: sale.changeDue,
+
+    currencySymbol: setting<string>(db, 'currency.symbol'),
+    isDuplicate
+  }
+}
+
+/**
+ * THE BODY BOTH PRINTED DOCUMENTS SHARE — the shop's letterhead, the lines, and the money.
+ *
+ * A quotation and the receipt for the sale it becomes are the SAME cart, and the customer holds both.
+ * If the quote said "1 carton @ 1,200.00" and the receipt said "24 pcs @ 50.00", or if the two split a
+ * cart discount even a paisa differently, the shop is arguing with its own paper.
+ *
+ * So there is ONE implementation of pricedQty and ONE of the cart-discount apportionment, here, and the
+ * two documents differ ONLY in what is honestly different about them: a receipt has an invoice number,
+ * payments and change; a quotation has an expiry date. Same reasoning as `extendPrice` living in
+ * shared/pricing.ts — two implementations of one piece of arithmetic WILL eventually disagree.
+ */
+function buildDocumentBody(
+  db: DB,
+  sale: SaleDetail
+): {
+  shop: ReceiptData['shop']
+  lines: ReceiptLine[]
+  money: {
+    subtotalNet: number
+    cartDiscount: number
+    taxTotal: number
+    grandTotal: number
+    taxSummary: ReceiptTaxSummaryRow[]
+  }
+} {
   const lines: ReceiptLine[] = sale.lines.map((line) => ({
     name: line.nameSnapshot,
     nameOtherLang: line.nameOtherLang,
@@ -2877,32 +3030,92 @@ function buildReceipt(db: DB, sale: SaleDetail, isDuplicate: boolean): ReceiptDa
       phone: setting<string>(db, 'shop.phone') || null,
       taxNumber: setting<string>(db, 'shop.taxNumber') || null
     },
+    lines,
+    money: {
+      // Ex-tax, and it reconciles: subtotalNet − cartDiscount + taxTotal === grandTotal.
+      subtotalNet: sale.subtotalNet + cartDiscountNet,
+      cartDiscount: cartDiscountNet,
+      taxTotal: sale.taxTotal,
+      grandTotal: sale.grandTotal,
+      taxSummary: summariseTax(sale.lines)
+    }
+  }
+}
 
-    invoiceNo: sale.invoiceNo ?? '(not issued yet)',
+/**
+ * THE QUOTATION — the offer, on paper, in the customer's hand. THE THING A QUOTE COULD NOT DO BEFORE.
+ *
+ * A quotation is NOT a receipt and must never be mistakable for one (see `QuotationData`): it carries no
+ * invoice number, no payments and no change, because none of those things exist yet. What it carries
+ * that a receipt cannot is the date the price stops holding.
+ *
+ * IT REFUSES ANYTHING THAT IS NOT A QUOTE. A completed sale gets a RECEIPT — printing history as an
+ * "offer", with a validity date on money the shop has already banked, is a document that says something
+ * untrue. The refusal is the mirror of the one in receiptFor(), and between them the two documents
+ * cannot be swapped.
+ *
+ * NOTHING IS BLOCKED BY EXPIRY — `isExpired` is stated plainly on the paper and that is all. An expired
+ * quote is a conversation with the customer ("this price was good until the 14th"), not a lock the till
+ * should enforce; the shopkeeper decides whether to honour it. (Migration 0015.)
+ *
+ * `actor` IS UNUSED TODAY, AND IT IS STILL IN THE SIGNATURE. It mirrors receiptFor(), which needs an
+ * actor because a REPRINT is audit-logged — "print it again" is how one sale's receipt reaches two
+ * customers' hands. Reprinting an OFFER is not that: there is no sale, no money and no number, so there
+ * is nothing to double-count and nothing to log. If that judgement is ever revisited, the caller already
+ * passes the WHO, and it does not become an IPC/preload/renderer change to add the audit row.
+ */
+export function quotationFor(db: DB, actor: User, rawId: unknown, now = new Date()): QuotationData {
+  const input = parseOrThrow(
+    SaleQuotationInput,
+    typeof rawId === 'number' ? { id: rawId } : rawId,
+    'sale.quotation'
+  )
+  const sale = getById(db, input.id)
+
+  if (sale.status !== 'quote') {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      'That is not a quotation.',
+      `sale ${sale.id} has status "${sale.status}"; only a quote prints as a quotation`
+    )
+  }
+
+  // The service's own invariant: a quote ALWAYS has an expiry (saveQuote sets it). A quote without one
+  // is a row that predates migration 0015 or was written by hand — so the document says so, out loud,
+  // rather than printing an empty line where the deadline goes.
+  if (sale.validUntil == null) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      'This quotation has no expiry date. Please save it again to give it one.',
+      `sale ${sale.id} is a quote with valid_until = NULL (pre-0015 row?)`
+    )
+  }
+
+  const { shop, lines, money: totals } = buildDocumentBody(db, sale)
+
+  return {
+    shop,
+
+    quoteId: sale.id, // the DOCUMENT id — NOT an invoice number. A quote has none, by design.
     at: sale.at,
     cashierName: sale.cashierName ?? '',
     customerName: sale.customerName ?? null,
 
+    validUntil: sale.validUntil,
+    // A DAY-to-DAY comparison of two ISO 'YYYY-MM-DD' strings, which sorts lexicographically — and the
+    // offer is good for ALL of its last day, so it expires only once TODAY is strictly past it.
+    isExpired: sale.validUntil < toIsoDate(now),
+
     lines,
 
-    // Ex-tax, and it reconciles: subtotalNet − cartDiscount + taxTotal === grandTotal.
-    subtotalNet: sale.subtotalNet + cartDiscountNet,
-    cartDiscount: cartDiscountNet,
-    taxTotal: sale.taxTotal,
-    grandTotal: sale.grandTotal,
+    subtotalNet: totals.subtotalNet,
+    cartDiscount: totals.cartDiscount,
+    taxTotal: totals.taxTotal,
+    grandTotal: totals.grandTotal,
 
-    taxSummary: summariseTax(sale.lines),
-    payments: sale.payments.map(
-      (payment): ReceiptPayment => ({
-        method: sale.paymentMethodLabels?.[payment.methodLookupId] ?? 'Payment',
-        amount: payment.amount,
-        reference: payment.chequeNo ?? payment.walletRef ?? null
-      })
-    ),
-    changeDue: sale.changeDue,
+    taxSummary: totals.taxSummary,
 
-    currencySymbol: setting<string>(db, 'currency.symbol'),
-    isDuplicate
+    currencySymbol: setting<string>(db, 'currency.symbol')
   }
 }
 

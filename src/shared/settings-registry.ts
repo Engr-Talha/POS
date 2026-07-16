@@ -258,6 +258,16 @@ export const SETTINGS: SettingDef[] = [
     group: 'selling'
   },
   {
+    key: 'selling.quoteValidDays',
+    type: 'number',
+    default: 7,
+    label: 'A quotation is valid for (days)',
+    help: 'How long a quoted price holds. The date is printed on the quotation and shown in the quote tray. Nothing is blocked when it lapses — an old quote is a conversation with the customer, not something the till should refuse.',
+    group: 'selling',
+    min: 1,
+    max: 365
+  },
+  {
     key: 'selling.creditLimit',
     type: 'select',
     default: 'warn',

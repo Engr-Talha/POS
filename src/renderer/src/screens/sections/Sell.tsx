@@ -186,6 +186,34 @@ function roleAtLeast(role: Role, required: Role): boolean {
   return ROLE_RANK[role] >= needed
 }
 
+/**
+ * An ISO DAY ('YYYY-MM-DD') as the shopkeeper reads it — never a raw ISO string.
+ *
+ * PARSED AS A LOCAL DAY, DELIBERATELY. `new Date('2026-07-22')` parses as UTC midnight, which west of
+ * Greenwich prints as the 21st: the quote would appear to lapse a day early, on the screen, next to the
+ * paper that says otherwise. The parts are split and a LOCAL date is built instead — the same reasoning,
+ * and the same fix, as `formatValidUntil` in printing/quotation.ts. A `valid_until` is a DAY, not an
+ * instant, so it is never fed to a formatter that assumes a timestamp.
+ */
+function formatDay(iso: string): string {
+  const [year, month, day] = iso.split('-').map(Number)
+  if (!year || !month || !day) return iso // not a date we recognise: show it as it is, never a blank
+  return new Date(year, month - 1, day).toLocaleDateString()
+}
+
+/**
+ * HAS THE OFFER LAPSED? A DAY-to-DAY comparison, matching the service's own (`quotationFor`).
+ *
+ * Two ISO days sort lexicographically, so no Date is built at all — and the quote is good for ALL of its
+ * last day, so it is expired only once today is STRICTLY past it. Nothing is blocked by this: an expired
+ * quote is still resumable, because honouring it is the shopkeeper's call, not the till's.
+ */
+function isExpiredDay(iso: string, today: Date = new Date()): boolean {
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  return iso < `${today.getFullYear()}-${month}-${day}`
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The screen
 // ═════════════════════════════════════════════════════════════════════════════
@@ -611,6 +639,39 @@ export function Sell({
     [resumedSaleId, customer, tier, cartDiscount, cartDiscountReason]
   )
 
+  /**
+   * PRINT THE OFFER for the customer to take away. Main reads the quote from the database and builds the
+   * paper — this hands it an id, never a document (see PosApi.printing).
+   *
+   * A failed print is NOT an error here, exactly as it is not on a completed sale: the quote is saved, so
+   * the cashier gets a warning and another go, never a red box over a cart they already parked safely.
+   */
+  const printQuotation = useCallback(
+    async (saleId: number): Promise<void> => {
+      const result = await window.pos.printing.printQuotation({ id: saleId })
+      if (!result.ok) {
+        fail('Could not print the quotation', result.error.userMessage)
+        return
+      }
+      if (!result.data.printed) {
+        notifications.show({
+          color: 'orange',
+          icon: <Printer size={18} />,
+          title: 'The quotation did not print',
+          message: result.data.problem ?? 'It did not come out. The quote is still saved.'
+        })
+        return
+      }
+      notifications.show({
+        color: 'teal',
+        icon: <Printer size={18} />,
+        title: 'Quotation printed',
+        message: 'Hand it to the customer.'
+      })
+    },
+    [fail]
+  )
+
   const park = useCallback(
     async (as: 'held' | 'quote'): Promise<void> => {
       if (cartRef.current.length === 0) return
@@ -630,20 +691,54 @@ export function Sell({
         return
       }
 
-      notifications.show({
-        color: 'teal',
-        icon: <CircleCheck size={18} />,
-        title: as === 'held' ? 'Sale held' : 'Quote saved',
-        message:
-          as === 'held'
-            ? 'The cart is parked. Press F6 to pick it back up.'
-            : 'The quote is saved. It takes an invoice number only if it is rung up.'
-      })
+      if (as === 'held') {
+        notifications.show({
+          color: 'teal',
+          icon: <CircleCheck size={18} />,
+          title: 'Sale held',
+          message: 'The cart is parked. Press F6 to pick it back up.'
+        })
+      } else {
+        // THE OFFER NOW HAS A DEADLINE, AND THE CASHIER IS TOLD IT. `valid_until` comes back on the saved
+        // row (main set it from `selling.quoteValidDays`) — it is never recomputed here, or the toast
+        // could promise a date the paper does not carry.
+        const saleId = result.data.id
+        const validUntil = result.data.validUntil
+
+        notifications.show({
+          color: 'teal',
+          icon: <CircleCheck size={18} />,
+          title: 'Quote saved',
+          // THIS TOAST CARRIES A BUTTON, so it does not vanish on the 4-second default while the cashier
+          // is still reading the date. A print action that disappears before it can be clicked is not a
+          // way to print — and the quote is always reprintable from the F6 tray regardless.
+          autoClose: 12_000,
+          // The date is the point of the message, so it leads. It takes an invoice number only if rung up.
+          message: (
+            <Stack gap={8} align="flex-start">
+              <Text size="sm">
+                {validUntil == null
+                  ? 'It takes an invoice number only if it is rung up.'
+                  : `Valid until ${formatDay(validUntil)}. It takes an invoice number only if it is rung up.`}
+              </Text>
+              {/* The offer is no use in the till — it has to go home with the customer. */}
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<Printer size={14} />}
+                onClick={() => void printQuotation(saleId)}
+              >
+                Print quotation
+              </Button>
+            </Stack>
+          )
+        })
+      }
 
       clearSale()
       refocus()
     },
-    [cartPayload, fail, clearSale, refocus]
+    [cartPayload, fail, clearSale, refocus, printQuotation]
   )
 
   const pickCustomer = useCallback(async (next: Customer | null): Promise<void> => {
@@ -1451,6 +1546,7 @@ export function Sell({
           money={money}
           onClose={() => setModal(null)}
           onResume={(id) => void resume(id)}
+          onPrintQuotation={printQuotation}
         />
       )}
 
@@ -2405,11 +2501,14 @@ function NewCustomerModal({
 function HeldModal({
   money,
   onClose,
-  onResume
+  onResume,
+  onPrintQuotation
 }: {
   money: (minor: number) => string
   onClose: () => void
   onResume: (id: number) => void
+  /** Print the offer for the customer. Only a quote row has one — a held cart offered nothing. */
+  onPrintQuotation: (id: number) => Promise<void>
 }): React.JSX.Element {
   const [status, setStatus] = useState<'held' | 'quote'>('held')
   const [rows, setRows] = useState<SaleListItem[] | null>(null)
@@ -2477,20 +2576,53 @@ function HeldModal({
               <Card withBorder padding="sm" key={row.id}>
                 <Group justify="space-between" wrap="nowrap">
                   <Stack gap={0}>
-                    <Text size="sm" fw={600}>
-                      {row.customerName ?? 'Walk-in'} — {money(row.grandTotal)}
-                    </Text>
+                    <Group gap={6} wrap="nowrap">
+                      <Text size="sm" fw={600}>
+                        {row.customerName ?? 'Walk-in'} — {money(row.grandTotal)}
+                      </Text>
+                      {/* THE OFFER HAS LAPSED — said plainly, and that is ALL it does. The row still
+                          resumes: whether to honour an old price is the shopkeeper's call to make with
+                          the customer standing there, not something the till decides for them. */}
+                      {row.validUntil != null && isExpiredDay(row.validUntil) && (
+                        <Badge size="sm" color="orange" variant="light">
+                          Expired
+                        </Badge>
+                      )}
+                    </Group>
                     <Text size="xs" c="dimmed">
                       {new Date(row.at).toLocaleString()}
                       {row.lineCount != null && ` · ${row.lineCount} lines`}
                       {row.cashierName != null && ` · ${row.cashierName}`}
                     </Text>
+                    {/* The one thing a held cart has no concept of: how long the price holds. */}
+                    {row.validUntil != null && (
+                      <Text size="xs" c={isExpiredDay(row.validUntil) ? 'orange' : 'dimmed'}>
+                        Valid until {formatDay(row.validUntil)}
+                      </Text>
+                    )}
                   </Stack>
 
                   <Group gap={6} wrap="nowrap">
                     <Button size="xs" leftSection={<Play size={14} />} onClick={() => onResume(row.id)}>
                       Resume
                     </Button>
+                    {/* "Can I have that quote again?" is the reason a customer sends someone back to the
+                        shop, so the offer can be reprinted without resuming the cart to get at it. A
+                        held cart has nothing to print: nothing was offered and nothing was paid.
+                        Keyed off the TRAY's status, not off validUntil — a pre-0015 quote has no date and
+                        main refuses to print it, and that refusal should reach the cashier as the sentence
+                        the service wrote ("save it again to give it one"), not as a missing button. */}
+                    {status === 'quote' && (
+                      <Tooltip label="Print this quotation for the customer">
+                        <ActionIcon
+                          variant="subtle"
+                          aria-label="Print this quotation"
+                          onClick={() => void onPrintQuotation(row.id)}
+                        >
+                          <Printer size={16} />
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
                     <Tooltip label="Throw this cart away">
                       <ActionIcon
                         variant="subtle"
