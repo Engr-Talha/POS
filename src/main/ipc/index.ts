@@ -63,6 +63,7 @@ import {
   CompleteSaleInput,
   DiscardSaleInput,
   HoldSaleInput,
+  PreviewPromotionsInput,
   ResumeSaleInput,
   SaleByInvoiceNoInput,
   SaleGetInput,
@@ -131,6 +132,16 @@ import {
 import { CreateExpenseInput, ListExpensesInput, GetExpenseInput } from '@shared/expenses'
 import { AdjustPointsInput, LoyaltyBalanceInput, LoyaltyHistoryInput } from '@shared/loyalty'
 import {
+  CreatePromotionInput,
+  DeactivatePromotionInput,
+  GetPromotionInput,
+  ListPromotionRulesInput,
+  ListPromotionsInput,
+  SetPromotionRulesInput,
+  UpdatePromotionInput,
+  type PromotionDetail
+} from '@shared/promotions'
+import {
   CreateProductInput,
   UpdateProductInput,
   ProductListInput,
@@ -185,6 +196,7 @@ import * as purchaseReturnsService from '../services/purchase-returns'
 import * as shiftsService from '../services/shifts'
 import * as expensesService from '../services/expenses'
 import * as loyaltyService from '../services/loyalty'
+import * as promotionsService from '../services/promotions'
 import * as printer from '../printing/printer'
 import * as reportsService from '../services/reports'
 import { reportToXlsxBuffer } from '../services/reports-excel'
@@ -1676,6 +1688,18 @@ export function registerIpcHandlers(): void {
     return salesService.removeLine(input.cart, input.index)
   })
 
+  // WHICH OF THE SHOP'S OWN OFFERS WOULD FIRE ON THIS CART, AND WHAT THEY WOULD GIVE (migration 0018).
+  //
+  // A LOOK, NOT A SALE — it writes nothing, so no assertWritable(): a cashier at an expired shop may
+  // still build a cart and see its offers, they simply cannot ring it up (CLAUDE.md §6). MAIN computes
+  // the discount through the very same `priceCart` that freezes the sale, and `sale:complete` resolves
+  // the offers AGAIN for itself when the money is actually taken. The renderer never computes a
+  // promotion discount — one that could would be one that could sell at any price it liked.
+  handle(IPC.salePreviewPromotions, PreviewPromotionsInput, (input) => {
+    const user = session.requirePermissionOf('sale.create')
+    return salesService.previewPromotions(getDb(), user, input)
+  })
+
   // ── Hold, quote, resume, discard ───────────────────────────────────────────
 
   handle(IPC.saleHold, HoldSaleInput, (input) => {
@@ -2230,5 +2254,85 @@ export function registerIpcHandlers(): void {
     // ('loyalty.adjust') from inside it, and enforces the reason code against the owner's own live
     // lookups list — do not log a second row here.
     return loyaltyService.adjustPoints(getDb(), user, input)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // PROMOTIONS (migration 0018) — the shop's OWN offers, applied automatically at the till
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // A PROMOTION IS A LINE DISCOUNT. It invents no new money, no journal leg and no money column: the
+  // engine computes a discount, sales.ts writes it into the `line_discount` that has existed since
+  // migration 0007, and it travels the road already proven (priceCart re-resolves tax on what is
+  // ACTUALLY paid → DR Discounts Given 4200 → frozen onto the line, so a RETURN refunds what was
+  // really charged).
+  //
+  // THERE IS NO 'apply' HANDLER, ON PURPOSE — the same reasoning as loyalty's missing earn/redeem. An
+  // offer is resolved inside `sale:complete`, in MAIN, against the offers live at the sale's own
+  // instant, and frozen in that sale's ONE transaction. A renderer that could name its own promotion
+  // discount could sell at any price it liked.
+  //
+  // THE SERVICES AUDIT THEMSELVES ('promotion.create' / 'promotion.update' / 'promotion.deactivate')
+  // from inside their own transactions — do NOT log a second row here (see ipc/audit-contract.test.ts).
+  //
+  // PERMISSIONS (rbac.ts) — an offer is a standing decision to sell below the shelf price, so writing
+  // one is a manager's job; READING one is a cashier's, because the till must be able to tell the
+  // customer WHY the price changed:
+  //   promotion.manage   create / edit / switch off / set what it applies to  (WRITES — assertWritable)
+  //   promotion.view     read the offers                                      (reads — NO assertWritable:
+  //                                                                            an expired shop still
+  //                                                                            reads its own books,
+  //                                                                            CLAUDE.md §6)
+
+  handle(IPC.promotionCreate, CreatePromotionInput, (input) => {
+    const user = session.requirePermissionOf('promotion.manage')
+    assertWritable()
+    return promotionsService.createPromotion(getDb(), user, input)
+  })
+
+  handle(IPC.promotionUpdate, UpdatePromotionInput, (input) => {
+    const user = session.requirePermissionOf('promotion.manage')
+    assertWritable()
+    return promotionsService.updatePromotion(getDb(), user, input)
+  })
+
+  handle(IPC.promotionDeactivate, DeactivatePromotionInput, (input) => {
+    const user = session.requirePermissionOf('promotion.manage')
+    assertWritable()
+    // An offer is switched OFF, never deleted: last March's sales must still explain themselves.
+    return promotionsService.deactivatePromotion(getDb(), user, input)
+  })
+
+  handle(IPC.promotionSetRules, SetPromotionRulesInput, (input) => {
+    const user = session.requirePermissionOf('promotion.manage')
+    assertWritable()
+    // WHAT an offer applies to is as much a part of it as its percentage — changing it from "one tin"
+    // to "everything" is the single most expensive edit here, and the service audits it as an update.
+    return promotionsService.setRules(getDb(), user, input)
+  })
+
+  handle(IPC.promotionList, ListPromotionsInput, (input) => {
+    session.requirePermissionOf('promotion.view')
+    return promotionsService.listPromotions(getDb(), input)
+  })
+
+  handle(IPC.promotionGet, GetPromotionInput, (input) => {
+    session.requirePermissionOf('promotion.view')
+    return promotionsService.getPromotion(getDb(), input)
+  })
+
+  handle(IPC.promotionRules, ListPromotionRulesInput, (input) => {
+    session.requirePermissionOf('promotion.view')
+    return promotionsService.listRules(getDb(), input)
+  })
+
+  // WHAT IS RUNNING RIGHT NOW — for the Sell screen's "why did the price change?" and the offers
+  // screen's "which of these is live today?".
+  //
+  // IT TAKES NO DATE. The clock is MAIN's (see shared/sales.ts) — a caller that could name the day
+  // could ask what Sunday's prices are on a Tuesday and show the customer a price the till will not
+  // honour. `activeFor` reads the offers live at THIS instant, which is the only day that can be sold.
+  handle<void, PromotionDetail[]>(IPC.promotionActive, null, () => {
+    session.requirePermissionOf('promotion.view')
+    return promotionsService.activeFor(getDb(), new Date())
   })
 }

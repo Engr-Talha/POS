@@ -221,7 +221,31 @@ export type SaleLine = {
    */
   serials: string[]
 
+  /**
+   * THE SHOP'S OWN OFFERS THAT DISCOUNTED THIS LINE, FROZEN — the name they had ON THE DAY and the money
+   * they gave. Empty for almost every line. (Migration 0018, `sale_line_promotions`.)
+   *
+   * A COMPONENT OF `lineDiscount` ABOVE, NEVER A SECOND SOURCE OF TRUTH. `lineDiscount` is the one figure
+   * the sale's own maths, its journal and a return all read; this is the WHY behind part of it — what
+   * lets the shop ask "what did that Sunday special actually cost me?" and lets the Sell screen tell the
+   * customer why the price changed.
+   *
+   * FROZEN means frozen: an offer later renamed, re-priced or switched off never rewrites what an old
+   * sale says it cost.
+   */
+  promotions: SaleLinePromotion[]
+
   createdAt: string
+}
+
+/** One offer's contribution to one line's discount, frozen at sale time. (Migration 0018.) */
+export type SaleLinePromotion = {
+  /** The offer it came from. It may since have been renamed, re-priced or switched off. */
+  promotionId: number
+  /** FROZEN: what the offer was CALLED on the day. What the receipt and the Sell screen show. */
+  name: string
+  /** FROZEN 2-dp money: what THIS offer took off THIS line. */
+  discountMinor: number
 }
 
 /**
@@ -587,6 +611,27 @@ export const HoldSaleInput = z.object(CartShape)
  */
 export const SaveQuoteInput = z.object(CartShape)
 
+/**
+ * WHICH OF THE SHOP'S OWN OFFERS WOULD FIRE ON THIS CART, RIGHT NOW — a look, not a sale.
+ * (Migration 0018.)
+ *
+ * The Sell screen asks this as the cashier scans, so it can show "Sunday special −Rs 20" on the line
+ * and the customer can be told why the price changed. IT IS ANSWERED BY THE SAME CODE THAT FREEZES THE
+ * SALE (`priceCart`), so the discount on the screen and the discount on the receipt cannot drift apart.
+ *
+ * NOTE WHAT IS ABSENT, and why:
+ *   cartDiscount   it is apportioned AFTER the promotions and changes none of them.
+ *   at             THE CLOCK IS MAIN'S (see the header). A caller that could name the day could ask
+ *                  what Sunday's prices are on a Tuesday and show a price the till will not honour.
+ *
+ * An EMPTY cart is legal here — the screen asks on every keystroke, including the one that empties it.
+ */
+export const PreviewPromotionsInput = z.object({
+  customerId: RowId.nullish(),
+  priceTier: z.enum(PRICE_TIERS).default('retail'),
+  lines: z.array(SaleLineInput)
+})
+
 /** Pick a parked cart or a quote back up. */
 export const ResumeSaleInput = z.object({ id: RowId })
 
@@ -739,6 +784,7 @@ export type SalePaymentInput = z.infer<typeof SalePaymentInput>
 export type HoldSaleInput = z.infer<typeof HoldSaleInput>
 export type SaveQuoteInput = z.infer<typeof SaveQuoteInput>
 export type ResumeSaleInput = z.infer<typeof ResumeSaleInput>
+export type PreviewPromotionsInput = z.infer<typeof PreviewPromotionsInput>
 export type DiscardSaleInput = z.infer<typeof DiscardSaleInput>
 export type CompleteSaleInput = z.infer<typeof CompleteSaleInput>
 export type VoidSaleInput = z.infer<typeof VoidSaleInput>

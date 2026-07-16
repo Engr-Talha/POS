@@ -4,6 +4,7 @@ import { makeTestDb, type TestDb } from '../db/testkit'
 import * as sales from './sales'
 import * as stock from './stock'
 import * as catalog from './catalog'
+import * as promotions from './promotions'
 import * as settings from './settings'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
@@ -166,7 +167,13 @@ function expectPreviewMatchesTheSale(
   infos: Map<string, LineInfo>,
   cartDiscount = 0
 ): void {
-  const preview = priceCart(cart, infos, cartDiscount, taxDefaults())
+  // THE SCREEN ASKS MAIN WHICH OFFERS FIRE, and draws the answer — it never works one out for itself
+  // (migration 0018). So the preview here is fed exactly what the Sell screen feeds it: main's own
+  // `previewPromotions`. On a cart with no offers this is a list of nulls and nothing changes, which is
+  // why every existing test above still passes through it unaltered.
+  const linePromotions = sales.previewPromotions(t.db, cashier, { lines: cart, priceTier: 'retail' })
+
+  const preview = priceCart(cart, infos, cartDiscount, taxDefaults(), linePromotions)
 
   const { sale } = sales.complete(t.db, cashier, {
     lines: cart,
@@ -463,5 +470,151 @@ describe('what the shop does not have', () => {
       { qtyM: 99 * ONE_UNIT, lineDiscount: 0, openItem: { name: 'Misc', unitPrice: 50_00 } }
     ]
     expect(findShortages(cart, infos)).toEqual([])
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// THE SHOP'S OWN OFFERS (migration 0018) — the screen still predicts the paper
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A PROMOTION IS A LINE DISCOUNT, and a line discount is the one thing this whole file exists to keep
+ * honest. The cashier reads "Sunday special −Rs 20" off the screen and the customer is charged for it;
+ * if those two numbers ever differ there is an argument at the counter that nobody can settle.
+ *
+ * The engine runs in MAIN and needs the catalog, so the screen cannot compute an offer — it ASKS
+ * (`previewPromotions`) and draws the answer. That makes the drift these tests hunt for a REAL
+ * possibility rather than a theoretical one: two different code paths (`applyPromotions` freezing the
+ * sale, `resolveLine` drawing it) now compose the same discount, and they must agree to the paisa on a
+ * weighed line, an inclusive-tax line, a stacked manual discount, and a cart discount on top.
+ */
+describe('the till predicts EXACTLY what main will charge — WITH the shop’s own offers', () => {
+  /** An offer on one product, live now. */
+  function offerOn(
+    productId: number,
+    offer: {
+      kind: 'percent_off' | 'amount_off' | 'buy_x_get_y' | 'fixed_price'
+      percentBp?: number
+      amountMinor?: number
+      buyQtyM?: number
+      getQtyM?: number
+    }
+  ): void {
+    const created = promotions.createPromotion(t.db, supervisor, {
+      name: 'Sunday special',
+      kind: offer.kind,
+      percentBp: offer.percentBp,
+      amountMinor: offer.amountMinor,
+      buyQtyM: offer.buyQtyM,
+      getQtyM: offer.getQtyM
+    })
+    promotions.setRules(t.db, supervisor, {
+      promotionId: created.id,
+      rules: [{ scope: 'product', targetId: productId }]
+    })
+  }
+
+  it('a percentage off', () => {
+    const id = makeProduct('A1')
+    offerOn(id, { kind: 'percent_off', percentBp: 1000 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'A1', { qtyM: 3 * ONE_UNIT })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  it('an amount off each unit', () => {
+    const id = makeProduct('A1')
+    offerOn(id, { kind: 'amount_off', amountMinor: 1_500 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'A1', { qtyM: 3 * ONE_UNIT })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  it('a fixed price', () => {
+    const id = makeProduct('A1')
+    offerOn(id, { kind: 'fixed_price', amountMinor: 7_500 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'A1', { qtyM: 3 * ONE_UNIT })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  it('buy 2 get 1 free — the free tin is rung at price with a 100% discount', () => {
+    const id = makeProduct('A1')
+    offerOn(id, { kind: 'buy_x_get_y', buyQtyM: 2 * ONE_UNIT, getQtyM: ONE_UNIT })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'A1', { qtyM: 3 * ONE_UNIT })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  /** A WEIGHED line: the offer is thousandths of a kg, and no float may appear anywhere in it. */
+  it('a weighed line — 1.234 kg at an offer price', () => {
+    const id = makeProduct('W1', { isWeighted: true, uom: 'kg', retailPrice: 320_00 })
+    offerOn(id, { kind: 'percent_off', percentBp: 1000 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'W1', { qtyM: 1234 })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  /**
+   * AN INCLUSIVE-PRICED LINE. This is the one that would catch a promotion discount measured in the
+   * wrong tax mode — the price already contains the tax, so the offer comes off a gross.
+   */
+  it('an inclusive-priced line', () => {
+    const id = makeProduct('I1', { priceEntryMode: 'inclusive' })
+    offerOn(id, { kind: 'percent_off', percentBp: 1000 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'I1', { qtyM: 3 * ONE_UNIT })]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  /** THE STACK: the cashier's own discount AND the offer, on one line. Main computes the offer on
+   *  what is LEFT; if the preview measured it on the shelf price the two would part company here. */
+  it('a cashier’s own discount AND an offer on the same line', () => {
+    const id = makeProduct('A1')
+    offerOn(id, { kind: 'percent_off', percentBp: 1000 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [
+      scanInto(infos, 'A1', { qtyM: 4 * ONE_UNIT, lineDiscount: 2_000, discountReasonCode: 'bulk' })
+    ]
+    expectPreviewMatchesTheSale(cart, infos)
+  })
+
+  /** AND a cart discount on top — apportioned AFTER the offers, over what is left, tax re-resolved. */
+  it('an offer, a line discount AND a cart discount that does not divide by three', () => {
+    const a = makeProduct('A1')
+    makeProduct('B1', { priceEntryMode: 'inclusive' })
+    makeProduct('C1', { retailPrice: 33_33 })
+    offerOn(a, { kind: 'percent_off', percentBp: 1000 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [
+      scanInto(infos, 'A1', { qtyM: 3 * ONE_UNIT, lineDiscount: 1_000, discountReasonCode: 'bulk' }),
+      scanInto(infos, 'B1', { qtyM: 2 * ONE_UNIT }),
+      scanInto(infos, 'C1', { qtyM: 3 * ONE_UNIT })
+    ]
+    expectPreviewMatchesTheSale(cart, infos, 10_000)
+  })
+
+  /** A mixed cart where only ONE line is promoted — the others must be untouched. */
+  it('only the promoted line is discounted', () => {
+    const a = makeProduct('A1')
+    makeProduct('B1')
+    offerOn(a, { kind: 'percent_off', percentBp: 2500 })
+
+    const infos = new Map<string, LineInfo>()
+    const cart = [scanInto(infos, 'A1', { qtyM: 2 * ONE_UNIT }), scanInto(infos, 'B1', { qtyM: 2 * ONE_UNIT })]
+
+    const linePromotions = sales.previewPromotions(t.db, cashier, { lines: cart, priceTier: 'retail' })
+    expect(linePromotions[0]).not.toBeNull()
+    expect(linePromotions[1], 'an unpromoted line must carry no offer').toBeNull()
+
+    expectPreviewMatchesTheSale(cart, infos)
   })
 })

@@ -230,6 +230,11 @@ const api: PosApi = {
     updateLine: (input) => ipcRenderer.invoke(IPC.saleUpdateLine, input),
     removeLine: (input) => ipcRenderer.invoke(IPC.saleRemoveLine, input),
 
+    // WHICH of the shop's own offers would fire on this cart, and WHAT they would give. A look, not a
+    // sale: MAIN computes it through the same code that freezes the sale, and `complete` resolves the
+    // offers again for itself when the money is actually taken.
+    previewPromotions: (input) => ipcRenderer.invoke(IPC.salePreviewPromotions, input),
+
     hold: (input) => ipcRenderer.invoke(IPC.saleHold, input),
     saveQuote: (input) => ipcRenderer.invoke(IPC.saleSaveQuote, input),
     resume: (input) => ipcRenderer.invoke(IPC.saleResume, input),
@@ -313,6 +318,23 @@ const api: PosApi = {
     balance: (input) => ipcRenderer.invoke(IPC.loyaltyBalance, input),
     history: (input) => ipcRenderer.invoke(IPC.loyaltyHistory, input),
     adjust: (input) => ipcRenderer.invoke(IPC.loyaltyAdjust, input)
+  },
+
+  // PROMOTIONS — the shop's own offers ("buy 2 get 1", "10% off Sunday"), applied automatically at the
+  // till. NO 'apply' HERE, on purpose: an offer is not something a renderer asks for. It is resolved
+  // inside `sale:complete`, in MAIN, against the offers live at the sale's own instant — a renderer that
+  // could name its own promotion discount could sell at any price it liked. `active` is a READ: it tells
+  // the Sell screen WHICH offers are running so it can say why a price changed, never what they are
+  // worth. The writes are gated 'promotion.manage' + assertWritable() in MAIN, not by this whitelist.
+  promotions: {
+    create: (input) => ipcRenderer.invoke(IPC.promotionCreate, input),
+    update: (input) => ipcRenderer.invoke(IPC.promotionUpdate, input),
+    deactivate: (input) => ipcRenderer.invoke(IPC.promotionDeactivate, input),
+    setRules: (input) => ipcRenderer.invoke(IPC.promotionSetRules, input),
+    list: (input) => ipcRenderer.invoke(IPC.promotionList, input),
+    get: (input) => ipcRenderer.invoke(IPC.promotionGet, input),
+    rules: (input) => ipcRenderer.invoke(IPC.promotionRules, input),
+    active: () => ipcRenderer.invoke(IPC.promotionActive)
   }
 }
 

@@ -59,6 +59,7 @@ import type {
   CompleteSaleInput,
   DiscardSaleInput,
   HoldSaleInput,
+  PreviewPromotionsInput,
   ResumeSaleInput,
   SaleByInvoiceNoInput,
   SaleDetail,
@@ -202,6 +203,19 @@ import type {
   LoyaltyHistoryInput,
   LoyaltyMovementRow
 } from './loyalty'
+import type {
+  CreatePromotionInput,
+  DeactivatePromotionInput,
+  GetPromotionInput,
+  LinePromotionResult,
+  ListPromotionRulesInput,
+  ListPromotionsInput,
+  PromotionDetail,
+  PromotionList,
+  PromotionRule,
+  SetPromotionRulesInput,
+  UpdatePromotionInput
+} from './promotions'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -698,6 +712,23 @@ export interface PosApi {
     removeLine: (input: CartRemoveLineInput) => Promise<Result<SaleLineInput[]>>
 
     /**
+     * WHICH of the shop's OWN offers would fire on this cart right now, and WHAT they would give — one
+     * answer per line, in the same order, null where no offer matched (which is most lines).
+     * (Migration 0018.)
+     *
+     * A LOOK, NOT A SALE. It writes nothing and decides nothing: `complete` resolves the offers again,
+     * for itself, at the instant the money is taken. The Sell screen reads this so it can show
+     * "Sunday special −Rs 20" on the line and the cashier can tell the customer why the price changed.
+     *
+     * MAIN COMPUTES THE DISCOUNT — through the very same `priceCart` that freezes the sale, which is
+     * what stops the number on the screen and the number on the receipt from drifting apart. It takes
+     * no date: the clock is main's.
+     */
+    previewPromotions: (
+      input: PreviewPromotionsInput
+    ) => Promise<Result<LinePromotionResult[]>>
+
+    /**
      * PARK THE CART — the customer went back for the milk, and the queue is moving.
      *
      * NO INVOICE NUMBER, no stock movement, no journal. Nothing has happened yet, and that is exactly
@@ -959,5 +990,60 @@ export interface PosApi {
      * enforced in MAIN.
      */
     adjust: (input: AdjustPointsInput) => Promise<Result<LoyaltyMovementRow>>
+  }
+
+  /**
+   * PROMOTIONS — the shop's OWN offers, applied automatically at the till (migration 0018).
+   *
+   * "Buy 2 get 1 free", "10% off Sunday", "Rs 50 off tea". A PROMOTION IS A LINE DISCOUNT: it invents
+   * no new money, no journal leg and no money column. The engine computes a discount, `sales.complete`
+   * writes it into the `line_discount` that has existed since migration 0007, and it travels the road
+   * already proven — tax re-resolved on what is ACTUALLY paid, DR Discounts Given (4200, contra-income),
+   * and frozen onto the line so a RETURN refunds what was really charged.
+   *
+   * THERE IS NO `apply`, AND THAT IS THE DESIGN — the same reasoning as loyalty's missing earn/redeem.
+   * An offer is resolved inside `sales.complete`, in MAIN, against the offers live at the sale's own
+   * instant. A renderer that could name its own promotion discount could sell at any price it liked.
+   *
+   * A cashier NEVER needs a supervisor's PIN to sell a promoted item: it is the shop's own standing
+   * offer, already authorised by the manager who created it, so it is not measured against the
+   * discount-approval threshold that guards a MANUAL discount. Enforced in MAIN (services/sales.ts).
+   *
+   * The writes are gated 'promotion.manage' (manager) + assertWritable(); the reads are
+   * 'promotion.view' (cashier) and keep working on an expired licence — an expired shop still reads its
+   * own books (CLAUDE.md §6). Permissions are enforced in MAIN, not by this interface.
+   */
+  promotions: {
+    /** Create an offer. It is ON immediately, and applies to NOTHING until `setRules`. Audited. */
+    create: (input: CreatePromotionInput) => Promise<Result<PromotionDetail>>
+    /**
+     * Edit an offer. Only the editable fields — `isActive` and the rules are deliberately absent, so an
+     * edit can never silently switch an offer back on or wipe what it applies to (trap #18). A change
+     * never rewrites history: old sales carry a FROZEN name and a FROZEN discount.
+     */
+    update: (input: UpdatePromotionInput) => Promise<Result<PromotionDetail>>
+    /** Switch an offer OFF. NEVER a delete — last March's sales must still explain themselves. */
+    deactivate: (input: DeactivatePromotionInput) => Promise<Result<PromotionDetail>>
+    /**
+     * Set WHAT an offer applies to — the whole set, replacing whatever was there. An EMPTY list is
+     * legal and means the offer fires on NOTHING: clearing the rules stops it dead rather than
+     * accidentally applying it shop-wide.
+     */
+    setRules: (input: SetPromotionRulesInput) => Promise<Result<PromotionRule[]>>
+    /**
+     * The offers list — paginated and indexed, ordered the way the engine resolves them (priority, then
+     * id), so the screen shows them in the order they would actually fire.
+     */
+    list: (input: ListPromotionsInput) => Promise<Result<PromotionList>>
+    /** ONE offer, with its rules. */
+    get: (input: GetPromotionInput) => Promise<Result<PromotionDetail>>
+    /** What ONE offer applies to. An empty list is the honest answer that it applies to nothing. */
+    rules: (input: ListPromotionRulesInput) => Promise<Result<PromotionRule[]>>
+    /**
+     * The offers running RIGHT NOW, with their rules — what the Sell screen reads to tell the customer
+     * WHY a price changed. It takes NO date: the clock is MAIN's, and today is the only day that can be
+     * sold. It reports which offers exist, never what a given line is worth — MAIN decides the money.
+     */
+    active: () => Promise<Result<PromotionDetail[]>>
   }
 }

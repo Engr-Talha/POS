@@ -84,6 +84,15 @@ export const PERMISSIONS = {
   'loyalty.adjust': 'owner',
   'loyalty.view': 'cashier',
 
+  // Promotions — an offer is a standing decision to sell at less than the shelf price, so RUNNING one
+  // is a manager's call, alongside products and purchases (§4 roles). It is not a supervisor's: a
+  // supervisor approves ONE discount, at the till, in front of the customer; a promotion discounts
+  // every matching line for as long as it runs, unattended. Creating, editing and switching one off are
+  // all `promotion.manage` and all audited — an offer that quietly went live is money leaving the shop.
+  // Reading them is a CASHIER's: the till must be able to show the customer why a line rang up cheaper.
+  'promotion.manage': 'manager',
+  'promotion.view': 'cashier',
+
   // Administration
   'user.manage': 'owner',
   'settings.manage': 'owner',

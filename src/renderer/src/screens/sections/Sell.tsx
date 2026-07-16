@@ -47,7 +47,8 @@ import {
   User,
   UserPlus,
   UserX,
-  X
+  X,
+  BadgePercent
 } from 'lucide-react'
 
 import type { Result } from '@shared/result'
@@ -60,6 +61,7 @@ import type { LoyaltyBalance } from '@shared/loyalty'
 import type { PriceTier, SaleLineInput, SaleListItem } from '@shared/sales'
 import type { TaxMode } from '@shared/tax'
 import { extendPrice } from '@shared/pricing'
+import type { LinePromotionResult } from '@shared/promotions'
 import type { CartMath, LineInfo, Shortage } from '@shared/sell-preview'
 import {
   EMPTY_CART,
@@ -267,6 +269,20 @@ export function Sell({
 
   const [infos, setInfos] = useState<Map<string, LineInfo>>(new Map())
   const [selected, setSelected] = useState<number | null>(null)
+
+  /**
+   * THE SHOP'S OWN OFFERS ON THIS CART, AS MAIN RESOLVED THEM — one entry per line, in the same order,
+   * null where no offer fired. (Migration 0018.)
+   *
+   * NEVER COMPUTED HERE. An offer is resolved against the catalog, in main, by the same `priceCart`
+   * that freezes the sale — so the discount the cashier reads off the screen is the one the customer
+   * is charged. A renderer that could name its own promotion discount could sell at any price it liked
+   * (shared/promotions.ts).
+   *
+   * Empty until the answer lands, which is the honest state: the cart draws with no offers on it, as it
+   * did before this feature existed, and `complete()` applies them regardless of what was ever shown.
+   */
+  const [linePromotions, setLinePromotions] = useState<LinePromotionResult[]>([])
 
   const [tier, setTier] = useState<PriceTier>('retail')
   const [cartDiscount, setCartDiscount] = useState(0)
@@ -531,10 +547,48 @@ export function Sell({
   // Derived: the totals, and what the shop does not have
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * ASK MAIN WHICH OFFERS FIRE ON THIS CART — as it changes, and never from anywhere else.
+   *
+   * TRAP #19: THIS EFFECT NEVER TOUCHES THE CART. It only ever calls `setLinePromotions`, so a stray
+   * re-run cannot empty a customer's basket. The cart is the one thing on this screen that changes only
+   * where a human did something.
+   *
+   * A STALE ANSWER MUST NEVER LAND ON A NEWER CART. The cashier scans faster than a round trip returns,
+   * and an answer for a 3-line cart applied to a 5-line one would put "Sunday special" on the wrong
+   * item. So each run tags itself and a superseded reply is dropped on arrival.
+   */
+  useEffect(() => {
+    if (cart.length === 0) {
+      setLinePromotions([])
+      return
+    }
+
+    let live = true
+
+    void window.pos.sales
+      .previewPromotions({
+        lines: cart,
+        priceTier: tier,
+        customerId: customer?.id ?? null
+      })
+      .then((result) => {
+        if (!live) return
+        // A failed preview is NOT an error the cashier can act on, and it is not a broken sale: the
+        // offers are applied by main when the sale is rung up regardless of what this screen drew. So
+        // it fails QUIET — no badge — rather than throwing a banner across a queue.
+        setLinePromotions(result.ok ? result.data : [])
+      })
+
+    return () => {
+      live = false
+    }
+  }, [cart, tier, customer])
+
   const math = useMemo((): CartMath | { error: string } => {
     if (settings == null) return EMPTY_CART
     try {
-      return priceCart(cart, infos, cartDiscount, settings)
+      return priceCart(cart, infos, cartDiscount, settings, linePromotions)
     } catch (error) {
       // `extendPrice` throws on an amount too large to record exactly. Better an honest banner than a
       // white screen with a queue in front of it.
@@ -543,7 +597,7 @@ export function Sell({
           error instanceof Error ? error.message : 'That total could not be worked out.'
       }
     }
-  }, [cart, infos, cartDiscount, settings])
+  }, [cart, infos, cartDiscount, settings, linePromotions])
 
   const totals: CartMath = 'error' in math ? EMPTY_CART : math
   const mathError = 'error' in math ? math.error : null
@@ -551,16 +605,32 @@ export function Sell({
   const shortages = useMemo(() => findShortages(cart, infos), [cart, infos])
   const shortageIds = useMemo(() => new Set(shortages.map((s) => s.productId)), [shortages])
 
-  /** Mirrors `checkDiscountApproval` in main, so the cashier finds out NOW and not at the payment screen. */
+  /**
+   * Mirrors `checkDiscountApproval` in main, so the cashier finds out NOW and not at the payment screen.
+   *
+   * A PROMOTION IS NOT MEASURED HERE, exactly as main does not measure it. The threshold guards a HUMAN
+   * choosing to give money away; the shop's own standing offer is not that decision — it was authorised
+   * by the manager who created it. Count it and a "25% off everything" Sunday would demand a supervisor
+   * on every single basket, and by mid-morning the cashier would simply have been given the PIN.
+   *
+   * This screen asking for a PIN main will not ask for is just as bad as the reverse: the cashier calls
+   * the supervisor over, who types a PIN into a prompt that never needed to exist. So the two measure
+   * the SAME figure — `discountGiven` less what the offers gave.
+   */
   const needsApproval = useMemo((): boolean => {
-    if (settings == null || totals.discountGiven <= 0) return false
-    const percentBp =
-      totals.listGross > 0 ? Math.round((totals.discountGiven * 10_000) / totals.listGross) : 0
+    if (settings == null) return false
+
+    // WHAT A HUMAN CHOSE TO GIVE AWAY — the cashier's line discounts and the cart discount, and nothing
+    // the shop's own offers did.
+    const discount = totals.discountGiven - totals.promotionDiscountGiven
+    if (discount <= 0) return false
+
+    const percentBp = totals.listGross > 0 ? Math.round((discount * 10_000) / totals.listGross) : 0
     const overPercent = percentBp > settings.discountApprovalPercent
     const overAmount =
-      settings.discountApprovalAmount > 0 && totals.discountGiven > settings.discountApprovalAmount
+      settings.discountApprovalAmount > 0 && discount > settings.discountApprovalAmount
     return overPercent || overAmount
-  }, [settings, totals.discountGiven, totals.listGross])
+  }, [settings, totals.discountGiven, totals.promotionDiscountGiven, totals.listGross])
 
   const money = useCallback(
     (minor: number): string => formatMoney(minor, { symbol: settings?.currencySymbol ?? 'Rs' }),
@@ -1173,6 +1243,25 @@ export function Sell({
                                 )}
                               </div>
 
+                              {/*
+                                THE SHOP'S OWN OFFER, so the cashier can tell the customer why the
+                                price changed — "Sunday special −Rs 20". BOTH the name and the money
+                                come from MAIN (`sale:previewPromotions`); nothing here is worked out
+                                on the screen. It sits with the other line badges because that is what
+                                it is: a fact about this line, not a number the cashier can change.
+                              */}
+                              {lineMath?.promotion != null && (
+                                <Badge
+                                  size="xs"
+                                  variant="light"
+                                  color="teal"
+                                  leftSection={<BadgePercent size={9} />}
+                                >
+                                  {lineMath.promotion.promotionName}
+                                  {lineMath.promotion.discountMinor > 0 &&
+                                    ` −${money(lineMath.promotion.discountMinor)}`}
+                                </Badge>
+                              )}
                               {line.openItem != null && (
                                 <Badge size="xs" variant="light" color="grape">
                                   open item

@@ -16,6 +16,7 @@ import {
   DiscardSaleInput,
   HoldSaleInput,
   NO_YEAR_RESET,
+  PreviewPromotionsInput,
   SALE_REF_TYPE,
   SALE_SERIES,
   SaleByInvoiceNoInput,
@@ -33,6 +34,7 @@ import {
   type SaleDetail,
   type SaleLine,
   type SaleLineInput,
+  type SaleLinePromotion,
   type SaleListItem,
   type SalePayment,
   type SaleStatus
@@ -42,6 +44,7 @@ import * as auth from './auth'
 import * as catalog from './catalog'
 import * as ledger from './ledger'
 import * as loyalty from './loyalty'
+import * as promotions from './promotions'
 import * as settings from './settings'
 import * as stock from './stock'
 import { openShiftId } from './shift-id'
@@ -646,7 +649,18 @@ type PricedLine = {
   pricedQtyM: number
 
   unitPrice: number
+  /**
+   * 2-dp money off THIS line — THE CASHIER'S OWN discount PLUS whatever the shop's own offer gave it.
+   * ONE column (migration 0007), because a promotion IS a line discount: everything downstream — the
+   * journal's DR Discounts Given, the frozen figures, a return's refund — reads this and only this.
+   */
   lineDiscount: number
+  /**
+   * WHICH offer discounted this line and WHAT it gave, or null — which is most lines, most of the time.
+   * A COMPONENT of `lineDiscount` above, never a second source of truth: it is the WHY, frozen into
+   * `sale_line_promotions` by complete() so "what did that Sunday special cost me?" has an answer.
+   */
+  promotion: promotions.LinePromotion | null
   taxRateBp: number
   taxMode: TaxMode
 
@@ -696,8 +710,21 @@ type PricedCart = {
 
   /** listNet − subtotalNet: EVERY discount on this document, line and cart, EX-TAX. DR Discounts. */
   discountNet: number
-  /** listGross − grandTotal: what the customer actually got off. The threshold is measured on this. */
+  /** listGross − grandTotal: what the customer actually got off. Line, promotion AND cart. */
   discountGiven: number
+
+  /**
+   * SUM of what THE SHOP'S OWN OFFERS gave away — a component of `discountGiven` above, and the part of
+   * it NOBODY AT THE TILL DECIDED.
+   *
+   * It exists for exactly one reason: `checkDiscountApproval` must measure only what a HUMAN chose to
+   * give away. A promotion is the shop's own standing offer, already authorised by the manager who
+   * created it (RBAC 'promotion.manage', audited). Counting it toward the supervisor threshold would
+   * make a busy Sunday special demand a PIN on every basket — and a cashier who must call the
+   * supervisor over forty times a morning is a cashier who is handed the PIN, which is how the control
+   * that guards real discounting stops existing at all.
+   */
+  promotionDiscountGiven: number
 }
 
 /**
@@ -707,6 +734,9 @@ type PricedCart = {
  *        mode — an exclusive price is a net and tax goes on top; an inclusive price already contains it.
  *        One cart may freely mix the two (CLAUDE.md §4), which is why tax is resolved PER LINE and never
  *        once for the cart.
+ *
+ * PASS 1b APPLIES THE SHOP'S OWN OFFERS (promotions), on top of pass 1's line discount and BEFORE the
+ *        cart discount. See `applyPromotions` below for the order and why it is that order.
  *
  * PASS 2 splits the CART discount across the lines in proportion to what each is actually worth, and
  *        re-resolves each discounted line's tax on what the customer now pays for it. The discounted
@@ -727,11 +757,15 @@ function priceCart(
     cartDiscount: number
     customerId?: number | null | undefined
   },
-  approver: User | null
+  approver: User | null,
+  now: Date = new Date()
 ): PricedCart {
   const lines = input.lines.map((line) =>
     priceLine(db, actor, line, input.priceTier, input.customerId ?? null, approver)
   )
+
+  // ── PASS 1b: the shop's own offers, between the line discount and the cart discount ──
+  const promotionDiscountGiven = applyPromotions(db, lines, now)
 
   const preDiscountGross = sum(lines.map((line) => line.preGross))
   const cartDiscount = input.cartDiscount
@@ -781,8 +815,107 @@ function priceCart(
     listNet,
     listGross,
     discountNet: listNet - subtotalNet,
-    discountGiven: listGross - grandTotal
+    discountGiven: listGross - grandTotal,
+    promotionDiscountGiven
   }
+}
+
+/**
+ * THE SHOP'S OWN OFFERS, APPLIED TO A PRICED CART. Returns what they gave away in total (2-dp money,
+ * GROSS — the same scale `discountGiven` is measured on).
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE ORDER, AND WHY IT IS THIS ORDER
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ *     line price  →  the cashier's OWN line discount  →  THE PROMOTION  →  the cart discount
+ *
+ * The promotion is computed against what the line is worth AFTER the cashier's own discount, not
+ * against the shelf price. Compute it on the shelf price and the two discounts are both measured on
+ * the full amount — 20% off a tin the cashier already knocked Rs 20 off gives away more than 20% of
+ * what is actually being charged, and two independent reductions of the same line can together exceed
+ * the line itself. Measuring each one on what is left cannot overshoot, whatever the combination.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ * A CASHIER WHO *ALSO* KEYS A MANUAL DISCOUNT ON A PROMOTED LINE — THE DECISION
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * THEY STACK, AND THE PROMOTION IS COMPUTED ON WHAT IS LEFT AFTER THE MANUAL DISCOUNT.
+ *
+ * The alternatives were considered and each loses the shop money, or a customer:
+ *
+ *   · "the promotion wins, drop the manual discount"  — the cashier is standing in front of a customer
+ *     with a dented tin, having promised Rs 20 off. The till silently ignoring him is how a shop ends
+ *     up giving the Rs 20 out of the drawer instead, where nothing records it at all.
+ *   · "take the BIGGER of the two"  — quietly discards whichever one somebody deliberately keyed.
+ *   · "compute both on the shelf price and add them"  — this is the one that LOSES MONEY: the two are
+ *     measured on a base that is no longer there, and 60% off + Rs 60 off a Rs 100 line is a Rs 120
+ *     giveaway on a Rs 100 tin. The clamp saves the line from going negative, but the shop still gave
+ *     away the whole tin because two people each thought they were giving away part of it.
+ *
+ * Stacking on the REMAINDER is the only one that both keeps the cashier's promise and cannot, by
+ * construction, give away more than the line is worth: the promotion is computed on `preGross`-net
+ * money that is already net of the manual discount, and `promotions.discountFor` clamps to it.
+ *
+ * AND IT CANNOT BE USED TO SLIP UNDER THE THRESHOLD. The cashier's own Rs 20 is still measured against
+ * the approval limit in full (`checkDiscountApproval` subtracts only what the OFFER gave). A cashier
+ * cannot hide a big manual discount behind a promotion, and a promotion cannot drag a small manual one
+ * over the line and demand a PIN for it.
+ *
+ * ── WHAT THIS FUNCTION MAY AND MAY NOT TOUCH ────────────────────────────────────────────────────────
+ * It adds to `lineDiscount` and RE-RESOLVES the line's own tax on the new amount, in the line's OWN tax
+ * mode — exactly what `priceLine` did, because this is the same event: money coming off a line before
+ * the cart discount. `listNet`/`listGross` are NOT touched (the line's LIST price did not change — that
+ * is what CR Sales is grossed up to, and what makes the giveaway VISIBLE in Discounts Given rather than
+ * hidden in a smaller Sales figure — migration 0018's header). `preGross` IS updated, because that is
+ * the weight the cart discount is split across and what the customer now actually pays for the line.
+ */
+function applyPromotions(db: DB, lines: PricedLine[], now: Date): number {
+  // An OPEN ITEM can never match (promotions.ts, decision 3) — but it is still passed, so the engine's
+  // answer lines up index-for-index with the cart it was given.
+  const applied = promotions.applyTo(
+    db,
+    lines.map((line) => ({
+      productId: line.productId,
+      qtyM: line.pricedQtyM,
+      unitPrice: line.unitPrice,
+      // WHAT IS LEFT AFTER THE CASHIER'S OWN DISCOUNT, in the line's own tax mode — the amount the
+      // promotion is computed against. This is the decision documented above.
+      lineAmount: extendPrice(line.unitPrice, line.pricedQtyM) - line.lineDiscount
+    })),
+    now
+  )
+
+  let given = 0
+
+  lines.forEach((line, index) => {
+    const promotion = applied[index] ?? null
+    if (promotion == null) return
+
+    line.promotion = promotion
+    if (promotion.discountMinor <= 0) return
+
+    // ONE COLUMN. The offer's discount joins the cashier's own in `line_discount` — the column migration
+    // 0007 defines as "what came off this line", which the journal, the frozen figures and a return all
+    // already read. `sale_line_promotions` records WHICH offer gave WHICH part of it.
+    line.lineDiscount += promotion.discountMinor
+
+    // Re-resolve the line on what is NOW paid for it, in its OWN tax mode — the same call `priceLine`
+    // makes, for the same reason: tax is charged on what the customer actually pays.
+    const amount = extendPrice(line.unitPrice, line.pricedQtyM) - line.lineDiscount
+    const pre = computeLineTax(amount, line.taxRateBp, line.taxMode)
+
+    // GROSS, so it is on the same scale as `discountGiven` (listGross − grandTotal), which is what the
+    // approval threshold measures and what this figure is subtracted from.
+    given += line.preGross - pre.gross
+
+    line.preGross = pre.gross
+    line.net = pre.net
+    line.tax = pre.tax
+    line.gross = pre.gross
+  })
+
+  return given
 }
 
 function priceLine(
@@ -824,6 +957,9 @@ function priceLine(
     ...resolved,
     input: line,
     lineDiscount,
+    // No offer yet. `applyPromotions` (pass 1b) fills this in, and adds what it gives to `lineDiscount`
+    // above — this is the cashier's OWN discount, and nothing else, at this point.
+    promotion: null,
     listNet: list.net,
     listGross: list.gross,
     preGross: pre.gross,
@@ -1046,6 +1182,46 @@ function sum(values: readonly number[]): number {
   return values.reduce((total, value) => total + value, 0)
 }
 
+/**
+ * WHAT THE SHOP'S OWN OFFERS WOULD GIVE THIS CART, RIGHT NOW — one answer per line, in the same order,
+ * null where no offer matched. (Migration 0018.)
+ *
+ * THIS IS A PREVIEW, AND IT DECIDES NOTHING. `complete()` resolves the offers again, for itself, at the
+ * instant the money is actually taken — this is what the Sell screen reads so it can tell the customer
+ * WHY the price changed ("Sunday special −Rs 20") while the cashier is still scanning.
+ *
+ * IT IS THE SAME CODE PATH THAT FREEZES THE SALE, and that is the whole point of it existing here rather
+ * than being computed on the screen. `priceCart` resolves every price from the catalog and runs the very
+ * same `applyPromotions` — so the discount the cashier sees and the discount the customer is charged
+ * cannot drift apart. (The same reasoning that put `extendPrice` and `apportionCartDiscount` in
+ * shared/pricing.ts, and the reason the renderer is never told a price it did not get from main.)
+ *
+ * The cart discount is deliberately NOT applied here: it changes no promotion (it is apportioned AFTER
+ * them — see `priceCart`), and this call answers one question only, which is which offer fired on which
+ * line and what it gave.
+ */
+export function previewPromotions(
+  db: DB,
+  actor: User,
+  raw: unknown,
+  now = new Date()
+): promotions.LinePromotionResult[] {
+  const input = parseOrThrow(PreviewPromotionsInput, raw, 'sale.previewPromotions')
+
+  const priced = priceCart(
+    db,
+    actor,
+    { lines: input.lines, priceTier: input.priceTier, cartDiscount: 0, customerId: input.customerId },
+    // NO APPROVER. Nothing is being authorised: this prices a cart to look at it. A line the cashier is
+    // not allowed to price that way (an override above their role) is refused here exactly as it will be
+    // at the till, which is the honest moment to find out.
+    null,
+    now
+  )
+
+  return priced.lines.map((line) => line.promotion)
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // HOLD / QUOTE / RESUME — a parked cart, which takes NO INVOICE NUMBER
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1116,7 +1292,11 @@ function park(
 ): SaleDetail {
   // Nothing is being approved, because no money moves until this is completed. A discount that needs a
   // supervisor is checked when it is RUNG UP, not when it is parked.
-  const priced = priceCart(db, actor, input, null)
+  //
+  // The offers live AT THIS MOMENT are applied, so a parked cart shows the price it would ring up at
+  // right now. It is not binding and it is not frozen: complete() re-prices the whole cart against the
+  // offers live on the day it is actually rung up. See `toCartLines`.
+  const priced = priceCart(db, actor, input, null, now)
 
   // Re-parking an existing cart UPDATES it, rather than leaving two carts for one customer.
   if (input.saleId != null) assertParked(db, input.saleId)
@@ -1172,13 +1352,24 @@ export function resume(db: DB, raw: unknown): SaleDetail {
  * scanned it off the box. Dropping it here meant a held phone sale could never be completed at all —
  * main requires one serial per unit (`assertSerials`), and the Sell screen only prompts for one when the
  * item is first scanned. The cart remembers what was keyed into it. (Migration 0007, `serials_json`.)
+ *
+ * THE PROMOTION'S SHARE OF THE DISCOUNT IS *NOT* CARRIED BACK, for exactly the reason the price is not.
+ * `sale_lines.line_discount` on a parked cart holds the cashier's own discount PLUS whatever the shop's
+ * offer gave it that day (migration 0018). Carry the whole figure back and Sunday's offer returns as a
+ * MANUAL discount — one the cashier never keyed, that no longer has an offer behind it, and that today's
+ * offer is then applied ON TOP OF. A cart parked three Sundays running would compound. So the offer's
+ * share is subtracted here and re-resolved by `complete()` against the offers live on the day the money
+ * is actually taken. Proven in promotions-sale.test.ts.
  */
 export function toCartLines(sale: SaleDetail): SaleLineInput[] {
   return sale.lines.map((line): SaleLineInput => {
+    // WHAT THE CASHIER HIMSELF KEYED — the line's discount less what an offer contributed to it.
+    const keyedDiscount = line.lineDiscount - promotionDiscountOn(line)
+
     if (line.isOpenItem) {
       return {
         qtyM: line.qtyM,
-        lineDiscount: line.lineDiscount,
+        lineDiscount: keyedDiscount,
         openItem: {
           name: line.nameSnapshot,
           unitPrice: line.unitPrice,
@@ -1192,7 +1383,7 @@ export function toCartLines(sale: SaleDetail): SaleLineInput[] {
       productId: line.productId,
       packId: line.packId,
       qtyM: line.qtyM,
-      lineDiscount: line.lineDiscount,
+      lineDiscount: keyedDiscount,
       // Carry the override back. A held cart or a quote froze its unit_price; if we drop it, resuming
       // re-prices from the catalogue and the customer is charged the FULL price the screen never
       // showed. complete() will re-run the approval check on the resumed override — which is right: a
@@ -1202,6 +1393,17 @@ export function toCartLines(sale: SaleDetail): SaleLineInput[] {
       ...(line.serials.length > 0 ? { serials: line.serials } : {})
     }
   })
+}
+
+/**
+ * WHAT THE SHOP'S OWN OFFERS CONTRIBUTED to one line's discount — the part of `line_discount` that no
+ * cashier keyed, and that `complete()` resolves again for itself. (Migration 0018.)
+ *
+ * A `SaleDetail` always arrives hydrated (see `hydrate`), so an empty array means the honest thing: no
+ * offer touched this line.
+ */
+function promotionDiscountOn(line: SaleLine): number {
+  return line.promotions.reduce((total, promotion) => total + promotion.discountMinor, 0)
 }
 
 /** Every parked cart, newest first — the hold tray on the Sell screen. */
@@ -1295,7 +1497,11 @@ export function complete(db: DB, actor: User, raw: unknown, now = new Date()): C
   if (input.saleId != null) assertParked(db, input.saleId)
 
   // ── 1. Price everything. Every figure below this line is now frozen. ──────
-  const priced = priceCart(db, actor, input, approver)
+  //
+  // `now` decides which of the shop's own offers are live — the sale's OWN instant, from MAIN's clock,
+  // never the caller's (see §1 of the header). A cart held since Sunday is re-priced against TODAY's
+  // offers here, which is the same rule its prices already follow.
+  const priced = priceCart(db, actor, input, approver, now)
 
   // ── 2. A discount above the threshold needs a supervisor AND a reason ─────
   const approval = checkDiscountApproval(db, priced, input, actor, approver)
@@ -1740,6 +1946,23 @@ type DiscountApproval = {
  * Discounting is the classic way a till leaks money, and it leaks slowly enough that nobody notices for
  * a year. So above the line: a supervisor's name, a reason from the owner's own list, and an audit row.
  * Below it, a cashier can knock Rs 5 off a dented tin without calling anyone over.
+ *
+ * ── A PROMOTION IS NOT A DISCOUNT ANYONE AT THE TILL DECIDED, SO IT IS NOT MEASURED HERE ────────────
+ *
+ * The threshold guards the ONE decision this check exists to catch: a human at the till choosing to
+ * give money away. A promotion is not that decision. It is the SHOP'S OWN standing offer, created by a
+ * manager ('promotion.manage' — RBAC), audited when it was made and when it was changed, and applied
+ * automatically to every basket that qualifies. The cashier did not choose it and cannot decline it.
+ *
+ * So `promotionDiscountGiven` is subtracted before the limits are tested. A cashier must NEVER need a
+ * PIN to sell a Sunday special — and a shop running "25% off everything" would otherwise trip a 10%
+ * threshold on EVERY basket for the whole day. The supervisor would be called over forty times a
+ * morning, and by mid-morning the cashier would simply have been given the PIN. The control that guards
+ * real discounting would stop existing, on the busiest day of the month, because of a control that
+ * fired when nothing was wrong.
+ *
+ * What is still measured, in full: the cashier's own line discounts and the cart discount. A promotion
+ * can neither hide one nor drag one over the line. Proven in promotions-sale.test.ts.
  */
 function checkDiscountApproval(
   db: DB,
@@ -1748,7 +1971,8 @@ function checkDiscountApproval(
   actor: User,
   approver: User | null
 ): DiscountApproval {
-  const discount = priced.discountGiven
+  // WHAT A HUMAN CHOSE TO GIVE AWAY — everything off the document, less what the shop's own offers gave.
+  const discount = priced.discountGiven - priced.promotionDiscountGiven
   if (discount <= 0) return { required: false, percentBp: 0, reasonCode: null }
 
   const percentBp = priced.listGross > 0 ? Math.round((discount * 10_000) / priced.listGross) : 0
@@ -1801,7 +2025,12 @@ function checkDiscountApproval(
   }
 
   for (const line of priced.lines) {
-    if (line.lineDiscount <= 0) continue
+    // THE CASHIER'S OWN discount on this line — `lineDiscount` now also carries whatever the shop's own
+    // offer gave it, and nobody at the till is asked to justify the shop's own offer. Read the input,
+    // not the total: a line discounted ONLY by a promotion must never be stopped for a reason code that
+    // no human could sensibly give.
+    const keyedDiscount = line.input.lineDiscount ?? 0
+    if (keyedDiscount <= 0) continue
 
     const code = line.input.discountReasonCode
     if (!code) {
@@ -2323,6 +2552,17 @@ function writeSale(db: DB, args: WriteSaleArgs): number {
   )
 }
 
+/**
+ * The lines, and — where the shop's own offer discounted one — the row that says WHICH offer did it and
+ * WHAT it gave (migration 0018). Called from inside the caller's transaction, by both `park()` and
+ * `complete()`, so the lines and their promotions land together or not at all.
+ *
+ * WHY A PARKED CART GETS THEM TOO: it is written through this same path, and `sale_line_promotions`
+ * hangs off `sale_line_id` with ON DELETE CASCADE. A held cart's rows go when the cart is re-parked or
+ * discarded and its lines are replaced; a completed sale's are the permanent record. Skipping them for
+ * a held cart would need a special case here that buys nothing — and the parked figures are the ones
+ * the tray shows.
+ */
 function insertLines(db: DB, saleId: number, priced: PricedCart, now: Date): void {
   const insert = db.prepare(
     `INSERT INTO sale_lines
@@ -2335,8 +2575,19 @@ function insertLines(db: DB, saleId: number, priced: PricedCart, now: Date): voi
         @isOpenItem, @priceOverrideBy, @serialsJson, @pricedQtyM, @createdAt)`
   )
 
+  // WHAT THE OFFER COST, FROZEN. The name is what it was CALLED at this instant and the money is what it
+  // gave THIS line — so an offer later renamed, re-priced or switched off can never rewrite what an old
+  // sale says it cost (migration 0018).
+  const insertPromotion = db.prepare(
+    `INSERT INTO sale_line_promotions
+       (sale_line_id, promotion_id, name_snapshot, discount_minor, created_at)
+     VALUES
+       (@saleLineId, @promotionId, @nameSnapshot, @discountMinor, @createdAt)`
+  )
+
   for (const line of priced.lines) {
-    insert.run({
+    const saleLineId = Number(
+      insert.run({
       saleId,
       productId: line.productId,
       // FROZEN: the quantity the line was PRICED on (1 carton, not its 24 base units). Frozen so a
@@ -2365,7 +2616,23 @@ function insertLines(db: DB, saleId: number, priced: PricedCart, now: Date): voi
       // record of which handset went out is serial_numbers.sale_id; this is the cart's memory.
       serialsJson: line.serials.length > 0 ? JSON.stringify(line.serials) : null,
       createdAt: now.toISOString()
-    })
+      }).lastInsertRowid
+    )
+
+    // WHAT THE SHOP'S OWN OFFER GAVE THIS LINE — the WHY behind part of `line_discount` above, never a
+    // second source of truth for the money. A matched offer that gave nothing is not recorded: the row
+    // exists to answer "what did that Sunday special COST me?", and a zero is not a cost.
+    if (line.promotion != null && line.promotion.discountMinor > 0) {
+      insertPromotion.run({
+        saleLineId,
+        promotionId: line.promotion.promotionId,
+        // FROZEN, both of them. Renaming the offer, re-pricing it or switching it off next month must
+        // never rewrite what THIS sale says it cost (migration 0018).
+        nameSnapshot: line.promotion.promotionName,
+        discountMinor: line.promotion.discountMinor,
+        createdAt: now.toISOString()
+      })
+    }
   }
 }
 
@@ -2806,6 +3073,9 @@ function toSaleLine(row: SaleLineRow): SaleLine {
     isOpenItem: Boolean(row.is_open_item),
     priceOverrideByUserId: row.price_override_by,
     serials: parseSerials(row.serials_json),
+    // The frozen offers are loaded per SALE, in one query — `hydrate` fills them in. A line built here
+    // and never hydrated honestly carries none rather than a number nobody fetched.
+    promotions: [],
     createdAt: row.created_at
   }
 }
@@ -2874,9 +3144,37 @@ export function getByInvoiceNo(db: DB, raw: unknown): SaleDetail {
 }
 
 function hydrate(db: DB, row: SaleRow): SaleDetail {
+  // The offers that discounted this sale's lines, FROZEN (migration 0018) — fetched in ONE query for
+  // the whole sale rather than one per line: a receipt reprint on a 30-line sale is one round trip.
+  const promotionsByLine = new Map<number, SaleLinePromotion[]>()
+  const promotionRows = db
+    .prepare(
+      `SELECT p.sale_line_id, p.promotion_id, p.name_snapshot, p.discount_minor
+         FROM sale_line_promotions p
+         JOIN sale_lines l ON l.id = p.sale_line_id
+        WHERE l.sale_id = ?
+        ORDER BY p.id`
+    )
+    .all(row.id) as Array<{
+    sale_line_id: number
+    promotion_id: number
+    name_snapshot: string
+    discount_minor: number
+  }>
+
+  for (const promotion of promotionRows) {
+    const list = promotionsByLine.get(promotion.sale_line_id) ?? []
+    list.push({
+      promotionId: promotion.promotion_id,
+      name: promotion.name_snapshot,
+      discountMinor: promotion.discount_minor
+    })
+    promotionsByLine.set(promotion.sale_line_id, list)
+  }
+
   const lines = (
     db.prepare('SELECT * FROM sale_lines WHERE sale_id = ? ORDER BY id').all(row.id) as SaleLineRow[]
-  ).map(toSaleLine)
+  ).map((line) => ({ ...toSaleLine(line), promotions: promotionsByLine.get(line.id) ?? [] }))
 
   const payments = (
     db

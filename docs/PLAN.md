@@ -302,6 +302,43 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Promotions done** (v0.17.0) — the last feature; Phase 8 complete. Migration 0018 (`promotions`, `promotion_rules`,
+  `sale_line_promotions`). Four kinds: percent_off, amount_off, buy_x_get_y, fixed_price — scoped by
+  product / category / brand / department / all, with a date window, a Monday-first weekday mask and a
+  priority. **THE WHOLE DESIGN IS ONE SENTENCE: a promotion is a LINE DISCOUNT.** It invents no new money,
+  no new journal leg and no new column: it writes the `line_discount` that has existed since 0007, so
+  priceCart re-resolves tax on what is ACTUALLY paid, `DR Discounts Given (4200)` already accounts for it,
+  and returns / loyalty / every report need to learn NOTHING — there is nothing new to learn. That is
+  exactly why this phase was scheduled LAST (§6): a promotion with its own journal leg would be a SECOND
+  path to the same place, and every derived figure would have to learn about it separately.
+  **A "free" tin is not a zero-price line:** it rings at its normal price with a 100% line discount, so
+  stock moves for all three tins at cost (shelf and books agree), the giveaway is VISIBLE in Discounts
+  Given rather than hidden in a smaller Sales figure, and output tax is charged on what the customer
+  actually pays. ONE promotion per line (lowest priority wins) — stacking two offers on one tin is how a
+  shop accidentally sells at a loss. A promotion must NOT trip the manual-discount supervisor PIN: it is
+  the shop's own standing offer, not a cashier's decision. `sale_line_promotions` freezes the offer's name
+  and the money it gave away, so renaming or switching it off never rewrites what an old sale cost.
+  **The PIN rule, and why it is a SECURITY decision, not a convenience one:** `checkDiscountApproval` now
+  measures `discountGiven − promotionDiscountGiven` — only what a HUMAN chose to give away. A shop running
+  "25% off everything" would otherwise trip a 10% threshold on EVERY basket all day; the supervisor would
+  be called forty times a morning, and by mid-morning the cashier would simply have been handed the PIN.
+  The control that guards real discounting would stop existing, on the busiest day of the month, because it
+  fired when nothing was wrong. A cashier's OWN over-threshold discount is still stopped, and a promotion
+  can neither hide one nor drag one over the line — both proven.
+  **A manual discount on a promoted line STACKS, with the offer computed on what is LEFT.** Computing both
+  off the shelf price and adding them (60% + Rs 60 off a Rs 100 tin = Rs 120 given away on a Rs 100 item)
+  is the version that loses money; measuring each on the remainder cannot overshoot, and it keeps the
+  cashier's promise to the customer instead of silently discarding it.
+  **A real bug the wiring found in itself:** `toCartLines` carried the whole `lineDiscount` back to a
+  resumed cart, so a parked cart's promotion returned as a MANUAL discount with today's offer stacked on
+  top — compounding every re-park, and surviving after the offer ended. Fixed by subtracting the offer's
+  frozen share; both directions tested (a parked cart rings at TODAY's offers, and picks up an offer that
+  started after it was parked).
+  **THE OTHER-READERS SWEEP CAME BACK CLEAN — and that is the payoff of the design, not luck:** loyalty
+  earns on `subtotalNet` (what was PAID: a Rs 400 list cart at 25% off earns 300 points, not 400), leakage
+  reads the AUDIT LOG for over-threshold discounts so a promotion never lands on a cashier's row, and the
+  P&L/balance sheet walk `accountActivity` by TYPE. NOT ONE reader needed changing, because there is
+  nothing new to read — all three now pinned by tests.
 - **Reports finished** (v0.16.0). The remaining EIGHT, read-only, no migration: itemWise, categoryWise,
   paymentMethodBreakdown, taxSummary, lowStock, nearExpiry, cashBook, generalLedger — 17 reports now, all
   17 exporting to Excel and PDF. Everything is read FROZEN (a line's tax_rate_bp/tax_amount, a movement's
@@ -316,10 +353,10 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   existing test passed `days` explicitly, which is why nothing caught it; now pinned by a regression test.
   Both PDFs rendered and LOOKED AT (trap #14): single page, no box-shadow, no external assets, the expired
   batch showing −5 days with its red "may still be on the shelf" warning.
-  **OWNER DECISION NEEDED — a tax-filing rule, defaulted, please confirm:** a sale rung in June but VOIDED
-  in July stays in JUNE's tax summary. Rationale: its contra journal is dated July, so June's GL still
-  shows the credit, and a return already filed for June should not be silently rewritten — the reversal
-  belongs to July. The alternative (filter on status alone) would retroactively change a filed period.
+  **OWNER CONFIRMED (2026-07-16), a tax-filing rule — no longer a default:** a sale rung in June but VOIDED
+  in July STAYS in JUNE's tax summary. Its contra journal is dated July, so June's GL still shows the
+  credit, and a return already filed for June is never silently rewritten — the reversal belongs to July.
+  Do not "simplify" this to a status-only filter: that would retroactively change a filed period.
 - **Loyalty done** (v0.15.0). Migration 0017 (`loyalty_movements` + account 5300 Loyalty Points Expense);
   the four `loyalty.*` settings already existed and are the business rules — the scheme is OFF until a shop
   turns it on, and everything hides when it is. Two decisions drive the whole design:
@@ -349,9 +386,11 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   `returns.ts` calls `loyalty.clawbackForReturn` INSIDE the return's own transaction: proportional to the
   NET going back (the basis the points were earned on), remainder-on-last so a sale returned in pieces
   claws back exactly what it earned, released FIFO at the rate each batch was BOOKED at, and CAPPED at the
-  balance so a customer who already SPENT the points is never driven negative (taking those back is the
-  owner's call by hand, with a reason). Four regression tests. Same trap #17 shape as the last three
-  phases — a derived value must be correct from EVERY path that can change it.
+  balance so a customer who already SPENT the points is never driven negative. **OWNER CONFIRMED
+  (2026-07-16):** a customer who already spent the points is left at ZERO, never pushed negative — taking
+  those back is the owner's call, by hand, with a reason. Do not "improve" this into a negative balance
+  that future earnings pay off. Four regression tests. Same trap #17 shape as the last three phases — a
+  derived value must be correct from EVERY path that can change it.
 - **Returns to supplier done** (v0.14.0). The mirror of a customer return, pointing the other way: stock
   goes BACK out and either lowers what the shop owes or brings a refund in. Migration 0016
   (`purchase_returns` + `purchase_return_lines`), with `purchase_return_reason` seeded as its own editable

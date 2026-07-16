@@ -346,7 +346,46 @@ export const IPC = {
   // live lookups list, and audited by the service itself.
   loyaltyBalance: 'loyalty:balance',
   loyaltyHistory: 'loyalty:history',
-  loyaltyAdjust: 'loyalty:adjust'
+  loyaltyAdjust: 'loyalty:adjust',
+
+  // ── PROMOTIONS (migration 0018) — the shop's OWN offers, applied automatically at the till ────────
+  //
+  // "Buy 2 get 1 free", "10% off Sunday", "Rs 50 off tea". A PROMOTION IS A LINE DISCOUNT — it invents
+  // no new money, no new journal leg and no new money column. The engine computes a discount, sales.ts
+  // writes it into the `line_discount` that has existed since migration 0007, and it travels the road
+  // already proven: priceCart re-resolves tax on what is ACTUALLY paid → DR Discounts Given (4200,
+  // contra-income) → frozen onto the line, so a RETURN refunds what was really charged.
+  //
+  // THERE IS NO 'apply' HANDLER, AND THAT IS THE DESIGN — the same reasoning as loyalty's missing earn
+  // and redeem. An offer is not a free-standing act a renderer may ask for: it is resolved inside
+  // `sale:complete`, in MAIN, against the offers live at the sale's own instant, and frozen in that
+  // sale's ONE transaction. A renderer that could name its own promotion discount could sell at any
+  // price it liked (shared/promotions.ts).
+  //
+  // create / update / deactivate / setRules WRITE and are gated 'promotion.manage' (manager) +
+  // assertWritable() — an offer is a standing decision to sell below the shelf price, so it is a
+  // manager's call and every one of them is audited by the service itself. list / get / rules / active
+  // are 'promotion.view' (cashier — the till must be able to say WHY a price changed) READS and take
+  // NO assertWritable(): an expired shop still reads its own books (CLAUDE.md §6).
+  promotionCreate: 'promotion:create',
+  promotionUpdate: 'promotion:update',
+  promotionDeactivate: 'promotion:deactivate',
+  promotionSetRules: 'promotion:setRules',
+  promotionList: 'promotion:list',
+  promotionGet: 'promotion:get',
+  promotionRules: 'promotion:rules',
+  promotionActive: 'promotion:active',
+
+  // WHICH OFFERS WOULD FIRE ON THIS CART, RIGHT NOW, AND WHAT THEY WOULD GIVE — so the Sell screen can
+  // show "Sunday special −Rs 20" on the line and the cashier can tell the customer why the price
+  // changed. A LOOK, NOT A SALE: it writes nothing, and `sale:complete` resolves the offers again for
+  // itself at the instant the money is taken.
+  //
+  // It lives on the SALE side of this list, not the promotions side, because it prices a CART: it is
+  // answered by the very same `priceCart` that freezes the sale, which is what stops the discount on the
+  // screen and the discount on the receipt from ever drifting apart. Gated 'sale.create' — it is the
+  // till's own question — and it takes no date: the clock is MAIN's.
+  salePreviewPromotions: 'sale:previewPromotions'
 } as const
 
 export type SystemInfo = {

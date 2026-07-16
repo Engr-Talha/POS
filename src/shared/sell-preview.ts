@@ -1,5 +1,6 @@
 import type { SaleLineInput } from './sales'
 import type { ScannedItem } from './ipc'
+import type { LinePromotion, LinePromotionResult } from './promotions'
 import type { TaxMode } from './tax'
 import { computeLineTax } from './tax'
 import { apportionCartDiscount, extendPrice } from './pricing'
@@ -123,6 +124,7 @@ export function lineInfoFromScan(item: ScannedItem, barcode: string): LineInfo {
 
 export type LineMath = {
   unitPrice: number
+  /** The cashier's own discount PLUS whatever the shop's offer gave this line — the one figure, as main. */
   lineDiscount: number
   taxRateBp: number
   /** The line before its own discount — what the strike-through shows. */
@@ -132,6 +134,26 @@ export type LineMath = {
   gross: number
   /** False for a resumed pack line: we can draw it, but we cannot re-price it. Qty/discount are locked. */
   editable: boolean
+  /**
+   * THE SHOP'S OWN OFFER on this line, as MAIN resolved it — the name to show the customer ("Sunday
+   * special") and what it gave. NULL on most lines. NEVER computed here: an offer is resolved against
+   * the catalog, in main, by the same code that freezes the sale (`sale:previewPromotions`). This file
+   * is handed the answer and only draws it.
+   */
+  promotion: LinePromotion | null
+
+  /**
+   * WHAT THE OFFER COST THIS LINE IN *GROSS* — the figure the approval threshold is measured on, and
+   * NOT the same number as `promotion.discountMinor`. The difference is tax.
+   *
+   * A promotion discounts a line IN ITS OWN TAX MODE, exactly as the cashier's own discount does: Rs 20
+   * off an EXCLUSIVE line takes Rs 23.40 off what the customer actually pays at 17%. `discountGiven` is
+   * a gross, so what is subtracted from it must be a gross too — main measures it the same way
+   * (`applyPromotions`: `line.preGross − pre.gross`). Sum the raw `discountMinor` instead and every
+   * exclusive-priced offer under-reports itself by exactly the tax, and a big enough one starts
+   * demanding a supervisor's PIN again.
+   */
+  promotionGross: number
 }
 
 export type CartMath = {
@@ -142,8 +164,14 @@ export type CartMath = {
   /** SUM(line gross) BEFORE the cart discount. grandTotal === this − cartDiscount, exactly. */
   preDiscountGross: number
   listGross: number
-  /** What the customer got off in total — line discounts AND the cart discount. The threshold is on this. */
+  /** What the customer got off in total — line discounts, the shop's offers AND the cart discount. */
   discountGiven: number
+  /**
+   * What the SHOP'S OWN OFFERS gave — a component of `discountGiven`, and the part nobody at the till
+   * decided. The approval threshold is measured on `discountGiven − this`, exactly as main does
+   * (`checkDiscountApproval`): a cashier must never need a PIN to sell a Sunday special.
+   */
+  promotionDiscountGiven: number
 }
 
 export const EMPTY_CART: CartMath = {
@@ -153,7 +181,8 @@ export const EMPTY_CART: CartMath = {
   grandTotal: 0,
   preDiscountGross: 0,
   listGross: 0,
-  discountGiven: 0
+  discountGiven: 0,
+  promotionDiscountGiven: 0
 }
 
 function resolveLine(
@@ -161,15 +190,29 @@ function resolveLine(
   pricedQtyM: number,
   taxRateBp: number,
   taxMode: TaxMode,
-  lineDiscount: number
+  keyedDiscount: number,
+  promotion: LinePromotion | null
 ): LineMath {
   const listAmount = extendPrice(unitPrice, pricedQtyM)
   const list = computeLineTax(listAmount, taxRateBp, taxMode)
 
-  // A discount bigger than the line is a typo. Main refuses it in plain language; we clamp so the screen
-  // never flashes a negative line while it is still being typed.
+  // THE SAME ORDER MAIN TAKES (`applyPromotions` in services/sales.ts): the cashier's OWN discount
+  // first, then the shop's offer on WHAT IS LEFT — never both measured on the shelf price, which is how
+  // two reductions of one line come to more than the line. Main computed `promotion.discountMinor`
+  // against exactly this remainder, so adding it here reproduces main's figure rather than re-deriving
+  // it. A discount bigger than the line is a typo: main refuses it in plain language; we clamp so the
+  // screen never flashes a negative line while it is still being typed.
+  const lineDiscount = keyedDiscount + (promotion?.discountMinor ?? 0)
   const amount = Math.max(0, listAmount - lineDiscount)
   const pre = computeLineTax(amount, taxRateBp, taxMode)
+
+  // WHAT THE OFFER COST IN GROSS — where the line would have landed on the cashier's own discount
+  // alone, less where it actually landed. Main measures the same distance the same way
+  // (`applyPromotions`: preGross − pre.gross), and it is a GROSS because the threshold is.
+  const withoutOffer =
+    promotion == null || promotion.discountMinor <= 0
+      ? pre
+      : computeLineTax(Math.max(0, listAmount - keyedDiscount), taxRateBp, taxMode)
 
   return {
     unitPrice,
@@ -179,24 +222,34 @@ function resolveLine(
     net: pre.net,
     tax: pre.tax,
     gross: pre.gross,
-    editable: true
+    editable: true,
+    promotion,
+    promotionGross: withoutOffer.gross - pre.gross
   }
 }
 
-/** PASS 1, per line — the same three steps `priceLine` takes in the sale service, in the same order. */
+/**
+ * PASS 1, per line — the same three steps `priceLine` takes in the sale service, in the same order.
+ *
+ * `promotion` is MAIN'S ANSWER for this line (`sale:previewPromotions`), or null. It is never computed
+ * here: an offer is resolved against the catalog, in main, and a renderer that could name its own
+ * promotion discount could sell at any price it liked (shared/promotions.ts).
+ */
 export function priceLine(
   line: SaleLineInput,
   info: LineInfo | undefined,
-  tax: TaxDefaults
+  tax: TaxDefaults,
+  promotion: LinePromotion | null = null
 ): LineMath {
   const lineDiscount = line.lineDiscount ?? 0
 
   // AN OPEN ITEM carries its own price and its own tax — there is no catalogue row behind it to read
-  // either from. `taxRateFor` in main zeroes the rate when tax is off shop-wide; so do we.
+  // either from. `taxRateFor` in main zeroes the rate when tax is off shop-wide; so do we. No offer can
+  // ever match one (it has no catalog row), and main returns null for it regardless.
   if (line.openItem != null) {
     const rate = tax.taxEnabled ? (line.openItem.taxRateBp ?? tax.defaultTaxRateBp) : 0
     const mode = line.openItem.taxMode ?? tax.defaultTaxMode
-    return resolveLine(line.openItem.unitPrice, line.qtyM, rate, mode, lineDiscount)
+    return resolveLine(line.openItem.unitPrice, line.qtyM, rate, mode, lineDiscount, null)
   }
 
   // Resumed as a whole pack, and we cannot re-price it. Show main's frozen figures, untouched.
@@ -209,7 +262,11 @@ export function priceLine(
       net: info.frozen.net,
       tax: info.frozen.tax,
       gross: info.frozen.gross,
-      editable: false
+      editable: false,
+      promotion,
+      // Main's figures are already frozen; we cannot re-derive what an offer contributed to them, and
+      // we do not need to — this line is not being re-priced.
+      promotionGross: 0
     }
   }
 
@@ -224,7 +281,9 @@ export function priceLine(
       net: 0,
       tax: 0,
       gross: 0,
-      editable: false
+      editable: false,
+      promotion: null,
+      promotionGross: 0
     }
   }
 
@@ -240,7 +299,7 @@ export function priceLine(
       ? (line.qtyM / info.packSizeM) * ONE_UNIT
       : line.qtyM
 
-  return resolveLine(unitPrice, pricedQtyM, info.taxRateBp, info.taxMode, lineDiscount)
+  return resolveLine(unitPrice, pricedQtyM, info.taxRateBp, info.taxMode, lineDiscount, promotion)
 }
 
 /**
@@ -255,12 +314,26 @@ export function priceCart(
   cart: readonly SaleLineInput[],
   infos: LineInfos,
   cartDiscount: number,
-  tax: TaxDefaults
+  tax: TaxDefaults,
+  /**
+   * MAIN'S ANSWER for each line (`sale:previewPromotions`) — one entry per line, in the same order,
+   * null where no offer fired. Omitted entirely (the default) while the answer is still in flight, or
+   * on a screen that never asks: the cart then simply draws with no offers on it, which is what it
+   * looked like before this feature existed. It is never guessed at.
+   */
+  promotions: readonly LinePromotionResult[] = []
 ): CartMath {
-  const lines = cart.map((line) => priceLine(line, infos.get(infoKey(line)), tax))
+  const lines = cart.map((line, index) =>
+    priceLine(line, infos.get(infoKey(line)), tax, promotions[index] ?? null)
+  )
 
   const preDiscountGross = lines.reduce((total, line) => total + line.gross, 0)
   const listGross = lines.reduce((total, line) => total + line.listGross, 0)
+
+  // WHAT THE SHOP'S OWN OFFERS GAVE, IN GROSS — summed from PASS 1, before the cart discount, exactly
+  // where main measures it (`applyPromotions` runs in pass 1b and returns its total there). The cart
+  // discount that follows is a separate, human decision and is measured against the threshold in full.
+  const promotionDiscountGiven = lines.reduce((total, line) => total + line.promotionGross, 0)
 
   // Main throws if the discount is bigger than the sale. Clamp for the preview so the totals stay sane
   // while it is being typed; the Pay button is blocked separately, and main refuses it regardless.
@@ -292,9 +365,11 @@ export function priceCart(
     grandTotal,
     preDiscountGross,
     listGross,
-    discountGiven: listGross - grandTotal
+    discountGiven: listGross - grandTotal,
+    promotionDiscountGiven
   }
 }
+
 
 /**
  * WHAT WOULD GO NEGATIVE — asked once per PRODUCT, not once per line.
