@@ -6,6 +6,7 @@ import * as sales from './sales'
 import * as returns from './returns'
 import * as purchases from './purchases'
 import * as purchaseReturns from './purchase-returns'
+import * as expenses from './expenses'
 import * as loyalty from './loyalty'
 import * as stock from './stock'
 import * as ledger from './ledger'
@@ -135,29 +136,85 @@ const credit = (): number => lookupId('payment_method', 'credit')
 
 /** A product. Tax-free by default so arithmetic reads in whole rupees. */
 function makeProduct(
-  opts: { retailPrice?: number; taxRateBp?: number; priceEntryMode?: string; minStockM?: number } = {}
+  opts: {
+    retailPrice?: number
+    taxRateBp?: number
+    priceEntryMode?: string
+    minStockM?: number
+    categoryId?: number
+    trackBatches?: boolean
+  } = {}
 ): number {
   const now = new Date().toISOString()
   return Number(
     t.db
       .prepare(
         `INSERT INTO products
-           (sku, name, sale_uom_id, cost_price, retail_price, wholesale_price, tax_rate_bp,
+           (sku, name, sale_uom_id, category_id, cost_price, retail_price, wholesale_price, tax_rate_bp,
             price_entry_mode, is_tax_exempt, item_type, is_weighted, track_batches, track_serials,
             is_active, min_stock_m, created_at, updated_at)
-         VALUES (@sku, 'Test Item', @uom, 0, @retail, 0, @tax,
-                 @mode, 0, 'inventory', 0, 0, 0, 1, @min, @now, @now)`
+         VALUES (@sku, 'Test Item', @uom, @category, 0, @retail, 0, @tax,
+                 @mode, 0, 'inventory', 0, @batches, 0, 1, @min, @now, @now)`
       )
       .run({
         sku: `SKU-${Math.random().toString(36).slice(2, 10)}`,
         uom: lookupId('uom', 'pcs'),
+        category: opts.categoryId ?? null,
         retail: opts.retailPrice ?? 10_000,
         tax: opts.taxRateBp ?? 0,
         mode: opts.priceEntryMode ?? 'exclusive',
+        batches: opts.trackBatches ? 1 : 0,
         min: opts.minStockM ?? 0,
         now
       }).lastInsertRowid
   )
+}
+
+/** A lookup row — the data-driven lists every dropdown in this app is built from. */
+function makeLookup(listKey: string, code: string, label: string): number {
+  const now = new Date().toISOString()
+  return Number(
+    t.db
+      .prepare(
+        `INSERT INTO lookups (list_key, code, label, sort_order, is_active, is_system, created_at, updated_at)
+         VALUES (?, ?, ?, 0, 1, 0, ?, ?)`
+      )
+      .run(listKey, code, label, now, now).lastInsertRowid
+  )
+}
+
+function makeBatch(productId: number, batchNo: string, expiryDate: string): number {
+  return Number(
+    t.db
+      .prepare(
+        `INSERT INTO batches (product_id, batch_no, expiry_date, cost, created_at)
+         VALUES (?, ?, ?, 0, ?)`
+      )
+      .run(productId, batchNo, expiryDate, new Date().toISOString()).lastInsertRowid
+  )
+}
+
+/** Opening stock ONTO A BATCH, through the real service — so the books balance and the value is frozen. */
+function stockIntoBatch(
+  productId: number,
+  batchId: number,
+  qty: number,
+  unitCost: number,
+  when = OPENING_AT
+): void {
+  stock.adjust(
+    t.db,
+    owner,
+    { productId, type: 'opening', qtyM: qty * ONE_UNIT, unitCost, batchId, reasonCode: 'data_entry' },
+    when
+  )
+}
+
+/** The day after an ISO date — the exclusive upper bound the reports use. Mirrors reports.dayAfter. */
+function dayAfterOf(isoDate: string): string {
+  const date = new Date(`${isoDate}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
+  return date.toISOString()
 }
 
 /** Opening stock through the real service, dated BEFORE any sale — so the books balance from line one. */
@@ -861,5 +918,797 @@ describe('balance sheet', () => {
     // The net profit folded into equity matches the P&L over the whole book to date.
     const pnl = reports.profitAndLoss(t.db, { from: '2026-01-01', to: '2026-07-15' })
     expect(report.netProfit).toBe(pnl.netProfit)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 10 & 11. ITEM-WISE and CATEGORY-WISE
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('item-wise and category-wise sales', () => {
+  let a: number
+  let b: number
+  let grocery: number
+
+  beforeEach(() => {
+    grocery = makeLookup('category', 'grocery', 'Grocery')
+    a = makeProduct({ retailPrice: 10_000, categoryId: grocery }) // Rs 100, cost Rs 60
+    b = makeProduct({ retailPrice: 20_000 }) // Rs 200, cost Rs 150 — NO category
+    openingStock(a, 100, 600_000)
+    openingStock(b, 100, 1_500_000)
+  })
+
+  it('reports each item from its FROZEN net, tax and unit_cost, best seller first', () => {
+    sellExact(a, 2, cash(), 10_000) // Rs 200 net, cogs Rs 120
+    sellExact(b, 1, card(), 20_000) // Rs 200 net, cogs Rs 150
+
+    const report = reports.itemWise(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    expect(report.total).toBe(2)
+    const rowA = report.rows.find((r) => r.productId === a)!
+    expect(rowA.qtyM).toBe(2 * ONE_UNIT)
+    expect(rowA.net).toBe(20_000)
+    expect(rowA.cogs).toBe(12_000)
+    expect(rowA.grossProfit).toBe(8_000)
+    expect(rowA.marginBp).toBe(4000) // 80/200 = 40%
+
+    const rowB = report.rows.find((r) => r.productId === b)!
+    expect(rowB.cogs).toBe(15_000)
+    expect(rowB.grossProfit).toBe(5_000)
+
+    // Sorted by gross desc — the tie breaks by name, but both must be present and summed.
+    expect(report.totals.net).toBe(40_000)
+    expect(report.totals.cogs).toBe(27_000)
+    expect(report.totals.grossProfit).toBe(13_000)
+  })
+
+  /**
+   * THE TIE THAT MATTERS: item-wise and category-wise are the SAME money as the profit report, cut
+   * differently. If they disagree, one of them is lying to the shopkeeper and he cannot tell which.
+   */
+  it('gross profit ties to the profit report — three cuts of one period', () => {
+    sellExact(a, 3, cash(), 10_000)
+    sellExact(b, 2, card(), 20_000)
+    sellExact(a, 1, credit(), 10_000, { customerId: makeCustomer('Ali') })
+
+    const window = { from: '2026-07-15', to: '2026-07-15' }
+    const profit = reports.profit(t.db, window)
+    const items = reports.itemWise(t.db, window)
+    const categories = reports.categoryWise(t.db, window)
+
+    expect(items.totals.grossProfit, 'item-wise disagrees with the profit report').toBe(profit.grossProfit)
+    expect(categories.totals.grossProfit, 'category-wise disagrees with the profit report').toBe(
+      profit.grossProfit
+    )
+    expect(items.totals.net).toBe(profit.revenue)
+    expect(items.totals.cogs).toBe(profit.cogs)
+    // And the two cuts agree with each other, row-sum for row-sum.
+    expect(categories.totals).toEqual(items.totals)
+  })
+
+  /**
+   * A product with NO category must still appear, as 'Uncategorised' — mirroring the aging report's
+   * 'Unassigned' line. Drop it and the category report quietly stops matching the item-wise one.
+   */
+  it('surfaces an uncategorised product instead of dropping it', () => {
+    sellExact(a, 1, cash(), 10_000) // has a category
+    sellExact(b, 1, cash(), 20_000) // has NONE
+
+    const report = reports.categoryWise(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    expect(report.total).toBe(2)
+    const uncategorised = report.rows.find((r) => r.categoryId === null)
+    expect(uncategorised, 'an uncategorised product must not be dropped').toBeTruthy()
+    expect(uncategorised!.name).toBe('Uncategorised')
+    expect(uncategorised!.net).toBe(20_000)
+
+    expect(report.rows.find((r) => r.categoryId === grocery)!.net).toBe(10_000)
+    // Nothing was lost: the buckets sum to the period's whole net.
+    expect(report.rows.reduce((sum, r) => sum + r.net, 0)).toBe(report.totals.net)
+  })
+
+  it('a VOIDED sale appears in neither', () => {
+    sellExact(a, 1, cash(), 10_000) // the real one
+    const voided = sellExact(b, 5, cash(), 20_000) // rung, then cancelled
+    sales.voidSale(t.db, supervisor, { id: voided.id, reasonCode: 'test_sale' }, null, NOW)
+
+    const window = { from: '2026-07-15', to: '2026-07-15' }
+    const items = reports.itemWise(t.db, window)
+    const categories = reports.categoryWise(t.db, window)
+
+    expect(items.rows.find((r) => r.productId === b), 'a voided sale must not appear').toBeUndefined()
+    expect(items.totals.net).toBe(10_000)
+    expect(categories.totals.net).toBe(10_000)
+    // And it still agrees with the profit report, which also excludes it.
+    expect(items.totals.grossProfit).toBe(reports.profit(t.db, window).grossProfit)
+  })
+
+  /**
+   * THE RECONCILIATION SWEEP — the full scenario, not the easy one.
+   *
+   * The tie test above proves item-wise === profit over plain sales and a void. This one adds the two
+   * events that actually move money around underneath a report: a CUSTOMER RETURN and a PURCHASE. That
+   * combination is what caught supplierAging chasing a supplier for goods already returned, so no report
+   * with a ledger counterpart gets to skip it.
+   *
+   * BOTH REPORTS ARE GROSS OF RETURNS, DELIBERATELY, AND THAT IS WHY THEY STILL AGREE. Each reads only
+   * `sale_lines` of sales still 'completed'; a return lives in its own `returns` table and does not edit
+   * the sale it came from (the sale genuinely happened, and its line stays frozen). So the return moves
+   * NEITHER report, and the pair stays locked together. The moment one of them learns to net returns off
+   * and the other does not, this test fails — which is the entire point of keeping it.
+   *
+   * The purchase is here for the same reason: it restocks and re-weights the average cost, and COGS must
+   * STILL be the cost FROZEN on the line at sale time, not re-costed from the newer, dearer stock.
+   */
+  it('item-wise and category-wise still tie to profit across a return, a void and a purchase', () => {
+    const kept = sellExact(a, 3, cash(), 10_000) // Rs 300 net, cogs Rs 180 — stands
+    const returned = sellExact(b, 2, card(), 20_000) // Rs 400 net, cogs Rs 300 — partly handed back
+    const voided = sellExact(a, 5, cash(), 10_000) // rung, then cancelled — must vanish
+
+    expect(kept.id).toBeTruthy()
+
+    // A REFUND: one of the two units of `b` comes back.
+    returns.createReturn(
+      t.db,
+      supervisor,
+      {
+        saleId: returned.id,
+        lines: [{ saleLineId: returned.lines[0]!.id, qtyM: ONE_UNIT }],
+        settlement: 'refund',
+        refundMethodLookupId: cash(),
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+
+    // A VOID: never happened, so it belongs in neither report.
+    sales.voidSale(t.db, supervisor, { id: voided.id, reasonCode: 'test_sale' }, null, NOW)
+
+    // A PURCHASE at a HIGHER cost — this re-weights the average and must not touch the frozen COGS above.
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: makeSupplier('Acme'),
+        lines: [{ productId: a, qtyM: 50 * ONE_UNIT, unitCost: 900_000 }], // Rs 90, up from Rs 60
+        taxTotal: 0,
+        payments: []
+      },
+      NOW
+    )
+
+    const window = { from: '2026-07-15', to: '2026-07-15' }
+    const profit = reports.profit(t.db, window)
+    const items = reports.itemWise(t.db, window)
+    const categories = reports.categoryWise(t.db, window)
+
+    // The two sales that still stand: Rs 300 + Rs 400 net, cogs Rs 180 + Rs 300 — at the OLD cost.
+    expect(items.totals.net).toBe(70_000)
+    expect(items.totals.cogs, 'a later purchase must not re-cost a frozen sale line').toBe(48_000)
+    expect(items.totals.grossProfit).toBe(22_000)
+
+    // THE TIE, across all three cuts of the same period.
+    expect(items.totals.net, 'item-wise net drifted from the profit report').toBe(profit.revenue)
+    expect(items.totals.cogs, 'item-wise cogs drifted from the profit report').toBe(profit.cogs)
+    expect(items.totals.grossProfit, 'item-wise disagrees with the profit report').toBe(
+      profit.grossProfit
+    )
+    expect(categories.totals, 'category-wise disagrees with item-wise').toEqual(items.totals)
+
+    // The cancelled sale is in none of them.
+    expect(items.rows.find((r) => r.productId === a)!.qtyM).toBe(3 * ONE_UNIT)
+  })
+
+  it('pages without changing the period totals', () => {
+    sellExact(a, 3, cash(), 10_000)
+    sellExact(b, 1, cash(), 20_000)
+
+    const window = { from: '2026-07-15', to: '2026-07-15' }
+    const page1 = reports.itemWise(t.db, { ...window, page: 1, pageSize: 1 })
+    const page2 = reports.itemWise(t.db, { ...window, page: 2, pageSize: 1 })
+
+    expect(page1.rows).toHaveLength(1)
+    expect(page2.rows).toHaveLength(1)
+    expect(page1.total).toBe(2)
+    expect(page1.rows[0]!.productId).not.toBe(page2.rows[0]!.productId)
+
+    // THE TOTALS ARE THE PERIOD'S, NOT THE PAGE'S — they must not move when you click "next".
+    expect(page2.totals).toEqual(page1.totals)
+    expect(page1.totals.net).toBe(50_000)
+  })
+
+  /** THE DATE BOUND: `to` includes the WHOLE of that day. A sale at 23:59 is that day's takings. */
+  it('includes a sale at 23:59 on the to-day', () => {
+    sales.complete(
+      t.db,
+      cashier,
+      {
+        lines: [{ productId: a, qtyM: ONE_UNIT }],
+        payments: [{ methodLookupId: cash(), amount: 10_000 }]
+      },
+      new Date('2026-07-15T23:59:59.000Z')
+    )
+
+    const report = reports.itemWise(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    expect(report.totals.net, "a sale at 23:59 fell out of its own day's report").toBe(10_000)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 12. PAYMENT-METHOD BREAKDOWN
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('payment-method breakdown', () => {
+  it('counts each tender, nets off refunds and change, and shares out the takings', () => {
+    const a = makeProduct({ retailPrice: 10_000 })
+    openingStock(a, 100, 600_000)
+
+    sellExact(a, 2, cash(), 10_000) // Rs 200 cash
+    sellExact(a, 1, cash(), 10_000) // Rs 100 cash
+    sellExact(a, 3, card(), 10_000) // Rs 300 card
+
+    const report = reports.paymentMethodBreakdown(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    const cashRow = report.rows.find((r) => r.code === 'cash')!
+    expect(cashRow.count, 'the count is what byTender cannot tell you').toBe(2)
+    expect(cashRow.tendered).toBe(30_000)
+    expect(cashRow.net).toBe(30_000)
+
+    const cardRow = report.rows.find((r) => r.code === 'card')!
+    expect(cardRow.count).toBe(1)
+    expect(cardRow.net).toBe(30_000)
+
+    expect(report.totals.tendered).toBe(60_000)
+    expect(report.totals.net).toBe(60_000)
+    // Half the takings each — the shares are basis points, integers, and they sum to 100%.
+    expect(cashRow.shareBp).toBe(5000)
+    expect(cardRow.shareBp).toBe(5000)
+    expect(report.rows.reduce((sum, r) => sum + r.shareBp, 0)).toBe(10_000)
+
+    // It agrees with salesSummary about what was TENDERED — it just says more about it.
+    const summary = reports.salesSummary(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    expect(report.totals.tendered).toBe(summary.byTender.reduce((sum, r) => sum + r.amount, 0))
+  })
+
+  /** A REFUND PAID IN CASH LEAVES THE TILL. A tender report that cannot see it misleads the cashier. */
+  it('a cash refund reduces the cash tender NET', () => {
+    const a = makeProduct({ retailPrice: 20_000 })
+    openingStock(a, 100, 1_500_000)
+
+    const sale = sellExact(a, 2, cash(), 20_000) // Rs 400 in
+    returns.createReturn(
+      t.db,
+      supervisor,
+      {
+        saleId: sale.id,
+        lines: [{ saleLineId: sale.lines[0]!.id, qtyM: ONE_UNIT }],
+        settlement: 'refund',
+        refundMethodLookupId: cash(),
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+
+    const report = reports.paymentMethodBreakdown(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    const cashRow = report.rows.find((r) => r.code === 'cash')!
+
+    expect(cashRow.tendered).toBe(40_000)
+    expect(cashRow.refundCount).toBe(1)
+    expect(cashRow.refunded).toBe(20_000) // Rs 200 back out
+    expect(cashRow.net, 'a cash refund must come off the cash net').toBe(20_000)
+    expect(report.totals.net).toBe(20_000)
+  })
+
+  it('a VOIDED sale is in none of it', () => {
+    const a = makeProduct({ retailPrice: 10_000 })
+    openingStock(a, 100, 600_000)
+
+    sellExact(a, 1, cash(), 10_000)
+    const voided = sellExact(a, 2, card(), 10_000)
+    sales.voidSale(t.db, supervisor, { id: voided.id, reasonCode: 'test_sale' }, null, NOW)
+
+    const report = reports.paymentMethodBreakdown(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    expect(report.rows.find((r) => r.code === 'card'), 'a voided sale must not appear').toBeUndefined()
+    expect(report.totals.net).toBe(10_000)
+  })
+
+  /** Change comes out of the DRAWER, so it is charged to cash — and the net is what the till kept. */
+  it('nets the change off the cash tender', () => {
+    const a = makeProduct({ retailPrice: 10_000 })
+    openingStock(a, 100, 600_000)
+
+    // Rs 100 of goods, a Rs 500 note handed over: Rs 400 change.
+    sales.complete(
+      t.db,
+      cashier,
+      {
+        lines: [{ productId: a, qtyM: ONE_UNIT }],
+        payments: [{ methodLookupId: cash(), amount: 50_000 }]
+      },
+      NOW
+    )
+
+    const report = reports.paymentMethodBreakdown(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    const cashRow = report.rows.find((r) => r.code === 'cash')!
+
+    expect(cashRow.tendered).toBe(50_000)
+    expect(cashRow.changeGiven).toBe(40_000)
+    expect(cashRow.net, 'the drawer kept Rs 100, not Rs 500').toBe(10_000)
+    // And that is exactly what the sale's own journal debited to Cash.
+    expect(cashRow.net).toBe(ledger.accountBalance(t.db, ACC.CASH))
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 13. TAX SUMMARY
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('tax summary', () => {
+  /** The period's movement on an account — what the GL says happened between two dates. */
+  function glMovement(code: string, from: string, to: string): number {
+    return (
+      ledger.accountBalance(t.db, code) -
+      (t.db
+        .prepare(
+          `SELECT COALESCE(SUM(CASE WHEN a.type IN ('asset','expense') THEN jl.debit - jl.credit
+                                    ELSE jl.credit - jl.debit END), 0)
+             FROM journal_lines jl
+             JOIN journals j ON j.id = jl.journal_id
+             JOIN accounts a ON a.id = jl.account_id
+            WHERE a.code = ? AND (j.at < ? OR j.at >= ?)`
+        )
+        .pluck()
+        .get(code, from, dayAfterOf(to)) as number)
+    )
+  }
+
+  it('groups output tax by the FROZEN rate, and ties both sides to the ledger', () => {
+    const taxed = makeProduct({ retailPrice: 10_000, taxRateBp: 1700 }) // 17%
+    const zero = makeProduct({ retailPrice: 10_000, taxRateBp: 0 }) // 0%
+    openingStock(taxed, 100, 500_000)
+    openingStock(zero, 100, 500_000)
+
+    sellExact(taxed, 2, cash(), 10_000, { grand: 23_400 }) // Rs 200 + Rs 34 tax
+    sellExact(zero, 1, cash(), 10_000) // Rs 100, no tax
+
+    // A GST-registered purchase: Rs 170 of recoverable input tax.
+    const supplier = makeSupplier('Acme')
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: supplier,
+        lines: [{ productId: taxed, qtyM: 10 * ONE_UNIT, unitCost: 1_000_000 }],
+        taxTotal: 17_000,
+        payments: []
+      },
+      NOW
+    )
+
+    const report = reports.taxSummary(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    // By rate, read FROZEN off the lines — 17% and 0% each with their own net base.
+    const at17 = report.byRate.find((r) => r.taxRateBp === 1700)!
+    expect(at17.netBase).toBe(20_000)
+    expect(at17.taxAmount).toBe(3_400)
+    const at0 = report.byRate.find((r) => r.taxRateBp === 0)!
+    expect(at0.netBase, 'a zero-rated sale still has a base a tax return must show').toBe(10_000)
+    expect(at0.taxAmount).toBe(0)
+
+    expect(report.taxCollected).toBe(3_400)
+    expect(report.outputTax).toBe(3_400)
+    expect(report.inputTaxPaid).toBe(17_000)
+    expect(report.inputTax).toBe(17_000)
+    expect(report.netPayable).toBe(-13_600) // the government owes the shop — shown honestly, not clamped
+
+    // ── THE RECONCILIATION ────────────────────────────────────────────────────
+    expect(report.outputTax, 'output tax !== GL OUTPUT_TAX').toBe(
+      ledger.accountBalance(t.db, ACC.OUTPUT_TAX)
+    )
+    expect(report.inputTax, 'input tax !== GL INPUT_TAX').toBe(
+      ledger.accountBalance(t.db, ACC.INPUT_TAX)
+    )
+  })
+
+  /**
+   * A RETURN DEBITS Output Tax and a VOID contra-posts the whole sale journal, tax leg and all. A tax
+   * summary that only sums sale_lines would tell the shop to hand the government tax it gave back.
+   */
+  it('a return and a void both take tax back off — and it still ties to the GL', () => {
+    const p = makeProduct({ retailPrice: 10_000, taxRateBp: 1700 })
+    openingStock(p, 100, 500_000)
+
+    const kept = sellExact(p, 2, cash(), 10_000, { grand: 23_400 }) // Rs 34 tax
+    const returned = sellExact(p, 1, cash(), 10_000, { grand: 11_700 }) // Rs 17 tax
+    const voided = sellExact(p, 1, cash(), 10_000, { grand: 11_700 }) // Rs 17 tax
+
+    expect(kept.id).toBeTruthy()
+
+    returns.createReturn(
+      t.db,
+      supervisor,
+      {
+        saleId: returned.id,
+        lines: [{ saleLineId: returned.lines[0]!.id, qtyM: ONE_UNIT }],
+        settlement: 'refund',
+        refundMethodLookupId: cash(),
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+    sales.voidSale(t.db, supervisor, { id: voided.id, reasonCode: 'test_sale' }, null, NOW)
+
+    const report = reports.taxSummary(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    // Collected counts only the sales that still stand (the void dropped out of 'completed');
+    // the return's Rs 17 is reversed back off.
+    // The void is counted ONCE: it left 'completed', so its Rs 17 never entered `taxCollected` and
+    // must NOT be subtracted again. Only the RETURN reverses.
+    expect(report.taxCollected).toBe(5_100) // kept 34 + returned 17 — the void is already gone
+    expect(report.taxReversed, 'a void must not reverse tax that was never collected').toBe(1_700)
+    expect(report.outputTax).toBe(3_400) // 51 − 17
+
+    expect(report.outputTax, 'output tax !== GL OUTPUT_TAX after a return and a void').toBe(
+      ledger.accountBalance(t.db, ACC.OUTPUT_TAX)
+    )
+    expect(glMovement(ACC.OUTPUT_TAX, '2026-07-15', '2026-07-15')).toBe(report.outputTax)
+  })
+
+  /**
+   * REGRESSION — A JANUARY SALE VOIDED IN FEBRUARY IS STILL JANUARY'S TAX.
+   *
+   * Voiding flips `status` off 'completed' FOR ALL TIME, but the contra journal that reverses the tax
+   * is dated at the VOID. So a naive "status = 'completed'" filter silently rewrites a past period:
+   * June's report would drop the tax while June's GL still shows the credit, and a tax return already
+   * filed for June would no longer match the books. The reversal belongs to JULY, where the contra is.
+   */
+  it('a sale voided in a LATER period still counts as the earlier period’s tax', () => {
+    const p = makeProduct({ retailPrice: 10_000, taxRateBp: 1700 })
+    openingStock(p, 100, 500_000)
+
+    // Rung in JUNE...
+    const june = sellExact(p, 1, cash(), 10_000, { grand: 11_700, when: at('2026-06-10') })
+    // ...and cancelled in JULY.
+    sales.voidSale(t.db, supervisor, { id: june.id, reasonCode: 'test_sale' }, null, at('2026-07-15'))
+
+    // JUNE's books still show the Rs 17 credit — the contra is dated July — so June's report must too.
+    const juneReport = reports.taxSummary(t.db, { from: '2026-06-01', to: '2026-06-30' })
+    expect(juneReport.taxCollected, "a later void must not rewrite June's filed tax").toBe(1_700)
+    expect(juneReport.outputTax).toBe(1_700)
+    expect(juneReport.byRate.find((r) => r.taxRateBp === 1700)!.taxAmount).toBe(1_700)
+
+    // And over the WHOLE book the two cancel out, exactly as the GL does.
+    const all = reports.taxSummary(t.db, { from: '2026-01-01', to: FAR })
+    expect(all.outputTax).toBe(ledger.accountBalance(t.db, ACC.OUTPUT_TAX))
+    expect(all.outputTax).toBe(0)
+  })
+
+  it('a supplier return hands the reclaimed input tax back, and still ties to the GL', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const supplier = makeSupplier('Acme')
+
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: supplier,
+        lines: [{ productId: p, qtyM: 10 * ONE_UNIT, unitCost: 600_000 }],
+        taxTotal: 10_200,
+        payments: []
+      },
+      NOW
+    )
+    const purchaseId = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    const lineId = t.db
+      .prepare('SELECT id FROM purchase_lines WHERE purchase_id = ?')
+      .pluck()
+      .get(purchaseId) as number
+
+    purchaseReturns.createPurchaseReturn(
+      t.db,
+      owner,
+      {
+        purchaseId,
+        lines: [{ purchaseLineId: lineId, qtyM: 4 * ONE_UNIT }],
+        settlement: 'supplier_credit',
+        reasonCode: 'damaged'
+      },
+      NOW
+    )
+
+    const report = reports.taxSummary(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    expect(report.inputTaxPaid).toBe(10_200)
+    expect(report.inputTaxReversed).toBeGreaterThan(0)
+    expect(report.inputTax).toBe(report.inputTaxPaid - report.inputTaxReversed)
+    expect(report.inputTax, 'input tax !== GL INPUT_TAX after a supplier return').toBe(
+      ledger.accountBalance(t.db, ACC.INPUT_TAX)
+    )
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 14. LOW STOCK
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('low stock', () => {
+  it('uses the item override, falls back to the SETTING, and names the preferred supplier', () => {
+    settings.set(t.db, 'stock.lowStockDefault', 5) // 5 whole units
+
+    const own = makeProduct({ retailPrice: 10_000, minStockM: 50 * ONE_UNIT }) // its own level
+    const fallback = makeProduct({ retailPrice: 10_000 }) // min_stock_m = 0 → the setting
+    const fine = makeProduct({ retailPrice: 10_000, minStockM: 5 * ONE_UNIT })
+
+    openingStock(own, 10, 100_000) // 10 <= 50 → short by 40
+    openingStock(fallback, 2, 100_000) // 2 <= 5  → short by 3
+    openingStock(fine, 100, 100_000) // 100 > 5 → not on the list
+
+    const acme = makeSupplier('Acme')
+    t.db
+      .prepare(
+        `INSERT INTO product_suppliers
+           (product_id, supplier_id, supplier_item_code, is_preferred, created_at, updated_at)
+         VALUES (?, ?, 'ACM-99', 1, ?, ?)`
+      )
+      .run(own, acme, NOW.toISOString(), NOW.toISOString())
+
+    const report = reports.lowStock(t.db)
+
+    expect(report.defaultThresholdM).toBe(5 * ONE_UNIT)
+    expect(report.total).toBe(2)
+    expect(report.rows.find((r) => r.productId === fine)).toBeUndefined()
+
+    const ownRow = report.rows.find((r) => r.productId === own)!
+    expect(ownRow.thresholdM).toBe(50 * ONE_UNIT)
+    expect(ownRow.usesDefaultThreshold).toBe(false)
+    expect(ownRow.shortfallM).toBe(40 * ONE_UNIT)
+    expect(ownRow.preferredSupplierName).toBe('Acme')
+    expect(ownRow.supplierItemCode).toBe('ACM-99')
+
+    const fallbackRow = report.rows.find((r) => r.productId === fallback)!
+    expect(fallbackRow.thresholdM, 'the setting must be the fallback, never a literal').toBe(5 * ONE_UNIT)
+    expect(fallbackRow.usesDefaultThreshold).toBe(true)
+    expect(fallbackRow.shortfallM).toBe(3 * ONE_UNIT)
+    expect(fallbackRow.preferredSupplierName).toBeNull()
+
+    // WORST FIRST — the biggest hole is the first thing the owner sees.
+    expect(report.rows[0]!.productId).toBe(own)
+  })
+
+  it('follows the setting when the shop changes it', () => {
+    settings.set(t.db, 'stock.lowStockDefault', 50)
+    const p = makeProduct({ retailPrice: 10_000 }) // no override
+    openingStock(p, 10, 100_000) // 10 <= 50 → low
+
+    expect(reports.lowStock(t.db).total).toBe(1)
+
+    settings.set(t.db, 'stock.lowStockDefault', 5) // 10 > 5 → no longer low
+    expect(reports.lowStock(t.db).total).toBe(0)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 15. NEAR EXPIRY
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('near expiry', () => {
+  it('lists batches with stock left soonest-first, keeps EXPIRED ones, and hides empty ones', () => {
+    settings.set(t.db, 'stock.nearExpiryDays', 30)
+    const p = makeProduct({ retailPrice: 10_000 })
+
+    const expired = makeBatch(p, 'B-OLD', '2026-07-10') // 5 days AGO
+    const soon = makeBatch(p, 'B-SOON', '2026-07-20') // in 5 days
+    const later = makeBatch(p, 'B-LATER', '2026-12-31') // outside the window
+    const emptyBatch = makeBatch(p, 'B-EMPTY', '2026-07-18') // in the window, but nothing left
+
+    stockIntoBatch(p, expired, 6, 900_000)
+    stockIntoBatch(p, soon, 3, 700_000)
+    stockIntoBatch(p, later, 10, 500_000)
+
+    const report = reports.nearExpiry(t.db, {}, NOW)
+
+    expect(report.withinDays).toBe(30)
+    expect(report.total, 'an empty batch is not a problem; a far-off one is not near').toBe(2)
+    expect(report.rows.map((r) => r.batchId)).toEqual([expired, soon]) // soonest (most overdue) first
+    expect(report.rows.find((r) => r.batchId === later)).toBeUndefined()
+    expect(report.rows.find((r) => r.batchId === emptyBatch)).toBeUndefined()
+
+    const expiredRow = report.rows[0]!
+    expect(expiredRow.expired).toBe(true)
+    expect(expiredRow.daysRemaining, 'an expired batch shows NEGATIVE days, and is never hidden').toBe(-5)
+    expect(expiredRow.onHandM).toBe(6 * ONE_UNIT)
+    // 6 units x Rs 90 (a 4-dp cost of 900_000) = Rs 540 = 54,000 paisa — the FROZEN value_minor.
+    expect(expiredRow.valueMinor).toBe(54_000)
+
+    expect(report.rows[1]!.daysRemaining).toBe(5)
+    expect(report.expiredCount).toBe(1)
+    expect(report.totalValueMinor).toBe(54_000 + 21_000) // + 3 units x Rs 70
+  })
+
+  it('withinDays overrides the setting; the setting is the default', () => {
+    settings.set(t.db, 'stock.nearExpiryDays', 7)
+    const p = makeProduct({ retailPrice: 10_000 })
+    const batch = makeBatch(p, 'B-1', '2026-08-01') // 17 days out
+    stockIntoBatch(p, batch, 5, 100_000)
+
+    // The shop's setting says 7 days — this is not near yet.
+    expect(reports.nearExpiry(t.db, {}, NOW).total).toBe(0)
+    // Ask for 90 and it is.
+    const wide = reports.nearExpiry(t.db, { withinDays: 90 }, NOW)
+    expect(wide.total).toBe(1)
+    expect(wide.withinDays).toBe(90)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 16. CASH BOOK
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('cash book', () => {
+  it('opens, lists every cash movement, closes — and ties to GL Cash', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    // JUNE — before the window. This is the opening balance the period carries in.
+    sellExact(p, 2, cash(), 10_000, { when: at('2026-06-10') }) // Rs 200 in
+
+    // JULY — the period itself.
+    sellExact(p, 3, cash(), 10_000, { when: at('2026-07-15') }) // Rs 300 in
+    sellExact(p, 1, card(), 10_000, { when: at('2026-07-15') }) // card — NOT a cash movement
+    expenses.createExpense(
+      t.db,
+      owner,
+      {
+        categoryLookupId: lookupId('expense_category', 'rent'),
+        amount: 5_000, // Rs 50 out
+        methodLookupId: cash()
+      },
+      at('2026-07-16')
+    )
+
+    const report = reports.cashBook(t.db, { from: '2026-07-01', to: '2026-07-31' })
+
+    expect(report.opening, "June's takings are the opening balance").toBe(20_000)
+    expect(report.totalIn).toBe(30_000)
+    expect(report.totalOut).toBe(5_000)
+    expect(report.total, 'the card sale never touched cash').toBe(2)
+
+    // ── THE TWO RECONCILIATIONS ───────────────────────────────────────────────
+    expect(report.closing).toBe(report.opening + report.totalIn - report.totalOut)
+    expect(report.closing, 'the cash book has drifted from GL Cash').toBe(
+      ledger.accountBalance(t.db, ACC.CASH)
+    )
+    expect(report.closing).toBe(45_000)
+
+    // The running balance walks from the opening, in order, and lands on the closing.
+    expect(report.rows[0]!.balanceMinor).toBe(50_000) // 200 + 300
+    expect(report.rows.at(-1)!.balanceMinor).toBe(report.closing)
+    expect(report.rows.at(-1)!.outMinor).toBe(5_000)
+    expect(report.rows.at(-1)!.memo).toContain('Rent')
+  })
+
+  it('the running balance continues across pages', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-07-15T09:00:00.000Z') })
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-07-15T10:00:00.000Z') })
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-07-15T11:00:00.000Z') })
+
+    const window = { from: '2026-07-01', to: '2026-07-31' }
+    const page1 = reports.cashBook(t.db, { ...window, page: 1, pageSize: 2 })
+    const page2 = reports.cashBook(t.db, { ...window, page: 2, pageSize: 2 })
+
+    expect(page1.total).toBe(3)
+    expect(page1.rows.map((r) => r.balanceMinor)).toEqual([10_000, 20_000])
+    // Page 2 CARRIES ON from page 1 — it does not restart at the opening.
+    expect(page2.rows.map((r) => r.balanceMinor)).toEqual([30_000])
+    expect(page2.rows.at(-1)!.balanceMinor).toBe(page2.closing)
+    // The totals are the period's on both pages.
+    expect(page2.totalIn).toBe(page1.totalIn)
+  })
+
+  it('a sale at 23:59 on the to-day is inside the period', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+    sales.complete(
+      t.db,
+      cashier,
+      {
+        lines: [{ productId: p, qtyM: ONE_UNIT }],
+        payments: [{ methodLookupId: cash(), amount: 10_000 }]
+      },
+      new Date('2026-07-15T23:59:59.000Z')
+    )
+
+    const report = reports.cashBook(t.db, { from: '2026-07-15', to: '2026-07-15' })
+    expect(report.totalIn, "a sale at 23:59 fell out of its own day's cash book").toBe(10_000)
+    expect(report.closing).toBe(ledger.accountBalance(t.db, ACC.CASH))
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 17. GENERAL LEDGER
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('general ledger', () => {
+  it('walks a DEBIT-natured account and ties its closing to the GL', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000) // DR Inventory Rs 6000
+    sellExact(p, 40, cash(), 10_000) // CR Inventory Rs 2400
+
+    const report = reports.generalLedger(t.db, {
+      from: '2026-01-01',
+      to: '2026-12-31',
+      accountCode: ACC.INVENTORY
+    })
+
+    expect(report.accountCode).toBe(ACC.INVENTORY)
+    expect(report.accountType).toBe('asset')
+    expect(report.isDebitNatured).toBe(true)
+    expect(report.totalDebit).toBe(600_000)
+    expect(report.totalCredit).toBe(240_000)
+    expect(report.closing).toBe(360_000)
+    expect(report.closing, 'the general ledger disagrees with the account balance').toBe(
+      ledger.accountBalance(t.db, ACC.INVENTORY)
+    )
+    expect(report.rows.at(-1)!.balanceMinor).toBe(report.closing)
+  })
+
+  /**
+   * A LIABILITY IS CREDIT-NATURED. Read it on the debit side and every payable in the book prints
+   * negative — the commonest way a home-made ledger report misleads its owner.
+   */
+  it('respects the natural side of a CREDIT-natured account', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const acme = makeSupplier('Acme')
+    purchaseOnAccount(acme, p, 10, 600_000, at('2026-07-15')) // CR Payable Rs 600
+    supplierLedger.recordPayment(
+      t.db,
+      owner,
+      { supplierId: acme, amount: 10_000, methodLookupId: cash() },
+      at('2026-07-16')
+    ) // DR Payable Rs 100
+
+    const report = reports.generalLedger(t.db, {
+      from: '2026-07-01',
+      to: '2026-07-31',
+      accountCode: ACC.PAYABLE
+    })
+
+    expect(report.isDebitNatured, 'a liability grows on the CREDIT side').toBe(false)
+    expect(report.rows[0]!.credit).toBe(60_000)
+    expect(report.rows[0]!.balanceMinor, 'a credit must RAISE a liability').toBe(60_000)
+    expect(report.rows[1]!.debit).toBe(10_000)
+    expect(report.rows[1]!.balanceMinor).toBe(50_000)
+
+    expect(report.closing).toBe(50_000)
+    expect(report.closing).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
+    // And it agrees with the aging report, which reaches the same number from the source documents.
+    expect(report.closing).toBe(reports.supplierAging(t.db, { asOf: FAR }).totals.total)
+  })
+
+  it('carries an opening balance in from before the period', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+    sellExact(p, 2, cash(), 10_000, { when: at('2026-06-10') }) // June: Rs 200 into Cash
+    sellExact(p, 1, cash(), 10_000, { when: at('2026-07-15') }) // July: Rs 100
+
+    const july = reports.generalLedger(t.db, {
+      from: '2026-07-01',
+      to: '2026-07-31',
+      accountCode: ACC.CASH
+    })
+
+    expect(july.opening, "June's cash is July's opening balance").toBe(20_000)
+    expect(july.total, "only July's lines are listed").toBe(1)
+    expect(july.closing).toBe(30_000)
+    expect(july.closing).toBe(ledger.accountBalance(t.db, ACC.CASH))
+  })
+
+  it('refuses an account that does not exist', () => {
+    expect(() =>
+      reports.generalLedger(t.db, { from: '2026-07-01', to: '2026-07-31', accountCode: '9999' })
+    ).toThrow()
   })
 })

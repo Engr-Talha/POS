@@ -4,8 +4,10 @@ import { AppError, ErrorCode } from '@shared/result'
 import { ACC } from '../db/chart-of-accounts'
 import { costToPriceMinor } from '@shared/cost'
 import { QTY_SCALE } from '@shared/qty'
+import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 import * as ledger from './ledger'
 import * as audit from './audit'
+import * as settings from './settings'
 import type { z } from 'zod'
 import {
   AdjustStockInput,
@@ -1039,7 +1041,14 @@ export type NearExpiryInput = {
 export function nearExpiry(db: DB, input: NearExpiryInput = {}): PagedResult<NearExpiryRow> {
   const page = Math.max(1, input.page ?? 1)
   const pageSize = Math.min(200, Math.max(1, input.pageSize ?? 50))
-  const days = Math.max(0, input.days ?? 30)
+  // How far ahead to look is the SHOP's call, not this file's (CLAUDE.md §4: if a number could
+  // reasonably differ between two shops, it is a setting). A bakery worries weeks ahead; a hardware shop
+  // never. `input.days` is the caller's explicit override; otherwise the owner's setting decides, whose
+  // registry default is 30 — so a shop that never touched it sees exactly what it always saw.
+  const days = Math.max(
+    0,
+    input.days ?? settings.get<number>(db, 'stock.nearExpiryDays', REGISTRY_DEFAULTS['stock.nearExpiryDays'] as number)
+  )
   const asOf = input.asOf ?? new Date()
 
   const cutoff = new Date(asOf.getTime() + days * 24 * 60 * 60 * 1000)

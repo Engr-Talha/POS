@@ -6,6 +6,7 @@ import * as catalog from './catalog'
 // The supplier RECORD service (create/getById/...) is canonical and lives here. The product↔supplier
 // LINK tests below still need real supplier rows to link to, so they create them through it.
 import * as suppliers from './suppliers'
+import * as settings from './settings'
 import { ONE_UNIT } from '@shared/qty'
 
 /**
@@ -731,6 +732,27 @@ describe('batches', () => {
     // A wider horizon reaches the January batch; nothing reaches the one that never expires.
     const wide = catalog.nearExpiry(t.db, { days: 365, asOf })
     expect(wide.rows.map((r) => r.batchNo)).toEqual(['GONE-OFF', 'SOON', 'LATER'])
+
+    /**
+     * REGRESSION — THE HORIZON IS THE SHOP'S SETTING, NOT A LITERAL.
+     *
+     * `days` was hardcoded to 30 here. Every existing test passed `days` explicitly, so nothing noticed
+     * that an owner who set 'stock.nearExpiryDays' to 90 still got a 30-day warning — the setting existed,
+     * the Settings screen offered it, and it did nothing. (CLAUDE.md §4: if a number could reasonably
+     * differ between two shops, it is a setting. A bakery worries weeks ahead; a hardware shop never.)
+     * The registry default is 30, so a shop that never touched it sees exactly what it always saw.
+     */
+    settings.set(t.db, 'stock.nearExpiryDays', 365, asOf)
+    const bySetting = catalog.nearExpiry(t.db, { asOf }) // no `days` — the SETTING must decide
+    expect(bySetting.rows.map((r) => r.batchNo), "the owner's near-expiry window was ignored").toEqual([
+      'GONE-OFF',
+      'SOON',
+      'LATER'
+    ])
+
+    // An explicit argument still wins: it is the caller asking for one specific run.
+    const overridden = catalog.nearExpiry(t.db, { days: 30, asOf })
+    expect(overridden.rows.map((r) => r.batchNo)).toEqual(['GONE-OFF', 'SOON'])
   })
 
   it('lists batches for one product, paginated', () => {

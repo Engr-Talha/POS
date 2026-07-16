@@ -302,6 +302,24 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Reports finished** (v0.16.0). The remaining EIGHT, read-only, no migration: itemWise, categoryWise,
+  paymentMethodBreakdown, taxSummary, lowStock, nearExpiry, cashBook, generalLedger — 17 reports now, all
+  17 exporting to Excel and PDF. Everything is read FROZEN (a line's tax_rate_bp/tax_amount, a movement's
+  value_minor) and the ones with a ledger counterpart ASSERT they tie to it: taxSummary vs GL
+  OUTPUT_TAX/INPUT_TAX, cashBook vs GL Cash, generalLedger vs the account balance, itemWise/categoryWise vs
+  the profit report (the same money cut differently — if they disagree, one of them is lying to the
+  shopkeeper). The reconciliation earned its keep AGAIN: taxSummary first DOUBLE-REVERSED a void's tax
+  (report said Rs 17, GL said Rs 34) because voiding both flips status off 'completed' AND posts a contra;
+  `taxReversed` now counts RETURNS ONLY. **A CLAUDE.md §4 violation found and fixed:** `nearExpiry`
+  hardcoded a 30-day horizon in TWO places (catalog.ts, the live IPC path, and stock.ts) while
+  'stock.nearExpiryDays' sat in the registry doing nothing — an owner who set 90 still got 30. Every
+  existing test passed `days` explicitly, which is why nothing caught it; now pinned by a regression test.
+  Both PDFs rendered and LOOKED AT (trap #14): single page, no box-shadow, no external assets, the expired
+  batch showing −5 days with its red "may still be on the shelf" warning.
+  **OWNER DECISION NEEDED — a tax-filing rule, defaulted, please confirm:** a sale rung in June but VOIDED
+  in July stays in JUNE's tax summary. Rationale: its contra journal is dated July, so June's GL still
+  shows the credit, and a return already filed for June should not be silently rewritten — the reversal
+  belongs to July. The alternative (filter on status alone) would retroactively change a filed period.
 - **Loyalty done** (v0.15.0). Migration 0017 (`loyalty_movements` + account 5300 Loyalty Points Expense);
   the four `loyalty.*` settings already existed and are the business rules — the scheme is OFF until a shop
   turns it on, and everything hides when it is. Two decisions drive the whole design:

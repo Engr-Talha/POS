@@ -7,6 +7,7 @@ import {
   Group,
   NumberInput,
   SegmentedControl,
+  Select,
   Skeleton,
   Stack,
   Table,
@@ -18,21 +19,29 @@ import {
 import { notifications } from '@mantine/notifications'
 import {
   BarChart3,
+  BookOpen,
   BookUser,
   Boxes,
+  CalendarClock,
   CircleCheck,
+  CreditCard,
   FileDown,
   FileSpreadsheet,
   FileText,
   Landmark,
+  PackageSearch,
+  Percent,
   ReceiptText,
   RefreshCw,
   Scale,
   ShieldAlert,
+  Tags,
   TriangleAlert,
   TrendingUp,
-  Truck
+  Truck,
+  Wallet
 } from 'lucide-react'
+import type { Account } from '@shared/accounting'
 import type { ReportRequest } from '@shared/reports'
 import {
   buildReportView,
@@ -48,7 +57,7 @@ import { formatQty } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
 
 /**
- * REPORTS — the payoff screen. Nine reports, each read on screen and exportable to Excel or PDF.
+ * REPORTS — the payoff screen. Seventeen reports, each read on screen and exportable to Excel or PDF.
  *
  * This screen NEVER computes a number. It asks MAIN (`reports.get`) for the frozen figures and RENDERS
  * them, and it uses the very same `buildReportView` the export layer uses (shared/report-export.ts) to
@@ -120,11 +129,25 @@ function metaColor(value: string): string {
 }
 
 // ── The menu of reports. Which params each report takes mirrors the `ReportRequest` union exactly:
-//    a PERIOD [from, to], an AS-OF date, or "as of now" + a near-expiry knob. `makeRequest` closes over
-//    the literal `kind` so the request is built type-safely with no cast — MAIN re-validates it anyway.
+//    a PERIOD [from, to], a PERIOD + a PAGE, an AS-OF date, "as of now" + a knob, a paged "as of now",
+//    or one ACCOUNT over a period. `makeRequest` closes over the literal `kind` so the request is built
+//    type-safely with no cast — MAIN re-validates it anyway.
+//
+// ── PAGING IS THE SERVER'S, NOT THE SCREEN'S ──────────────────────────────────────────────────────
+//
+// Seven of these reports are PAGED IN MAIN (CLAUDE.md §4 — assume 100k+ rows, never an unbounded
+// SELECT *). For those, `page`/`pageSize` ride the request and the answer comes back with its own
+// `total` and the WHOLE period's totals. The screen must NOT re-slice those rows: MAIN already sent
+// exactly one page, and slicing it again would hide rows behind a pager that promised them. So a paged
+// report re-fetches on a page click, and the unpaged ones keep the client-side pager they have always
+// had (their row sets are bounded — a shop has a handful of tenders, not 100k).
 type PeriodParams = { from: string; to: string }
+type PagedPeriodParams = PeriodParams & { page: number; pageSize: number }
 type AsOfParams = { asOf: string }
 type StockParams = { nearExpiryDays: number | undefined }
+type PagedParams = { page: number; pageSize: number }
+type NearExpiryParams = PagedParams & { withinDays: number | undefined }
+type LedgerParams = PagedPeriodParams & { accountCode: string }
 
 type ReportDefBase = {
   kind: ReportKind
@@ -133,10 +156,26 @@ type ReportDefBase = {
   description: string
 }
 
+/**
+ * `paged: true` marks a report MAIN pages. It drives two things and nothing else: the screen re-runs the
+ * request on a page click, and `SectionBlock` shows the server's pager instead of its own.
+ */
 type ReportDef =
   | (ReportDefBase & { params: 'period'; makeRequest: (p: PeriodParams) => ReportRequest })
+  | (ReportDefBase & {
+      params: 'pagedPeriod'
+      paged: true
+      makeRequest: (p: PagedPeriodParams) => ReportRequest
+    })
   | (ReportDefBase & { params: 'asOf'; makeRequest: (p: AsOfParams) => ReportRequest })
   | (ReportDefBase & { params: 'stock'; makeRequest: (p: StockParams) => ReportRequest })
+  | (ReportDefBase & { params: 'paged'; paged: true; makeRequest: (p: PagedParams) => ReportRequest })
+  | (ReportDefBase & {
+      params: 'nearExpiry'
+      paged: true
+      makeRequest: (p: NearExpiryParams) => ReportRequest
+    })
+  | (ReportDefBase & { params: 'ledger'; paged: true; makeRequest: (p: LedgerParams) => ReportRequest })
 
 const REPORTS: ReportDef[] = [
   {
@@ -156,6 +195,39 @@ const REPORTS: ReportDef[] = [
     makeRequest: ({ from, to }) => ({ kind: 'profit', from, to })
   },
   {
+    kind: 'itemWise',
+    group: 'Sales & profit',
+    icon: PackageSearch,
+    params: 'pagedPeriod',
+    paged: true,
+    description: 'What each item sold, earned and cost — best sellers first.',
+    makeRequest: ({ from, to, page, pageSize }) => ({ kind: 'itemWise', from, to, page, pageSize })
+  },
+  {
+    kind: 'categoryWise',
+    group: 'Sales & profit',
+    icon: Tags,
+    params: 'pagedPeriod',
+    paged: true,
+    description: 'The same trade as item-wise, grouped by category.',
+    makeRequest: ({ from, to, page, pageSize }) => ({ kind: 'categoryWise', from, to, page, pageSize })
+  },
+  {
+    kind: 'paymentMethodBreakdown',
+    group: 'Sales & profit',
+    icon: CreditCard,
+    params: 'pagedPeriod',
+    paged: true,
+    description: 'Per tender: what came in, what went back out, and the net.',
+    makeRequest: ({ from, to, page, pageSize }) => ({
+      kind: 'paymentMethodBreakdown',
+      from,
+      to,
+      page,
+      pageSize
+    })
+  },
+  {
     kind: 'stockValuation',
     group: 'Inventory',
     icon: Boxes,
@@ -165,6 +237,27 @@ const REPORTS: ReportDef[] = [
       nearExpiryDays === undefined
         ? { kind: 'stockValuation' }
         : { kind: 'stockValuation', nearExpiryDays }
+  },
+  {
+    kind: 'lowStock',
+    group: 'Inventory',
+    icon: PackageSearch,
+    params: 'paged',
+    paged: true,
+    description: 'What to buy: every item at or below its re-order level, worst first.',
+    makeRequest: ({ page, pageSize }) => ({ kind: 'lowStock', page, pageSize })
+  },
+  {
+    kind: 'nearExpiry',
+    group: 'Inventory',
+    icon: CalendarClock,
+    params: 'nearExpiry',
+    paged: true,
+    description: 'Batches about to expire — and any already expired — soonest first.',
+    makeRequest: ({ withinDays, page, pageSize }) =>
+      withinDays === undefined
+        ? { kind: 'nearExpiry', page, pageSize }
+        : { kind: 'nearExpiry', withinDays, page, pageSize }
   },
   {
     kind: 'customerAging',
@@ -213,8 +306,68 @@ const REPORTS: ReportDef[] = [
     params: 'asOf',
     description: 'Assets, liabilities and equity at a date.',
     makeRequest: ({ asOf }) => ({ kind: 'balanceSheet', asOf })
+  },
+  {
+    kind: 'taxSummary',
+    group: 'Accounting',
+    icon: Percent,
+    params: 'period',
+    description: 'Output tax collected less input tax paid — what the shop owes the government.',
+    makeRequest: ({ from, to }) => ({ kind: 'taxSummary', from, to })
+  },
+  {
+    kind: 'cashBook',
+    group: 'Accounting',
+    icon: Wallet,
+    params: 'pagedPeriod',
+    paged: true,
+    description: 'The cash account’s story: opening, every movement, and the closing balance.',
+    makeRequest: ({ from, to, page, pageSize }) => ({ kind: 'cashBook', from, to, page, pageSize })
+  },
+  {
+    kind: 'generalLedger',
+    group: 'Accounting',
+    icon: BookOpen,
+    params: 'ledger',
+    paged: true,
+    description: 'One account, every line over a period, with a running balance.',
+    makeRequest: ({ from, to, accountCode, page, pageSize }) => ({
+      kind: 'generalLedger',
+      from,
+      to,
+      accountCode,
+      page,
+      pageSize
+    })
   }
 ]
+
+/** The three families that take a [from, to] period — they share the preset bar and the date boxes. */
+function usesPeriod(def: ReportDef): boolean {
+  return def.params === 'period' || def.params === 'pagedPeriod' || def.params === 'ledger'
+}
+
+/**
+ * The server's paging for a paged report, read back OFF THE PAYLOAD — never off renderer state.
+ *
+ * MAIN is the source of truth for `total`, `page` and `pageSize`: it ran the COUNT. Reading them off the
+ * answer means the pager describes the rows actually on screen, even if a request is still in flight or
+ * MAIN clamped a page we asked for. `null` for a report MAIN does not page.
+ */
+function serverPagingOf(
+  payload: ReportPayload | null
+): { total: number; page: number; pageSize: number } | null {
+  if (!payload) return null
+  const data = payload.data as Partial<{ total: number; page: number; pageSize: number }>
+  if (
+    typeof data.total !== 'number' ||
+    typeof data.page !== 'number' ||
+    typeof data.pageSize !== 'number'
+  ) {
+    return null
+  }
+  return { total: data.total, page: data.page, pageSize: data.pageSize }
+}
 
 type Preset = 'today' | 'month' | 'year' | 'custom'
 
@@ -237,6 +390,16 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
   })
   const [asOf, setAsOf] = useState<string>(todayIso())
   const [nearExpiry, setNearExpiry] = useState<number | ''>('')
+  // The near-expiry REPORT's own window. Deliberately separate from `nearExpiry` (the stock-valuation
+  // knob): they are two different reports whose windows a shopkeeper sets independently.
+  const [expiryWindow, setExpiryWindow] = useState<number | ''>('')
+  // The General Ledger's account. Empty until the accounts load and one is chosen.
+  const [accountCode, setAccountCode] = useState<string>('')
+  const [accounts, setAccounts] = useState<Account[]>([])
+
+  // The page a SERVER-PAGED report is on. Held here (not in SectionBlock) because a page click has to
+  // re-issue the request to MAIN — the rows for page 2 exist only there.
+  const [serverPage, setServerPage] = useState({ page: 1, pageSize: 50 })
 
   const [payload, setPayload] = useState<ReportPayload | null>(null)
   const [activeRequest, setActiveRequest] = useState<ReportRequest | null>(null)
@@ -278,18 +441,81 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The chart of accounts, for the General Ledger's account picker. Loaded once — it is a small, stable
+  // list, and MAIN gates it 'report.view' like every other read on this screen. A failure here is not an
+  // error banner: it only means the picker has nothing to offer, which it says itself.
+  useEffect(() => {
+    let cancelled = false
+    void window.pos.ledger.accounts().then((result) => {
+      if (cancelled || !result.ok) return
+      setAccounts(result.data.filter((account) => account.isActive))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /**
+   * THE ONE PLACE A REQUEST IS BUILT, for any report, at any page. Every caller — picking a report,
+   * hitting Run, clicking a page — goes through here, so a page click cannot accidentally send different
+   * dates than the Run button did. `paging` is only consulted by the reports MAIN pages.
+   */
+  const buildRequest = useCallback(
+    (def: ReportDef, paging: { page: number; pageSize: number }): ReportRequest | null => {
+      switch (def.params) {
+        case 'period':
+          return def.makeRequest({ from: period.from, to: period.to })
+        case 'pagedPeriod':
+          return def.makeRequest({ from: period.from, to: period.to, ...paging })
+        case 'asOf':
+          return def.makeRequest({ asOf })
+        case 'stock':
+          return def.makeRequest({ nearExpiryDays: nearExpiry === '' ? undefined : nearExpiry })
+        case 'paged':
+          return def.makeRequest(paging)
+        case 'nearExpiry':
+          return def.makeRequest({
+            withinDays: expiryWindow === '' ? undefined : expiryWindow,
+            ...paging
+          })
+        case 'ledger':
+          // No account chosen yet — there is nothing to ask MAIN for. The picker says so on screen.
+          if (!accountCode) return null
+          return def.makeRequest({ from: period.from, to: period.to, accountCode, ...paging })
+      }
+    },
+    [period.from, period.to, asOf, nearExpiry, expiryWindow, accountCode]
+  )
+
+  /** Run a report from page 1 — what every param change means: a different question, asked afresh. */
+  const runFirstPage = useCallback(
+    (def: ReportDef): void => {
+      const first = { page: 1, pageSize: serverPage.pageSize }
+      setServerPage(first)
+      const request = buildRequest(def, first)
+      if (request) void run(request)
+      else setPayload(null)
+    },
+    [buildRequest, run, serverPage.pageSize]
+  )
+
   function selectReport(def: ReportDef): void {
     setSelectedKind(def.kind)
-    // Run immediately with whatever dates that param family already holds.
-    if (def.params === 'period') void run(def.makeRequest({ from: period.from, to: period.to }))
-    else if (def.params === 'asOf') void run(def.makeRequest({ asOf }))
-    else void run(def.makeRequest({ nearExpiryDays: nearExpiry === '' ? undefined : nearExpiry }))
+    // Run immediately with whatever params that family already holds, from the top of the report.
+    runFirstPage(def)
+  }
+
+  /** A page click on a SERVER-PAGED report: same question, next page — re-asked of MAIN. */
+  function goToPage(paging: { page: number; pageSize: number }): void {
+    setServerPage(paging)
+    const request = buildRequest(activeDef, paging)
+    if (request) void run(request)
   }
 
   // ── Period reports: the quick presets run at once; Custom reveals the two date boxes and waits for
   //    the Run button, so we do not fire a query on every keystroke of a half-typed date.
   function applyPreset(preset: Preset): void {
-    if (activeDef.params !== 'period') return
+    if (!usesPeriod(activeDef)) return
     if (preset === 'custom') {
       setPeriod((p) => ({ ...p, preset }))
       return
@@ -297,11 +523,31 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
     const to = todayIso()
     const from = preset === 'today' ? to : preset === 'month' ? monthStartIso() : yearStartIso()
     setPeriod({ preset, from, to })
-    void run(activeDef.makeRequest({ from, to }))
+    // `period` state has not landed yet, so build this run from the dates we just computed — a switch,
+    // not a ternary chain, so the compiler narrows each family to its own makeRequest.
+    const paging = { page: 1, pageSize: serverPage.pageSize }
+    setServerPage(paging)
+
+    let request: ReportRequest | null = null
+    switch (activeDef.params) {
+      case 'period':
+        request = activeDef.makeRequest({ from, to })
+        break
+      case 'pagedPeriod':
+        request = activeDef.makeRequest({ from, to, ...paging })
+        break
+      case 'ledger':
+        request = accountCode ? activeDef.makeRequest({ from, to, accountCode, ...paging }) : null
+        break
+      default:
+        // usesPeriod() has already excluded every other family.
+        return
+    }
+    if (request) void run(request)
   }
 
   function runCustomPeriod(): void {
-    if (activeDef.params !== 'period') return
+    if (!usesPeriod(activeDef)) return
     if (period.from > period.to) {
       notifications.show({
         color: 'orange',
@@ -311,7 +557,7 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
       })
       return
     }
-    void run(activeDef.makeRequest({ from: period.from, to: period.to }))
+    runFirstPage(activeDef)
   }
 
   // ── As-of reports: one date, defaulting to today.
@@ -321,10 +567,10 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
     void run(activeDef.makeRequest({ asOf: date }))
   }
 
-  // ── Stock valuation: no date (it is "as of now"); an optional near-expiry window overrides the setting.
-  function runStock(): void {
-    if (activeDef.params !== 'stock') return
-    void run(activeDef.makeRequest({ nearExpiryDays: nearExpiry === '' ? undefined : nearExpiry }))
+  // ── The "as of now" reports (stock valuation, low stock, near expiry) and the ledger: no date to
+  //    pick, just their own knob. Always from page 1 — a new window is a new question.
+  function runNow(): void {
+    runFirstPage(activeDef)
   }
 
   async function exportReport(kind: 'excel' | 'pdf'): Promise<void> {
@@ -356,6 +602,10 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
 
   const view = useMemo(() => (payload ? buildReportView(payload) : null), [payload])
   const canExport = payload !== null && !loading
+  // Only a report MAIN pages gets the server pager; for the rest SectionBlock keeps its own.
+  const serverPaging = 'paged' in activeDef && activeDef.paged ? serverPagingOf(payload) : null
+  // The General Ledger cannot run until an account is named. That is not an error — it is a prompt.
+  const awaitingAccount = activeDef.params === 'ledger' && !accountCode
 
   return (
     <Stack gap="lg">
@@ -411,8 +661,38 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
           <Card withBorder padding="md">
             <Group justify="space-between" align="flex-end" gap="md" wrap="wrap">
               <div>
-                {activeDef.params === 'period' && (
+                {usesPeriod(activeDef) && (
                   <Stack gap="sm">
+                    {/* The General Ledger walks ONE account — pick it before the dates mean anything. */}
+                    {activeDef.params === 'ledger' && (
+                      <Select
+                        label="Account"
+                        placeholder={accounts.length === 0 ? 'Loading accounts…' : 'Choose an account'}
+                        description="The account whose lines this report walks"
+                        searchable
+                        disabled={accounts.length === 0}
+                        value={accountCode || null}
+                        data={accounts.map((account) => ({
+                          value: account.code,
+                          label: `${account.code} — ${account.name}`
+                        }))}
+                        onChange={(value) => {
+                          if (!value) return
+                          setAccountCode(value)
+                          const paging = { page: 1, pageSize: serverPage.pageSize }
+                          setServerPage(paging)
+                          void run(
+                            (activeDef as Extract<ReportDef, { params: 'ledger' }>).makeRequest({
+                              from: period.from,
+                              to: period.to,
+                              accountCode: value,
+                              ...paging
+                            })
+                          )
+                        }}
+                        w={320}
+                      />
+                    )}
                     <SegmentedControl
                       value={period.preset}
                       onChange={(value) => applyPreset(value as Preset)}
@@ -484,7 +764,36 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
                       allowDecimal={false}
                       w={220}
                     />
-                    <Button leftSection={<RefreshCw size={16} />} onClick={runStock} loading={loading}>
+                    <Button leftSection={<RefreshCw size={16} />} onClick={runNow} loading={loading}>
+                      Run report
+                    </Button>
+                  </Group>
+                )}
+
+                {/* Low stock is "as of now" and takes no knob — the re-order level is the shop's own
+                    setting (or the item's override), never something typed here. */}
+                {activeDef.params === 'paged' && (
+                  <Button leftSection={<RefreshCw size={16} />} onClick={runNow} loading={loading}>
+                    Run report
+                  </Button>
+                )}
+
+                {activeDef.params === 'nearExpiry' && (
+                  <Group align="flex-end" gap="sm">
+                    <NumberInput
+                      label="Expiring within (days)"
+                      description="Leave blank to use the shop’s setting"
+                      placeholder="Shop default"
+                      value={expiryWindow}
+                      onChange={(value) =>
+                        setExpiryWindow(value === '' || value === undefined ? '' : Number(value))
+                      }
+                      min={0}
+                      max={3650}
+                      allowDecimal={false}
+                      w={220}
+                    />
+                    <Button leftSection={<RefreshCw size={16} />} onClick={runNow} loading={loading}>
                       Run report
                     </Button>
                   </Group>
@@ -538,6 +847,14 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
                   </Button>
                 </Group>
               </Alert>
+            ) : awaitingAccount ? (
+              <Stack align="center" gap="xs" py="xl">
+                <BookOpen size={32} opacity={0.5} />
+                <Text fw={600}>Choose an account</Text>
+                <Text size="sm" c="dimmed">
+                  Pick the account whose ledger you want to read, above.
+                </Text>
+              </Stack>
             ) : !view ? (
               <Stack align="center" gap="xs" py="xl">
                 <BarChart3 size={32} opacity={0.5} />
@@ -576,6 +893,10 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
                     section={section}
                     currencySymbol={currencySymbol}
                     reloadKey={reloadKey}
+                    // MAIN pages these reports, so the pager is the server's and a click re-fetches.
+                    // Only the FIRST section carries it: a paged report has exactly one long table.
+                    serverPaging={i === 0 ? serverPaging : null}
+                    onServerPage={goToPage}
                   />
                 ))}
               </Stack>
@@ -590,15 +911,29 @@ export function Reports({ currencySymbol }: { currencySymbol: string }): React.J
 /**
  * One titled block of the report: its heading, its table (paginated when long), and its bold TOTAL line.
  * The total is the sum across ALL rows, so it stays pinned in the footer no matter which page you are on.
+ *
+ * ── TWO KINDS OF PAGING, AND MIXING THEM WOULD HIDE ROWS ─────────────────────────────────────────
+ *
+ * `serverPaging` present  — MAIN already sent exactly ONE page and told us the real `total`. The rows
+ *                           are rendered AS GIVEN (never re-sliced: slicing a page of 50 by another 50
+ *                           would drop rows behind a pager that claims to show them), and a page click
+ *                           goes back to MAIN for the next page.
+ * `serverPaging` null     — the report is unpaged and its rows are all here (a handful of tenders, a
+ *                           month of days). The old client-side pager keeps that table readable.
  */
 function SectionBlock({
   section,
   currencySymbol,
-  reloadKey
+  reloadKey,
+  serverPaging,
+  onServerPage
 }: {
   section: ReportSection
   currencySymbol: string
   reloadKey: number
+  /** The server's `{ total, page, pageSize }` when MAIN pages this report; null when it does not. */
+  serverPaging: { total: number; page: number; pageSize: number } | null
+  onServerPage: (paging: { page: number; pageSize: number }) => void
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
@@ -608,11 +943,12 @@ function SectionBlock({
     setPage(1)
   }, [reloadKey])
 
-  const total = section.rows.length
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  // Server-paged: show what MAIN sent, exactly. Client-paged: slice locally as before.
+  const clientTotal = section.rows.length
+  const totalPages = Math.max(1, Math.ceil(clientTotal / pageSize))
   const safePage = Math.min(Math.max(1, page), totalPages)
-  const paginated = total > pageSize
-  const visible = paginated
+  const clientPaginated = !serverPaging && clientTotal > pageSize
+  const visible = clientPaginated
     ? section.rows.slice((safePage - 1) * pageSize, (safePage - 1) * pageSize + pageSize)
     : section.rows
   const minWidth = Math.max(360, section.columns.length * 130)
@@ -681,15 +1017,26 @@ function SectionBlock({
         </Table>
       </Table.ScrollContainer>
 
-      {paginated && (
+      {serverPaging ? (
         <Paginator
-          page={safePage}
-          pageSize={pageSize}
-          total={total}
-          onPage={setPage}
-          onPageSize={setPageSize}
+          page={serverPaging.page}
+          pageSize={serverPaging.pageSize}
+          total={serverPaging.total}
+          onPage={(next) => onServerPage({ page: next, pageSize: serverPaging.pageSize })}
+          onPageSize={(size) => onServerPage({ page: 1, pageSize: size })}
           unit="row"
         />
+      ) : (
+        clientPaginated && (
+          <Paginator
+            page={safePage}
+            pageSize={pageSize}
+            total={clientTotal}
+            onPage={setPage}
+            onPageSize={setPageSize}
+            unit="row"
+          />
+        )
       )}
     </Stack>
   )

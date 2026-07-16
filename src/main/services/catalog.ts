@@ -12,11 +12,13 @@ import type {
   SerialNumber,
   SerialStatus
 } from '@shared/catalog'
+import * as settings from './settings'
 import { ONE_UNIT } from '@shared/qty'
 // The supplier RECORD (create/update/list/getById) is the canonical party service. This file keeps
 // only the product↔supplier LINK; it reaches into suppliers.getById to prove a supplier exists before
 // linking a product to it. No cycle: suppliers.ts does not import catalog.ts.
 import * as suppliers from './suppliers'
+import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 
 /**
  * CATALOG — the parts of the legacy "Item Detail" form that hang off a product:
@@ -1167,7 +1169,17 @@ export function nearExpiry(db: DB, input: NearExpiryArgs = {}): PagedResult<Near
   const { page, pageSize, offset } = pageOf(input)
 
   const asOf = input.asOf ?? new Date()
-  const days = input.days ?? 30
+  // How far ahead to look is the SHOP's call, not this file's (CLAUDE.md §4: if a number could
+  // reasonably differ between two shops, it is a setting). A bakery worries weeks ahead; a hardware shop
+  // never. `input.days` is the caller asking for one specific run; otherwise the owner's setting decides,
+  // whose registry default is 30 — so a shop that never touched it sees exactly what it always saw.
+  const days =
+    input.days ??
+    settings.get<number>(
+      db,
+      'stock.nearExpiryDays',
+      REGISTRY_DEFAULTS['stock.nearExpiryDays'] as number
+    )
 
   const horizon = new Date(asOf.getTime())
   horizon.setDate(horizon.getDate() + days)

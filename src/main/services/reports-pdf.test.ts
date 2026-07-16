@@ -50,7 +50,20 @@ const EXPECTED_TOTALS: Record<ReportPayload['kind'], string[]> = {
   leakage: ['200.00'],
   trialBalance: ['13,136.44', 'Balanced'],
   profitAndLoss: ['1,427.75'],
-  balanceSheet: ['10,540.83', 'Balanced']
+  balanceSheet: ['10,540.83', 'Balanced'],
+  // The gross-profit total, which must read the same here as on the profit report — same money, cut
+  // per item — and the 3-dp weighed quantity that precision is easiest to lose on.
+  itemWise: ['1,927.75', '1.234'],
+  // The bucket that must never be silently dropped, and the same period total again.
+  categoryWise: ['Uncategorised', '1,927.75'],
+  paymentMethodBreakdown: ['3,769.83', '5,919.83'],
+  taxSummary: ['646.00', '246.00'],
+  lowStock: ['Acme Distributors', '3.766'],
+  // The already-expired batch must be visible, negative days and all, plus the value at risk.
+  nearExpiry: ['-5', '750.00'],
+  cashBook: ['3,619.83'],
+  // A liability's closing balance, read on its natural (credit) side — never printed negative.
+  generalLedger: ['350.00', 'Supplier Payables']
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

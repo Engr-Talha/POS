@@ -7,16 +7,34 @@ import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 import {
   AsOfInput,
   DateRangeInput,
+  GeneralLedgerInput,
+  LowStockReportInput,
+  NearExpiryReportInput,
+  PagedDateRangeInput,
   StockValuationInput,
   ReportRequest,
   type AgingBuckets,
   type BalanceSheetLine,
   type BalanceSheetReport,
+  type CashBookReport,
+  type CashBookRow,
+  type CategoryWiseReport,
+  type CategoryWiseRow,
   type CustomerAgingReport,
   type CustomerAgingRow,
+  type GeneralLedgerReport,
+  type GeneralLedgerRow,
+  type ItemWiseReport,
+  type ItemWiseRow,
   type LeakageReport,
   type LeakageRow,
   type LeakageTotals,
+  type LowStockReport,
+  type LowStockRow,
+  type NearExpiryReport,
+  type NearExpiryRow,
+  type PaymentMethodBreakdownReport,
+  type PaymentMethodRow,
   type PnlRow,
   type ProfitAndLossReport,
   type ProfitReport,
@@ -25,9 +43,13 @@ import {
   type StockValuationRow,
   type SupplierAgingReport,
   type SupplierAgingRow,
+  type TaxSummaryRateRow,
+  type TaxSummaryReport,
   type TrialBalanceReport
 } from '@shared/reports'
 import type { ReportPayload } from '@shared/report-export'
+import { ONE_UNIT } from '@shared/qty'
+import { ACC } from '../db/chart-of-accounts'
 import * as ledger from './ledger'
 import * as settings from './settings'
 import { outstandingCredit } from './sales'
@@ -957,23 +979,909 @@ export function balanceSheet(db: DB, raw: unknown): BalanceSheetReport {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// 10 & 11. ITEM-WISE and CATEGORY-WISE SALES — the same money, cut two ways
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * PAGING, the way every list in this app does it (CLAUDE.md §4 — assume 100k+ rows).
+ * 1-based page, size capped at 200. Returned alongside the rows so a caller always knows what it got.
+ */
+function paging(input: { page?: number; pageSize?: number }): { page: number; pageSize: number; limit: number; offset: number } {
+  const page = Math.max(1, input.page ?? 1)
+  const pageSize = Math.min(200, Math.max(1, input.pageSize ?? 50))
+  return { page, pageSize, limit: pageSize, offset: (page - 1) * pageSize }
+}
+
+/**
+ * COGS ON A SALE LINE, from the line's OWN FROZEN unit_cost — the single expression both cuts share.
+ *
+ * unit_cost is 4-dp COST and qty_m is 3-dp QTY, so the product is scaled by 10^7 and money is 10^2:
+ * divide by 100000 to land in paisa. The ROUNDING HAPPENS PER LINE and only once, which is what makes
+ * item-wise and category-wise sum to the same total — group-then-round would not (sum-of-rounded is
+ * not round-of-sum, the same trap migration 0006 exists for).
+ *
+ * SQLite's integer division truncates toward zero, so a rounding term is added explicitly. Every
+ * operand here is a non-negative integer (both columns are CHECKed >= 0), so +50000 before the divide
+ * is a true round-half-up and can never see a negative.
+ */
+const LINE_COGS_SQL = '((sl.unit_cost * sl.qty_m + 50000) / 100000)'
+
+/** The FROZEN margin: grossProfit / net, in basis points. Integer, off the float path. */
+function marginBpOf(net: number, grossProfit: number): number {
+  return net > 0 ? Math.round((grossProfit * BASIS_POINTS) / net) : 0
+}
+
+type TradeTotals = { qtyM: number; net: number; tax: number; gross: number; cogs: number; grossProfit: number }
+
+/** Σ the whole period, in SQL, across EVERY matching row — never by summing the page. */
+function tradeTotals(db: DB, bounds: { from: string; toExclusive: string }): TradeTotals {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(sl.qty_m), 0)         AS qtyM,
+              COALESCE(SUM(sl.net), 0)           AS net,
+              COALESCE(SUM(sl.tax_amount), 0)    AS tax,
+              COALESCE(SUM(sl.gross), 0)         AS gross,
+              COALESCE(SUM(${LINE_COGS_SQL}), 0) AS cogs
+       FROM sale_lines sl
+       JOIN sales s ON s.id = sl.sale_id
+       WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive`
+    )
+    .get(bounds) as Omit<TradeTotals, 'grossProfit'>
+
+  return { ...row, grossProfit: row.net - row.cogs }
+}
+
+/**
+ * ITEM-WISE SALES — what each product sold, earned and cost, over [from, to].
+ *
+ * Every figure is read back FROZEN off the sale line: `net`, `tax_amount`, `gross` as they were
+ * charged, and `unit_cost` as it was at the instant of the sale (CLAUDE.md §4). Nothing here re-prices
+ * from today's catalog or re-costs from today's weighted average — which is exactly why this report's
+ * Σ grossProfit equals the `profit` report's for the same period, and a test asserts it. They are the
+ * same money, cut differently; if they disagreed, one of them would be lying to the shopkeeper.
+ *
+ * Grouped by product, and by NAME for an open item — a line with no product_id ("Misc — Rs 50") still
+ * sold and still earned, so dropping it would silently put this report out of step with the profit
+ * report. Sorted by gross desc: the shopkeeper wants his best sellers at the top. PAGED.
+ */
+export function itemWise(db: DB, raw: unknown): ItemWiseReport {
+  const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.itemWise')
+  const { from, to } = input
+  const bounds = { from, toExclusive: dayAfter(to) }
+  const { page, pageSize, limit, offset } = paging(input)
+
+  // GROUP BY the product, falling back to the frozen name for an open item (product_id IS NULL). The
+  // sku/name of a catalogued row come from the product; an open item has no sku and carries the name
+  // the receipt printed.
+  const groupSql = `
+    FROM sale_lines sl
+    JOIN sales s      ON s.id = sl.sale_id
+    LEFT JOIN products p ON p.id = sl.product_id
+    WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive
+    GROUP BY COALESCE(CAST(sl.product_id AS TEXT), 'open:' || sl.name_snapshot)
+  `
+
+  const total = db
+    .prepare(`SELECT COUNT(*) FROM (SELECT 1 ${groupSql})`)
+    .pluck()
+    .get(bounds) as number
+
+  const rows = (
+    db
+      .prepare(
+        `SELECT sl.product_id                      AS productId,
+                COALESCE(p.sku, '')                AS sku,
+                MIN(sl.name_snapshot)              AS name,
+                COALESCE(SUM(sl.qty_m), 0)         AS qtyM,
+                COALESCE(SUM(sl.net), 0)           AS net,
+                COALESCE(SUM(sl.tax_amount), 0)    AS tax,
+                COALESCE(SUM(sl.gross), 0)         AS gross,
+                COALESCE(SUM(${LINE_COGS_SQL}), 0) AS cogs
+         ${groupSql}
+         ORDER BY gross DESC, name, sl.product_id
+         LIMIT @limit OFFSET @offset`
+      )
+      .all({ ...bounds, limit, offset }) as Array<{
+      productId: number | null
+      sku: string
+      name: string
+      qtyM: number
+      net: number
+      tax: number
+      gross: number
+      cogs: number
+    }>
+  ).map((row): ItemWiseRow => {
+    const grossProfit = row.net - row.cogs
+    return { ...row, grossProfit, marginBp: marginBpOf(row.net, grossProfit) }
+  })
+
+  return { from, to, rows, total, page, pageSize, totals: tradeTotals(db, bounds) }
+}
+
+/**
+ * CATEGORY-WISE SALES — the same money as item-wise, grouped by the product's CATEGORY lookup.
+ *
+ * A PRODUCT WITH NO CATEGORY STILL APPEARS, as one 'Uncategorised' row — mirroring how customerAging
+ * surfaces its 'Unassigned (walk-in credit)' line. Silently dropping it would make this report's total
+ * disagree with item-wise's over the same period, and the shopkeeper would have no way to tell which
+ * of the two was lying. An OPEN ITEM has no product at all, so it lands there too: it is genuinely
+ * uncategorised trade, and it is still trade.
+ *
+ * Sorted by gross desc. PAGED — a shop can run hundreds of categories.
+ */
+export function categoryWise(db: DB, raw: unknown): CategoryWiseReport {
+  const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.categoryWise')
+  const { from, to } = input
+  const bounds = { from, toExclusive: dayAfter(to) }
+  const { page, pageSize, limit, offset } = paging(input)
+
+  // p.category_id is NULL both when the product has no category AND when there is no product (an open
+  // item) — one GROUP BY handles both, and COALESCE names the bucket.
+  const groupSql = `
+    FROM sale_lines sl
+    JOIN sales s          ON s.id = sl.sale_id
+    LEFT JOIN products p  ON p.id = sl.product_id
+    LEFT JOIN lookups cat ON cat.id = p.category_id
+    WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive
+    GROUP BY p.category_id
+  `
+
+  const total = db
+    .prepare(`SELECT COUNT(*) FROM (SELECT 1 ${groupSql})`)
+    .pluck()
+    .get(bounds) as number
+
+  const rows = (
+    db
+      .prepare(
+        `SELECT p.category_id                              AS categoryId,
+                COALESCE(cat.label, 'Uncategorised')       AS name,
+                COALESCE(SUM(sl.qty_m), 0)                 AS qtyM,
+                COALESCE(SUM(sl.net), 0)                   AS net,
+                COALESCE(SUM(sl.tax_amount), 0)            AS tax,
+                COALESCE(SUM(sl.gross), 0)                 AS gross,
+                COALESCE(SUM(${LINE_COGS_SQL}), 0)         AS cogs
+         ${groupSql}
+         ORDER BY gross DESC, name
+         LIMIT @limit OFFSET @offset`
+      )
+      .all({ ...bounds, limit, offset }) as Array<{
+      categoryId: number | null
+      name: string
+      qtyM: number
+      net: number
+      tax: number
+      gross: number
+      cogs: number
+    }>
+  ).map((row): CategoryWiseRow => {
+    const grossProfit = row.net - row.cogs
+    return { ...row, grossProfit, marginBp: marginBpOf(row.net, grossProfit) }
+  })
+
+  return { from, to, rows, total, page, pageSize, totals: tradeTotals(db, bounds) }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 12. PAYMENT-METHOD BREAKDOWN
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * PER TENDER: what came IN, what went back OUT, and the NET.
+ *
+ * salesSummary.byTender already answers "what was tendered?" — one number per method — and this does
+ * NOT duplicate it. It answers the question asked at closing time: HOW MUCH SHOULD BE IN THIS DRAWER?
+ * That needs three things byTender does not have:
+ *
+ *   • a COUNT per tender (how many transactions, not just how much),
+ *   • the REFUNDS paid back out through the same tender (a cash refund leaves the till),
+ *   • the CHANGE handed back, and the resulting NET.
+ *
+ * CHANGE IS CASH, ALWAYS, whatever the customer paid with — the drawer is what change comes out of. A
+ * sale tendered Rs 500 cash for Rs 460 of goods has `tendered` 500 and `changeGiven` 40. It is charged
+ * to the cash row (matching how the sale's own journal debits Cash net of change, sales.ts §7), so a
+ * card sale never shows phantom change.
+ *
+ * A 'customer_credit' or 'exchange' return paid nothing out of any tender and is correctly absent from
+ * `refunded` — the money moved on the customer's account, not through the till.
+ *
+ * PAGED, though a shop has a handful of tenders — the same discipline as every other list, and it
+ * costs nothing to honour it.
+ */
+export function paymentMethodBreakdown(db: DB, raw: unknown): PaymentMethodBreakdownReport {
+  const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.paymentMethodBreakdown')
+  const { from, to } = input
+  const bounds = { from, toExclusive: dayAfter(to) }
+  const { page, pageSize, limit, offset } = paging(input)
+
+  // One row per tender that saw ANY activity — money in OR money back out. A tender used only for
+  // refunds in the period still has a story to tell, so a UNION of both sides drives the row set.
+  const activeSql = `
+    SELECT DISTINCT method_lookup_id AS id FROM (
+      SELECT sp.method_lookup_id
+        FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id
+       WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive
+      UNION
+      SELECT r.refund_method_lookup_id
+        FROM returns r
+       WHERE r.settlement = 'refund' AND r.refund_method_lookup_id IS NOT NULL
+         AND r.at >= @from AND r.at < @toExclusive
+    ) WHERE id IS NOT NULL
+  `
+
+  const total = db.prepare(`SELECT COUNT(*) FROM (${activeSql})`).pluck().get(bounds) as number
+
+  // Tendered + count, per method.
+  const tenderedRows = db
+    .prepare(
+      `SELECT sp.method_lookup_id AS id, COUNT(*) AS count, COALESCE(SUM(sp.amount), 0) AS tendered
+       FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id
+       WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive
+       GROUP BY sp.method_lookup_id`
+    )
+    .all(bounds) as Array<{ id: number; count: number; tendered: number }>
+
+  // Refunds paid back OUT through a tender.
+  const refundRows = db
+    .prepare(
+      `SELECT r.refund_method_lookup_id AS id, COUNT(*) AS count, COALESCE(SUM(r.grand_total), 0) AS refunded
+       FROM returns r
+       WHERE r.settlement = 'refund' AND r.refund_method_lookup_id IS NOT NULL
+         AND r.at >= @from AND r.at < @toExclusive
+       GROUP BY r.refund_method_lookup_id`
+    )
+    .all(bounds) as Array<{ id: number; count: number; refunded: number }>
+
+  // Change handed back — charged to the CASH tender, because that is where change comes from. Only
+  // sales that tendered cash can have given cash change, which is what the EXISTS clause says.
+  const changeByMethod = db
+    .prepare(
+      `SELECT sp.method_lookup_id AS id, COALESCE(SUM(s.change_due), 0) AS changeGiven
+       FROM sales s
+       JOIN sale_payments sp ON sp.sale_id = s.id
+       JOIN lookups l        ON l.id = sp.method_lookup_id
+       WHERE s.status = 'completed' AND s.at >= @from AND s.at < @toExclusive
+         AND s.change_due > 0 AND l.code = 'cash'
+       GROUP BY sp.method_lookup_id`
+    )
+    .all(bounds) as Array<{ id: number; changeGiven: number }>
+
+  const tenderedBy = new Map(tenderedRows.map((row) => [row.id, row]))
+  const refundBy = new Map(refundRows.map((row) => [row.id, row]))
+  const changeBy = new Map(changeByMethod.map((row) => [row.id, row.changeGiven]))
+
+  const identify = db.prepare('SELECT code, label FROM lookups WHERE id = ?')
+
+  const ids = db.prepare(activeSql).pluck().all(bounds) as number[]
+
+  const all = ids.map((id) => {
+    const who = identify.get(id) as { code: string; label: string } | undefined
+    const tendered = tenderedBy.get(id)?.tendered ?? 0
+    const changeGiven = changeBy.get(id) ?? 0
+    const refunded = refundBy.get(id)?.refunded ?? 0
+    return {
+      methodLookupId: id,
+      code: who?.code ?? '',
+      label: who?.label ?? `Method #${id}`,
+      count: tenderedBy.get(id)?.count ?? 0,
+      tendered,
+      refundCount: refundBy.get(id)?.count ?? 0,
+      refunded,
+      changeGiven,
+      net: tendered - changeGiven - refunded
+    }
+  })
+
+  const totals = {
+    count: all.reduce((sum, row) => sum + row.count, 0),
+    tendered: all.reduce((sum, row) => sum + row.tendered, 0),
+    refundCount: all.reduce((sum, row) => sum + row.refundCount, 0),
+    refunded: all.reduce((sum, row) => sum + row.refunded, 0),
+    changeGiven: all.reduce((sum, row) => sum + row.changeGiven, 0),
+    net: all.reduce((sum, row) => sum + row.net, 0)
+  }
+
+  // The share is of the NET takings — the money the shop kept — and only when that is positive. A
+  // period whose net is zero or negative (more refunded than taken) has no meaningful denominator, and
+  // inventing one would print a nonsense percentage on a real report.
+  const rows: PaymentMethodRow[] = all
+    .map((row) => ({
+      ...row,
+      shareBp: totals.net > 0 ? Math.round((row.net * BASIS_POINTS) / totals.net) : 0
+    }))
+    .sort((a, b) => b.net - a.net || a.label.localeCompare(b.label))
+    .slice(offset, offset + limit)
+
+  return { from, to, rows, total, page, pageSize, totals }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 13. TAX SUMMARY — what the shop owes the government
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * OUTPUT TAX collected on sales less INPUT TAX paid on purchases, for the period.
+ *
+ * ── IT TIES TO THE LEDGER, AND A TEST ASSERTS BOTH SIDES ────────────────────────────────────────
+ *
+ *     outputTax === the GL movement on ACC.OUTPUT_TAX over [from, to]
+ *     inputTax  === the GL movement on ACC.INPUT_TAX  over [from, to]
+ *
+ * That tie is the whole design, and it is why `outputTax` is NOT simply Σ sale_lines.tax_amount. Three
+ * different events touch that account, and a tax return that sees only the first is wrong:
+ *
+ *     a SALE    CR Output Tax  (sales.ts §7)          — collected
+ *     a RETURN  DR Output Tax  (returns.ts)           — handed back with the goods
+ *     a VOID    contra-posts the WHOLE sale journal, tax leg included (sales.voidSale)
+ *
+ * ── THE VOID IS COUNTED ONCE, NOT TWICE ─────────────────────────────────────────────────────────
+ *
+ * A void does BOTH things at once, and that is the trap this report fell into first. Voiding flips the
+ * sale's status off 'completed', so its tax silently leaves `taxCollected` — AND it posts a contra
+ * journal that debits Output Tax. Subtract both and the tax is reversed twice: the report said Rs 17
+ * where the GL said Rs 34, and only the reconciliation below caught it.
+ *
+ * So `taxReversed` counts RETURNS ONLY. A void needs no subtraction because the sale it cancelled is
+ * already gone from the collected side — the two paths reach the same place by different routes.
+ *
+ * THE SAME-PERIOD CASE IS THE EASY ONE. The hard one is a JANUARY sale VOIDED IN FEBRUARY: January's
+ * report no longer counts it as collected (status is 'voided' today), and January's GL still shows the
+ * credit, because the contra is dated February. Those two genuinely disagree — and they SHOULD: a tax
+ * return already filed for January is not rewritten by a February void; the reversal belongs to
+ * February, which is exactly where the contra journal puts it. `voidedOutsidePeriod` restores that:
+ * it adds back the tax of sales rung in the period but voided AFTER it, so the period's report says
+ * what the period's books say. A void inside the period nets to zero on both sides, untouched.
+ *
+ * Everything is read FROZEN: `tax_rate_bp` and `tax_amount` off the sale line as they were charged,
+ * `tax_total` off the purchase as it was billed. Nothing is re-derived from today's product settings.
+ */
+export function taxSummary(db: DB, raw: unknown): TaxSummaryReport {
+  const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.taxSummary')
+  const bounds = { from, toExclusive: dayAfter(to) }
+
+  // ── OUTPUT: collected on sales, grouped by the rate FROZEN on the line ──────
+  //
+  // Zero-rated and exempt lines land in the 0-bp row with their net base and no tax — a tax return has
+  // to show them, not omit them: "we sold this much at 0%" is an answer the government asks for.
+  //
+  // A sale rung in this period but VOIDED AFTER IT still belongs to this period's collected tax — the
+  // books say so, because its contra journal is dated in the later period (see the header). So the
+  // filter is "completed, OR voided after this period ended", which is what the GL account shows.
+  const COLLECTED_WHERE = `
+    WHERE s.at >= @from AND s.at < @toExclusive
+      AND (s.status = 'completed'
+           OR (s.status = 'voided' AND s.voided_at >= @toExclusive))
+  `
+
+  const byRate = db
+    .prepare(
+      `SELECT sl.tax_rate_bp                    AS taxRateBp,
+              COALESCE(SUM(sl.net), 0)          AS netBase,
+              COALESCE(SUM(sl.tax_amount), 0)   AS taxAmount
+       FROM sale_lines sl
+       JOIN sales s ON s.id = sl.sale_id
+       ${COLLECTED_WHERE}
+       GROUP BY sl.tax_rate_bp
+       ORDER BY sl.tax_rate_bp DESC`
+    )
+    .all(bounds) as TaxSummaryRateRow[]
+
+  const taxCollected = byRate.reduce((sum, row) => sum + row.taxAmount, 0)
+
+  // ── The tax handed back: RETURNS ONLY ───────────────────────────────────────
+  //
+  // NOT voids. A void inside the period has already removed itself from `taxCollected` above (its
+  // status is no longer 'completed'), so subtracting its contra as well would reverse the same tax
+  // twice — the bug the GL reconciliation caught. See the header.
+  const taxReversed = db
+    .prepare(
+      `SELECT COALESCE(SUM(tax_total), 0) FROM returns WHERE at >= @from AND at < @toExclusive`
+    )
+    .pluck()
+    .get(bounds) as number
+
+  const outputTax = taxCollected - taxReversed
+
+  // ── INPUT: paid to suppliers on the bills, less what came back with returns ─
+  const inputTaxPaid = db
+    .prepare(
+      `SELECT COALESCE(SUM(tax_total), 0) FROM purchases WHERE at >= @from AND at < @toExclusive`
+    )
+    .pluck()
+    .get(bounds) as number
+
+  const inputTaxReversed = db
+    .prepare(
+      `SELECT COALESCE(SUM(tax_total), 0) FROM purchase_returns WHERE at >= @from AND at < @toExclusive`
+    )
+    .pluck()
+    .get(bounds) as number
+
+  const inputTax = inputTaxPaid - inputTaxReversed
+
+  return {
+    from,
+    to,
+    byRate,
+    taxCollected,
+    taxReversed,
+    outputTax,
+    inputTaxPaid,
+    inputTaxReversed,
+    inputTax,
+    // Honestly signed. A month of heavy buying legitimately nets NEGATIVE — the government owes the
+    // shop — and clamping that to zero would hide a real refund.
+    netPayable: outputTax - inputTax
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 14. LOW STOCK — the re-order report
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * WHAT TO BUY, worst-first: every inventory item at or below its re-order level.
+ *
+ * THE THRESHOLD IS NEVER A LITERAL (CLAUDE.md §4). It is `products.min_stock_m` — the item's own
+ * override — and when that is 0 (the schema default: "nobody has set one"), it falls back to the shop's
+ * 'stock.lowStockDefault' SETTING. The setting is in WHOLE UNITS, so it is scaled to qty_m here; the
+ * row says which of the two it used, so the owner can see why an item is on the list.
+ *
+ * Only `item_type = 'inventory'`: a service or a bag charge has no stock and can never be re-ordered.
+ * Only ACTIVE items — a deactivated product is one the shop has stopped selling, and putting it on the
+ * buy list is how a discontinued line gets re-ordered by accident. (stockValuation lists inactive rows
+ * that still hold value for the opposite reason: their money is real and must reach the total.)
+ *
+ * On-hand is DERIVED from stock_movements, as always — there is no mutable stock column, ever.
+ * Sorted WORST-FIRST by shortfall, so the biggest hole is the first thing on the screen. PAGED.
+ */
+export function lowStock(db: DB, raw: unknown = {}): LowStockReport {
+  const input = parseOrThrow(LowStockReportInput, raw, 'reports.lowStock')
+  const { page, pageSize, limit, offset } = paging(input)
+
+  // The setting is in whole units; every quantity in the app is qty_m (thousandths).
+  const defaultThresholdM = setting<number>(db, 'stock.lowStockDefault') * ONE_UNIT
+
+  const onHandSql = '(SELECT COALESCE(SUM(m.qty_m), 0) FROM stock_movements m WHERE m.product_id = p.id)'
+  const thresholdSql = `(CASE WHEN p.min_stock_m > 0 THEN p.min_stock_m ELSE @defaultThresholdM END)`
+
+  // At most ONE preferred supplier per product, enforced by a partial unique index (0003), so this
+  // join can never fan a product out into two rows.
+  const fromSql = `
+    FROM products p
+    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_preferred = 1
+    LEFT JOIN suppliers sup        ON sup.id = ps.supplier_id
+    WHERE p.item_type = 'inventory' AND p.is_active = 1
+      AND ${onHandSql} <= ${thresholdSql}
+  `
+
+  const params = { defaultThresholdM }
+
+  const total = db.prepare(`SELECT COUNT(*) ${fromSql}`).pluck().get(params) as number
+
+  const rows = (
+    db
+      .prepare(
+        `SELECT p.id            AS productId,
+                p.sku           AS sku,
+                p.name          AS name,
+                p.min_stock_m   AS minStockM,
+                ${onHandSql}    AS onHandM,
+                ${thresholdSql} AS thresholdM,
+                ps.supplier_id        AS preferredSupplierId,
+                sup.name              AS preferredSupplierName,
+                ps.supplier_item_code AS supplierItemCode
+         ${fromSql}
+         ORDER BY (${thresholdSql} - ${onHandSql}) DESC, p.name, p.id
+         LIMIT @limit OFFSET @offset`
+      )
+      .all({ ...params, limit, offset }) as Array<{
+      productId: number
+      sku: string
+      name: string
+      minStockM: number
+      onHandM: number
+      thresholdM: number
+      preferredSupplierId: number | null
+      preferredSupplierName: string | null
+      supplierItemCode: string | null
+    }>
+  ).map(
+    (row): LowStockRow => ({
+      productId: row.productId,
+      sku: row.sku,
+      name: row.name,
+      onHandM: row.onHandM,
+      thresholdM: row.thresholdM,
+      usesDefaultThreshold: row.minStockM <= 0,
+      shortfallM: row.thresholdM - row.onHandM,
+      preferredSupplierId: row.preferredSupplierId,
+      preferredSupplierName: row.preferredSupplierName,
+      supplierItemCode: row.supplierItemCode
+    })
+  )
+
+  return { rows, total, page, pageSize, defaultThresholdM }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 15. NEAR EXPIRY
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * STOCK THE SHOP IS ABOUT TO HAVE TO THROW AWAY, soonest first.
+ *
+ * The window is the shop's 'stock.nearExpiryDays' SETTING; `withinDays` overrides it for one run.
+ * Never a literal (CLAUDE.md §4) — a pharmacy and a grocer do not agree on what "near" means.
+ *
+ * TWO rules this report exists to honour:
+ *
+ *   • ONLY BATCHES WITH STOCK LEFT (`onHand > 0`). A batch that sold out cannot expire, and listing it
+ *     buries the batches that matter under ones nobody needs to act on.
+ *   • ALREADY-EXPIRED BATCHES ARE ALWAYS SHOWN, however far past, with a NEGATIVE `daysRemaining`.
+ *     Dropping a batch out of the report the day it expires is precisely how expired stock stays on a
+ *     shelf — the report must get louder then, not go quiet.
+ *
+ * The value at risk is Σ the batch's movements' own FROZEN `value_minor` — never on-hand × today's
+ * cost. Same rule as everywhere: sum-of-rounded is not round-of-sum (migration 0006).
+ *
+ * PAGED, soonest-expiry first. `now` is injectable so a test can be deterministic.
+ */
+export function nearExpiry(db: DB, raw: unknown = {}, now = new Date()): NearExpiryReport {
+  const input = parseOrThrow(NearExpiryReportInput, raw, 'reports.nearExpiry')
+  const withinDays = input.withinDays ?? setting<number>(db, 'stock.nearExpiryDays')
+  const { page, pageSize, limit, offset } = paging(input)
+
+  const today = dateOnly(now.toISOString())
+  const cutoff = dateOnly(new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000).toISOString())
+
+  const onHandSql = '(SELECT COALESCE(SUM(m.qty_m), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
+  const valueSql = '(SELECT COALESCE(SUM(m.value_minor), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
+
+  // `expiry_date <= cutoff` already includes everything ALREADY expired (its date is in the past, so
+  // it is below any future cutoff) — the urgent rows come along by construction, not by a special case.
+  const whereSql = `
+    FROM batches b
+    JOIN products p ON p.id = b.product_id
+    WHERE b.expiry_date IS NOT NULL AND b.expiry_date <= @cutoff AND ${onHandSql} > 0
+  `
+
+  const params = { cutoff }
+
+  const summary = db
+    .prepare(
+      `SELECT COUNT(*)                             AS total,
+              COALESCE(SUM(${valueSql}), 0)        AS totalValueMinor,
+              COALESCE(SUM(b.expiry_date < @today), 0) AS expiredCount
+       ${whereSql}`
+    )
+    .get({ ...params, today }) as { total: number; totalValueMinor: number; expiredCount: number }
+
+  const rows = (
+    db
+      .prepare(
+        `SELECT b.id          AS batchId,
+                b.batch_no    AS batchNo,
+                b.expiry_date AS expiryDate,
+                p.id          AS productId,
+                p.sku         AS sku,
+                p.name        AS name,
+                ${onHandSql}  AS onHandM,
+                ${valueSql}   AS valueMinor
+         ${whereSql}
+         ORDER BY b.expiry_date, b.id
+         LIMIT @limit OFFSET @offset`
+      )
+      .all({ ...params, limit, offset }) as Array<{
+      batchId: number
+      batchNo: string
+      expiryDate: string
+      productId: number
+      sku: string
+      name: string
+      onHandM: number
+      valueMinor: number
+    }>
+  ).map(
+    (row): NearExpiryRow => ({
+      productId: row.productId,
+      sku: row.sku,
+      name: row.name,
+      batchId: row.batchId,
+      batchNo: row.batchNo,
+      expiryDate: row.expiryDate,
+      // Negative once the date is past — the urgent case, shown as the negative it is.
+      daysRemaining: daysBetween(today, row.expiryDate),
+      expired: row.expiryDate < today,
+      onHandM: row.onHandM,
+      valueMinor: row.valueMinor
+    })
+  )
+
+  return {
+    rows,
+    total: summary.total,
+    page,
+    pageSize,
+    withinDays,
+    totalValueMinor: summary.totalValueMinor,
+    expiredCount: summary.expiredCount
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 16 & 17. THE CASH BOOK and THE GENERAL LEDGER — one account, walked
+// ═════════════════════════════════════════════════════════════════════════════
+
+type LedgerWalk = {
+  code: string
+  name: string
+  type: AccountType
+  isContra: boolean
+  debitNatured: boolean
+  opening: number
+  totalDebit: number
+  totalCredit: number
+  closing: number
+  total: number
+  /**
+   * The natural-side balance carried INTO this page — `opening` plus every line before the page's
+   * offset. The running balance starts here, so page 2 continues where page 1 stopped.
+   */
+  carriedIn: number
+  lines: Array<{
+    journalId: number
+    at: string
+    memo: string
+    refType: string
+    refId: string | null
+    debit: number
+    credit: number
+  }>
+}
+
+/**
+ * WALK ONE ACCOUNT over [from, to]: its opening balance, the period's lines in order, and its closing.
+ * The primitive the cash book (16) and the general ledger (17) are both built from — because they are
+ * the same report, one of them with the account already chosen.
+ *
+ * THE OPENING IS EVERYTHING BEFORE `from`, and the closing is opening ± the period's movement, both on
+ * the account's NATURAL side (a liability is credit-natured — ledger.isDebitNatured). That is what makes
+ * `closing === the GL balance as of to`, which a test asserts for both reports: the same arithmetic the
+ * balance sheet does, over the same bounds.
+ *
+ * The running balance is computed over the PAGE, starting from the balance carried into it — so page 2
+ * continues where page 1 left off instead of restarting at the opening. That is why `offset` is fed to
+ * the carry-in query and not only to the rows.
+ */
+function walkAccount(
+  db: DB,
+  accountCode: string,
+  bounds: { from: string; toExclusive: string },
+  paged: { limit: number; offset: number }
+): LedgerWalk {
+  const account = db
+    .prepare('SELECT code, name, type, is_contra AS isContra FROM accounts WHERE code = ?')
+    .get(accountCode) as { code: string; name: string; type: AccountType; isContra: number } | undefined
+
+  if (!account) {
+    throw new AppError(
+      ErrorCode.NOT_FOUND,
+      'That account could not be found.',
+      `reports.walkAccount: no such account code ${accountCode}`
+    )
+  }
+
+  const debitNatured = ledger.isDebitNatured(account.type, Boolean(account.isContra))
+  const params = { code: accountCode, ...bounds }
+
+  // Everything posted BEFORE the period — the balance the shop carried in.
+  const before = db
+    .prepare(
+      `SELECT COALESCE(SUM(jl.debit), 0) AS debit, COALESCE(SUM(jl.credit), 0) AS credit
+       FROM journal_lines jl
+       JOIN journals j ON j.id = jl.journal_id
+       JOIN accounts a ON a.id = jl.account_id
+       WHERE a.code = @code AND j.at < @from`
+    )
+    .get(params) as { debit: number; credit: number }
+
+  const opening = debitNatured ? before.debit - before.credit : before.credit - before.debit
+
+  const inPeriod = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(jl.debit), 0)  AS debit,
+              COALESCE(SUM(jl.credit), 0) AS credit
+       FROM journal_lines jl
+       JOIN journals j ON j.id = jl.journal_id
+       JOIN accounts a ON a.id = jl.account_id
+       WHERE a.code = @code AND j.at >= @from AND j.at < @toExclusive`
+    )
+    .get(params) as { total: number; debit: number; credit: number }
+
+  const movement = debitNatured
+    ? inPeriod.debit - inPeriod.credit
+    : inPeriod.credit - inPeriod.debit
+
+  // THE ORDER IS THE CONTRACT. A running balance means nothing without a total order, and `at` alone is
+  // not one — two journals can share an instant (a sale and the loyalty journal it triggers). Ordering
+  // by (at, journal_id, line id) is deterministic, matches the order things were posted, and is the same
+  // order the carry-in below counts over, so the two cannot disagree.
+  const ORDER = 'ORDER BY j.at, j.id, jl.id'
+
+  // The balance carried INTO this page: every line before it, in that same order.
+  const carried = db
+    .prepare(
+      `SELECT COALESCE(SUM(debit), 0) AS debit, COALESCE(SUM(credit), 0) AS credit FROM (
+         SELECT jl.debit AS debit, jl.credit AS credit
+         FROM journal_lines jl
+         JOIN journals j ON j.id = jl.journal_id
+         JOIN accounts a ON a.id = jl.account_id
+         WHERE a.code = @code AND j.at >= @from AND j.at < @toExclusive
+         ${ORDER}
+         LIMIT @offset
+       )`
+    )
+    .get({ ...params, offset: paged.offset }) as { debit: number; credit: number }
+
+  const lines = db
+    .prepare(
+      `SELECT j.id       AS journalId,
+              j.at       AS at,
+              j.memo     AS memo,
+              j.ref_type AS refType,
+              j.ref_id   AS refId,
+              jl.debit   AS debit,
+              jl.credit  AS credit
+       FROM journal_lines jl
+       JOIN journals j ON j.id = jl.journal_id
+       JOIN accounts a ON a.id = jl.account_id
+       WHERE a.code = @code AND j.at >= @from AND j.at < @toExclusive
+       ${ORDER}
+       LIMIT @limit OFFSET @offset`
+    )
+    .all({ ...params, limit: paged.limit, offset: paged.offset }) as LedgerWalk['lines']
+
+  return {
+    code: account.code,
+    name: account.name,
+    type: account.type,
+    isContra: Boolean(account.isContra),
+    debitNatured,
+    opening,
+    totalDebit: inPeriod.debit,
+    totalCredit: inPeriod.credit,
+    closing: opening + movement,
+    total: inPeriod.total,
+    carriedIn:
+      opening + (debitNatured ? carried.debit - carried.credit : carried.credit - carried.debit),
+    lines
+  }
+}
+
+/**
+ * THE CASH BOOK — the Cash account's running story over [from, to].
+ *
+ * What was in the drawer at the start, every journal line that touched Cash (with what it was — the
+ * journal's own memo and ref), and what is in it at the end. Cash is debit-natured, so a debit is money
+ * IN and a credit is money OUT, which is the way a shopkeeper reads a cash book already.
+ *
+ * TWO RECONCILIATIONS, both asserted by a test:
+ *     closing === opening + Σ in − Σ out          — the page's own arithmetic
+ *     closing === GL Cash as of `to`              — and it agrees with the books
+ *
+ * PAGED: a busy shop posts thousands of cash movements a month, and the running balance continues
+ * correctly across pages (see walkAccount).
+ */
+export function cashBook(db: DB, raw: unknown): CashBookReport {
+  const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.cashBook')
+  const { from, to } = input
+  const bounds = { from, toExclusive: dayAfter(to) }
+  const { page, pageSize, limit, offset } = paging(input)
+
+  const walk = walkAccount(db, ACC.CASH, bounds, { limit, offset })
+
+  let running = walk.carriedIn
+  const rows: CashBookRow[] = walk.lines.map((line) => {
+    // Cash is debit-natured: money in raises it, money out lowers it.
+    running += line.debit - line.credit
+    return {
+      journalId: line.journalId,
+      at: line.at,
+      memo: line.memo,
+      refType: line.refType,
+      refId: line.refId,
+      inMinor: line.debit,
+      outMinor: line.credit,
+      balanceMinor: running
+    }
+  })
+
+  return {
+    from,
+    to,
+    rows,
+    total: walk.total,
+    page,
+    pageSize,
+    opening: walk.opening,
+    totalIn: walk.totalDebit,
+    totalOut: walk.totalCredit,
+    closing: walk.closing
+  }
+}
+
+/**
+ * THE GENERAL LEDGER — any ONE account's lines over [from, to], with a running balance.
+ *
+ * The cash book generalised: name an account CODE and this walks it. The running balance respects the
+ * account's NATURAL SIDE (ledger.isDebitNatured) — a liability is credit-natured, so a credit RAISES
+ * Supplier Payables. Read it the other way and every payable in the book prints negative, which is the
+ * single most common way a home-made ledger report misleads its owner.
+ *
+ * `closing === the GL balance for that account as of to` — asserted by a test. PAGED.
+ */
+export function generalLedger(db: DB, raw: unknown): GeneralLedgerReport {
+  const input = parseOrThrow(GeneralLedgerInput, raw, 'reports.generalLedger')
+  const { from, to, accountCode } = input
+  const bounds = { from, toExclusive: dayAfter(to) }
+  const { page, pageSize, limit, offset } = paging(input)
+
+  const walk = walkAccount(db, accountCode, bounds, { limit, offset })
+
+  let running = walk.carriedIn
+  const rows: GeneralLedgerRow[] = walk.lines.map((line) => {
+    running += walk.debitNatured ? line.debit - line.credit : line.credit - line.debit
+    return {
+      journalId: line.journalId,
+      at: line.at,
+      memo: line.memo,
+      refType: line.refType,
+      refId: line.refId,
+      debit: line.debit,
+      credit: line.credit,
+      balanceMinor: running
+    }
+  })
+
+  return {
+    from,
+    to,
+    accountCode: walk.code,
+    accountName: walk.name,
+    accountType: walk.type,
+    isDebitNatured: walk.debitNatured,
+    rows,
+    total: walk.total,
+    page,
+    pageSize,
+    opening: walk.opening,
+    totalDebit: walk.totalDebit,
+    totalCredit: walk.totalCredit,
+    closing: walk.closing
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // THE DISPATCH — one request in, the TAGGED report out
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
  * RUN THE REPORT THE CALLER ASKED FOR, and TAG it with its kind.
  *
- * The nine reports above each return BARE data. The export writers (reports-excel / reports-pdf) must
- * know WHICH report they were handed, so the tag is attached HERE, in one exhaustive switch the compiler
- * checks — the `never` default proves every `ReportRequest` kind is covered, so adding a report without
- * teaching this function about it fails to compile. This is the ONE place a request becomes a report:
- * the IPC `get` / `exportExcel` / `exportPdf` handlers all route through it, so the screen, the
+ * The seventeen reports above each return BARE data. The export writers (reports-excel / reports-pdf)
+ * must know WHICH report they were handed, so the tag is attached HERE, in one exhaustive switch the
+ * compiler checks — the `never` default proves every `ReportRequest` kind is covered, so adding a report
+ * without teaching this function about it fails to compile. This is the ONE place a request becomes a
+ * report: the IPC `get` / `exportExcel` / `exportPdf` handlers all route through it, so the screen, the
  * spreadsheet and the printout can never be built from three different dispatch tables and disagree.
  *
  * A READ, like everything else in this file. It writes nothing and recomputes no frozen number, and it
  * validates its own input (`parseOrThrow`) — so calling it directly, from a test or a future LAN server,
- * is safe without the IPC layer having pre-validated. `now` is injectable for deterministic near-expiry
- * tests, threaded through to stockValuation.
+ * is safe without the IPC layer having pre-validated. `now` is injectable for deterministic tests and is
+ * threaded through to the two reports that ask the clock what "today" is: stockValuation and nearExpiry.
  */
 export function buildReport(db: DB, raw: unknown, now = new Date()): ReportPayload {
   const request = parseOrThrow(ReportRequest, raw, 'reports.buildReport')
@@ -997,6 +1905,22 @@ export function buildReport(db: DB, raw: unknown, now = new Date()): ReportPaylo
       return { kind: 'profitAndLoss', data: profitAndLoss(db, request) }
     case 'balanceSheet':
       return { kind: 'balanceSheet', data: balanceSheet(db, request) }
+    case 'itemWise':
+      return { kind: 'itemWise', data: itemWise(db, request) }
+    case 'categoryWise':
+      return { kind: 'categoryWise', data: categoryWise(db, request) }
+    case 'paymentMethodBreakdown':
+      return { kind: 'paymentMethodBreakdown', data: paymentMethodBreakdown(db, request) }
+    case 'taxSummary':
+      return { kind: 'taxSummary', data: taxSummary(db, request) }
+    case 'lowStock':
+      return { kind: 'lowStock', data: lowStock(db, request) }
+    case 'nearExpiry':
+      return { kind: 'nearExpiry', data: nearExpiry(db, request, now) }
+    case 'cashBook':
+      return { kind: 'cashBook', data: cashBook(db, request) }
+    case 'generalLedger':
+      return { kind: 'generalLedger', data: generalLedger(db, request) }
     default: {
       const never: never = request
       throw new AppError(
