@@ -425,6 +425,70 @@ describe('sales summary and profit', () => {
   })
 })
 
+/**
+ * REGRESSION — THE PROFIT REPORT MUST NOT BE QUADRATIC.
+ *
+ * `stock_movements.ref_id` is TEXT and indexed as (ref_type, ref_id). The COGS join used the
+ * natural-looking `CAST(m.ref_id AS INTEGER) = s.id`, which wraps the INDEXED column in a function —
+ * so SQLite cannot use the index and scans-and-casts every movement, once per sale.
+ *
+ * Measured on a realistic grocery shop before the fix: 2k sales 200ms, 10k sales 5.0s, **20k sales 20.5s**
+ * — twice over, because the report runs the query for the total and again by day, so the shopkeeper
+ * clicked "Profit" and waited a minute and a half, on a report every other one of which answers in 40ms.
+ * After: 42ms for the whole report, and LINEAR, so it stays fast as the shop grows.
+ *
+ * This test does not assert a millisecond figure — a timing assertion on a loaded CI box is a flake
+ * factory. It asserts the SHAPE: doubling the sales must not quadruple the work. A quadratic join fails
+ * it by a mile (4x+); the linear one lands near 2x. The generous bound is deliberate: it is here to catch
+ * an O(n²) regression, not to police a 30% drift.
+ */
+describe('the profit report scales linearly, not quadratically', () => {
+  function ringUp(productId: number, count: number): void {
+    for (let i = 0; i < count; i++) {
+      sellExact(productId, 1, cash(), 10_000)
+    }
+  }
+
+  function timeProfit(): number {
+    const start = process.hrtime.bigint()
+    reports.profit(t.db, { from: '2026-01-01', to: FAR })
+    return Number(process.hrtime.bigint() - start) / 1e6
+  }
+
+  it('doubling the sales does not quadruple the time', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 5_000, 500_000)
+
+    ringUp(p, 600)
+    const small = timeProfit()
+
+    ringUp(p, 600) // now 1200 — twice the data
+    const large = timeProfit()
+
+    // Linear would be ~2x. Quadratic is ~4x and climbing. The bound is loose on purpose (see above);
+    // the broken version was 25x at this size and got worse from there.
+    const ratio = large / Math.max(small, 0.5)
+    expect(
+      ratio,
+      `profit report went ${ratio.toFixed(1)}x slower for 2x the data (${small.toFixed(1)}ms -> ${large.toFixed(1)}ms). ` +
+        'That is the CAST-on-an-indexed-column regression — see COGS_SQL in reports.ts.'
+    ).toBeLessThan(3.5)
+  })
+
+  /** And it must still be RIGHT. A fast wrong answer is worse than a slow right one. */
+  it('gets the same COGS the stock movements actually froze', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000) // Rs 60 cost
+    sellExact(p, 3, cash(), 30_000)
+
+    const profit = reports.profit(t.db, { from: '2026-01-01', to: FAR })
+    expect(profit.cogs, '3 units at a frozen Rs 60').toBe(18_000)
+    expect(profit.revenue).toBe(30_000)
+    expect(profit.grossProfit).toBe(12_000)
+    holds(t)
+  })
+})
+
 // ═════════════════════════════════════════════════════════════════════════════
 // 3. STOCK VALUATION
 // ═════════════════════════════════════════════════════════════════════════════

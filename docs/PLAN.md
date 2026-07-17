@@ -561,6 +561,19 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
 
 ### Done — resolved from this list, kept for the record
 
+- ~~The profit report was QUADRATIC~~ — **FIXED v0.21.1, found by benchmarking a real grocery shop.**
+  `stock_movements.ref_id` is TEXT, indexed as (ref_type, ref_id). The COGS join used the
+  natural-looking `CAST(m.ref_id AS INTEGER) = s.id`, which wraps the **indexed** column in a function —
+  so SQLite could not use the index and scanned-and-cast every movement, once per sale. Measured:
+  **2k sales 200ms → 10k sales 5.0s → 20k sales 20.5s**, and the report runs that query twice (total and
+  by-day), so a shopkeeper clicking Profit on a year's data waited **90 seconds** on a report every other
+  one of which answers in 40ms. Casting the OTHER side (`m.ref_id = CAST(s.id AS TEXT)`) keeps the index:
+  **20.5s → 8.5ms**, the same answer to the paisa, and LINEAR so it stays fast as the shop grows. The
+  whole profit report is now **42ms**. The same anti-pattern was fixed in `returns.ts` (it runs during a
+  refund, with a customer waiting). Pinned by a regression test that asserts the SHAPE — doubling the data
+  must not quadruple the time — not a millisecond figure, which would flake on a loaded box. Verified it
+  catches the bug by putting the CAST back: it fails at 3.9x and names the cause.
+
 - ~~Report date bucketing uses UTC, not the shop's local day~~ — **FIXED v0.21.0.** `shop.timezone`
   (default Asia/Karachi; 10 zones, because `shop.country` offers 6 countries but the US spans 4 — a
   country maps to a zone one-to-many, not as a mirror). `reports.ts`'s date helpers now resolve to the

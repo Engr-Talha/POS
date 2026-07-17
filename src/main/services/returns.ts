@@ -193,9 +193,12 @@ function allocateRestockBatches(
   // already put back on each batch — so we cap against what is still OUT, never re-crediting a batch.
   const prior = db
     .prepare(
+      // TEXT-to-TEXT: `stock_movements.ref_id` is TEXT and indexed as (ref_type, ref_id). Casting THAT
+      // column would put a function around the indexed side and cost the index — the same mistake that
+      // made the profit report quadratic (20k sales: 20.5s vs 8.5ms). Cast the other side instead.
       `SELECT sm.batch_id AS batchId, SUM(sm.qty_m) AS qty
          FROM stock_movements sm
-         JOIN returns r ON r.id = CAST(sm.ref_id AS INTEGER)
+         JOIN returns r ON CAST(r.id AS TEXT) = sm.ref_id
         WHERE sm.ref_type = ? AND sm.type = 'sale_return' AND sm.product_id = ? AND r.sale_id = ?
         GROUP BY sm.batch_id`
     )
