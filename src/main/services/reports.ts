@@ -99,23 +99,105 @@ function parseOrThrow<S extends z.ZodType>(schema: S, raw: unknown, context: str
 }
 
 /**
- * THE DATE-RANGE CONVENTION, shared with sales.ts. A stored `at` is a full ISO timestamp; a report
- * bound is a DATE. `from` matches by `at >= from` (the date string sorts before any time on that day),
- * and `to` matches by `at < dayAfter(to)` so the WHOLE of the `to` day is inside the range — a sale at
- * 18:40 must not fall out of "today's" report. Getting this wrong drops a day's takings silently.
+ * THE DATE-RANGE CONVENTION — and THE SHOP'S DAY.
+ *
+ * A stored `at` is a full ISO UTC timestamp (that storage format is correct and never changes). A report
+ * bound is a DATE, and the date the shop means is its OWN calendar day, not UTC's. A sale rung at 01:00
+ * in Karachi is stored as 20:00 UTC the day BEFORE; bounding "the 8th" by UTC midnight would hand that
+ * sale to the 7th and drop it from the 8th. A shop that trades past midnight — plenty do — would read
+ * its takings on the wrong day.
+ *
+ * So every bound below is the UTC instant of a LOCAL midnight in `shop.timezone`:
+ *
+ *     from  matches by  at >= startOfDay(from)          (inclusive)
+ *     to    matches by  at <  startOfDay(dayAfter(to))  (exclusive — the WHOLE of the `to` day is in)
+ *
+ * EVERY report takes its bounds from these two helpers and NOTHING else, which is what keeps the
+ * reconciliations true: the aging, the balance sheet and the trial balance cut the ledger at the same
+ * instant, so they still agree with each other and with the GL to the paisa.
  */
-function dayAfter(isoDate: string): string {
-  const date = new Date(`${isoDate}T00:00:00.000Z`)
+
+/**
+ * Milliseconds `tz` is ahead of UTC at `instant`. Asia/Karachi => +18_000_000 (5h).
+ * DST-correct: it asks ICU for the offset that actually applied on THAT date, rather than assuming one.
+ */
+function tzOffsetMs(tz: string, instant: Date): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    })
+      .formatToParts(instant)
+      .map((part) => [part.type, part.value])
+  ) as Record<string, string>
+
+  // ICU renders midnight as hour '24' in some locales/zones; normalise it before parsing.
+  const hour = parts['hour'] === '24' ? '00' : parts['hour']
+  const asIfUTC = Date.parse(
+    `${parts['year']}-${parts['month']}-${parts['day']}T${hour}:${parts['minute']}:${parts['second']}Z`
+  )
+  return asIfUTC - instant.getTime()
+}
+
+/**
+ * The UTC instant at which a local calendar day BEGINS in `tz`.
+ *
+ * Read the wall clock as if it were UTC, subtract the zone's offset, then refine once — the second pass
+ * is what makes a DST boundary correct, because the offset that applies at the answer can differ from
+ * the offset at the guess (e.g. a spring-forward night). Two passes converge for every real zone.
+ */
+function startOfDayUTC(isoDate: string, tz: string): Date {
+  const wallClock = Date.parse(`${dateOnly(isoDate)}T00:00:00.000Z`)
+  let instant = wallClock - tzOffsetMs(tz, new Date(wallClock))
+  instant = wallClock - tzOffsetMs(tz, new Date(instant))
+  return new Date(instant)
+}
+
+/** The exclusive upper bound for a `to` date: the instant the NEXT local day starts. */
+function dayAfter(isoDate: string, tz: string): string {
+  const date = new Date(`${dateOnly(isoDate)}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() + 1)
-  return date.toISOString()
+  return startOfDayUTC(date.toISOString(), tz).toISOString()
 }
 
-/** The last instant of a day, for a `<=` upTo bound (ledger.trialBalance takes a Date). */
-function endOfDay(isoDate: string): Date {
-  return new Date(`${isoDate}T23:59:59.999Z`)
+/** The inclusive lower bound for a `from` date: the instant the local day starts. */
+function startOfDay(isoDate: string, tz: string): string {
+  return startOfDayUTC(isoDate, tz).toISOString()
 }
 
-/** The date part of a stored timestamp (or an already-bare date). 'YYYY-MM-DD'. */
+/**
+ * The last instant of a local day, for a `<=` upTo bound (ledger.trialBalance takes a Date). One
+ * millisecond before the next local day starts — so it cuts the ledger at exactly the same place the
+ * exclusive `dayAfter` bound does, and the trial balance agrees with the balance sheet.
+ */
+function endOfDay(isoDate: string, tz: string): Date {
+  return new Date(Date.parse(dayAfter(isoDate, tz)) - 1)
+}
+
+/**
+ * The shop's local calendar date for a stored UTC timestamp. 'YYYY-MM-DD'.
+ *
+ * A bare 'YYYY-MM-DD' (opening_setup.go_live_date is stored that way) is ALREADY a local calendar date —
+ * it carries no time and no zone. Shifting it by an offset would move it a day, so it is returned as-is.
+ */
+function localDate(at: string, tz: string): string {
+  if (at.length === 10) return at
+  const instant = new Date(at)
+  return new Date(instant.getTime() + tzOffsetMs(tz, instant)).toISOString().slice(0, 10)
+}
+
+/** The shop's own time zone. A setting, because two shops are not in the same place (CLAUDE.md §4). */
+function shopTimezone(db: DB): string {
+  return setting<string>(db, 'shop.timezone')
+}
+
+/** The date part of an already-bare date (or a stored timestamp, in UTC terms). 'YYYY-MM-DD'. */
 function dateOnly(at: string): string {
   return at.slice(0, 10)
 }
@@ -141,7 +223,8 @@ function setting<T>(db: DB, key: string): T {
  */
 export function salesSummary(db: DB, raw: unknown): SalesSummaryReport {
   const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.salesSummary')
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
 
   const header = db
     .prepare(
@@ -224,7 +307,8 @@ export function salesSummary(db: DB, raw: unknown): SalesSummaryReport {
  */
 export function profit(db: DB, raw: unknown): ProfitReport {
   const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.profit')
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
 
   const revenue = db
     .prepare(
@@ -354,7 +438,11 @@ export function stockValuation(db: DB, raw: unknown = {}, now = new Date()): Sto
     .pluck()
     .get() as number
 
-  const cutoff = dateOnly(new Date(now.getTime() + nearExpiryDays * 24 * 60 * 60 * 1000).toISOString())
+  // "Near expiry" is counted from the shop's today, not UTC's — at 01:00 in Karachi the two differ.
+  const cutoff = localDate(
+    new Date(now.getTime() + nearExpiryDays * 24 * 60 * 60 * 1000).toISOString(),
+    shopTimezone(db)
+  )
   const nearExpiryCount = db
     .prepare(
       `SELECT COUNT(*)
@@ -395,7 +483,7 @@ const EMPTY_BUCKETS: AgingBuckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0
  * balance exactly — and therefore that the report total cannot disagree with the general ledger. An
  * overpaid account (balance below zero) lands its surplus in `current`, honestly negative.
  */
-function ageBuckets(charges: Charge[], balance: number, asOf: string): AgingBuckets {
+function ageBuckets(charges: Charge[], balance: number, asOf: string, tz: string): AgingBuckets {
   const buckets: AgingBuckets = { ...EMPTY_BUCKETS }
   const totalCharges = charges.reduce((sum, charge) => sum + charge.amount, 0)
   let remainingCredit = totalCharges - balance // = payments + credit notes, by construction
@@ -410,7 +498,9 @@ function ageBuckets(charges: Charge[], balance: number, asOf: string): AgingBuck
       remainingCredit -= applied
     }
     if (unpaid === 0) continue
-    addToBucket(buckets, daysBetween(dateOnly(charge.at), asOf), unpaid)
+    // Age by the SHOP's calendar: an invoice raised at 01:00 in Karachi is dated that day, not the UTC
+    // day before, or it would fall into the next bucket a day early.
+    addToBucket(buckets, daysBetween(localDate(charge.at, tz), asOf), unpaid)
   }
 
   // Credit left over = the account is in credit (they/we overpaid). Reflect it in `current`, so the
@@ -471,7 +561,8 @@ export function customerAging(db: DB, raw: unknown): CustomerAgingReport {
   // sheet and trial balance use (accountActivity's `j.at < dayAfter(asOf)`). Bounding the aging the same
   // way is what makes `Σ aging === GL Receivable AS OF asOf`: a report backdated to a past month-end must
   // agree with the balance sheet for that month-end, not show today's balance aged against an old date.
-  const bound = dayAfter(asOf)
+  const tz = shopTimezone(db)
+  const bound = dayAfter(asOf, tz)
   const openingCounts = dateOnly(goLive) <= asOf
 
   const openingCharge = db.prepare(
@@ -518,7 +609,7 @@ export function customerAging(db: DB, raw: unknown): CustomerAgingReport {
     const balance = totalCharges - credits // what they owe AS OF asOf; === their GL receivable then
     if (balance === 0) continue
 
-    const buckets = ageBuckets(charges, balance, asOf)
+    const buckets = ageBuckets(charges, balance, asOf, tz)
     const row: CustomerAgingRow = {
       customerId,
       name: (nameOf.pluck().get(customerId) as string | undefined) ?? `Customer #${customerId}`,
@@ -547,7 +638,7 @@ export function customerAging(db: DB, raw: unknown): CustomerAgingReport {
   ).filter((charge) => charge.amount > 0)
   if (unassigned.length > 0) {
     const balance = unassigned.reduce((sum, charge) => sum + charge.amount, 0)
-    const buckets = ageBuckets(unassigned, balance, asOf) // no credits — anonymous udhaar cannot be repaid
+    const buckets = ageBuckets(unassigned, balance, asOf, tz) // no credits — anonymous udhaar cannot be repaid
     rows.push({ customerId: 0, name: 'Unassigned (walk-in credit)', total: balance, ...buckets })
     addBuckets(totals, { ...buckets, total: balance })
   }
@@ -589,7 +680,8 @@ export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
 
   // Same asOf boundary as the balance sheet, so Σ supplier aging === GL Payable AS OF asOf (see the
   // matching note in customerAging).
-  const bound = dayAfter(asOf)
+  const tz = shopTimezone(db)
+  const bound = dayAfter(asOf, tz)
   const openingCounts = dateOnly(goLive) <= asOf
 
   const openingCharge = db.prepare(
@@ -636,7 +728,7 @@ export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
     const balance = totalCharges - credits // what the shop owes AS OF asOf; === GL payable then
     if (balance === 0) continue
 
-    const buckets = ageBuckets(charges, balance, asOf)
+    const buckets = ageBuckets(charges, balance, asOf, tz)
     const row: SupplierAgingRow = {
       supplierId,
       name: (nameOf.pluck().get(supplierId) as string | undefined) ?? `Supplier #${supplierId}`,
@@ -675,7 +767,8 @@ function openingDate(db: DB): string {
  */
 export function leakage(db: DB, raw: unknown): LeakageReport {
   const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.leakage')
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
 
   const acc = new Map<number, LeakageRow>()
   const rowFor = (userId: number): LeakageRow => {
@@ -884,7 +977,7 @@ function netProfitOver(activity: AccountActivity[]): { netRevenue: number; expen
 /** The trial balance as of a date. Reuses the posting engine's own trialBalance — it must balance. */
 export function trialBalance(db: DB, raw: unknown): TrialBalanceReport {
   const { asOf } = parseOrThrow(AsOfInput, raw, 'reports.trialBalance')
-  return { asOf, ...ledger.trialBalance(db, { upTo: endOfDay(asOf) }) }
+  return { asOf, ...ledger.trialBalance(db, { upTo: endOfDay(asOf, shopTimezone(db)) }) }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -898,7 +991,8 @@ export function trialBalance(db: DB, raw: unknown): TrialBalanceReport {
  */
 export function profitAndLoss(db: DB, raw: unknown): ProfitAndLossReport {
   const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.profitAndLoss')
-  const activity = accountActivity(db, { from, toExclusive: dayAfter(to) })
+  const tz = shopTimezone(db)
+  const activity = accountActivity(db, { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) })
 
   const income: PnlRow[] = []
   const expenses: PnlRow[] = []
@@ -936,7 +1030,7 @@ export function profitAndLoss(db: DB, raw: unknown): ProfitAndLossReport {
  */
 export function balanceSheet(db: DB, raw: unknown): BalanceSheetReport {
   const { asOf } = parseOrThrow(AsOfInput, raw, 'reports.balanceSheet')
-  const activity = accountActivity(db, { toExclusive: dayAfter(asOf) })
+  const activity = accountActivity(db, { toExclusive: dayAfter(asOf, shopTimezone(db)) })
 
   const assets: BalanceSheetLine[] = []
   const liabilities: BalanceSheetLine[] = []
@@ -1047,7 +1141,8 @@ function tradeTotals(db: DB, bounds: { from: string; toExclusive: string }): Tra
 export function itemWise(db: DB, raw: unknown): ItemWiseReport {
   const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.itemWise')
   const { from, to } = input
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
   const { page, pageSize, limit, offset } = paging(input)
 
   // GROUP BY the product, falling back to the frozen name for an open item (product_id IS NULL). The
@@ -1113,7 +1208,8 @@ export function itemWise(db: DB, raw: unknown): ItemWiseReport {
 export function categoryWise(db: DB, raw: unknown): CategoryWiseReport {
   const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.categoryWise')
   const { from, to } = input
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
   const { page, pageSize, limit, offset } = paging(input)
 
   // p.category_id is NULL both when the product has no category AND when there is no product (an open
@@ -1192,7 +1288,8 @@ export function categoryWise(db: DB, raw: unknown): CategoryWiseReport {
 export function paymentMethodBreakdown(db: DB, raw: unknown): PaymentMethodBreakdownReport {
   const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.paymentMethodBreakdown')
   const { from, to } = input
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
   const { page, pageSize, limit, offset } = paging(input)
 
   // One row per tender that saw ANY activity — money in OR money back out. A tender used only for
@@ -1338,7 +1435,8 @@ export function paymentMethodBreakdown(db: DB, raw: unknown): PaymentMethodBreak
  */
 export function taxSummary(db: DB, raw: unknown): TaxSummaryReport {
   const { from, to } = parseOrThrow(DateRangeInput, raw, 'reports.taxSummary')
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
 
   // ── OUTPUT: collected on sales, grouped by the rate FROZEN on the line ──────
   //
@@ -1533,8 +1631,10 @@ export function nearExpiry(db: DB, raw: unknown = {}, now = new Date()): NearExp
   const withinDays = input.withinDays ?? setting<number>(db, 'stock.nearExpiryDays')
   const { page, pageSize, limit, offset } = paging(input)
 
-  const today = dateOnly(now.toISOString())
-  const cutoff = dateOnly(new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000).toISOString())
+  // Both are the SHOP's calendar dates: an expiry is judged against the day the shop is having, not UTC's.
+  const tz = shopTimezone(db)
+  const today = localDate(now.toISOString(), tz)
+  const cutoff = localDate(new Date(now.getTime() + withinDays * 24 * 60 * 60 * 1000).toISOString(), tz)
 
   const onHandSql = '(SELECT COALESCE(SUM(m.qty_m), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
   const valueSql = '(SELECT COALESCE(SUM(m.value_minor), 0) FROM stock_movements m WHERE m.batch_id = b.id)'
@@ -1778,7 +1878,8 @@ function walkAccount(
 export function cashBook(db: DB, raw: unknown): CashBookReport {
   const input = parseOrThrow(PagedDateRangeInput, raw, 'reports.cashBook')
   const { from, to } = input
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
   const { page, pageSize, limit, offset } = paging(input)
 
   const walk = walkAccount(db, ACC.CASH, bounds, { limit, offset })
@@ -1826,7 +1927,8 @@ export function cashBook(db: DB, raw: unknown): CashBookReport {
 export function generalLedger(db: DB, raw: unknown): GeneralLedgerReport {
   const input = parseOrThrow(GeneralLedgerInput, raw, 'reports.generalLedger')
   const { from, to, accountCode } = input
-  const bounds = { from, toExclusive: dayAfter(to) }
+  const tz = shopTimezone(db)
+  const bounds = { from: startOfDay(from, tz), toExclusive: dayAfter(to, tz) }
   const { page, pageSize, limit, offset } = paging(input)
 
   const walk = walkAccount(db, accountCode, bounds, { limit, offset })

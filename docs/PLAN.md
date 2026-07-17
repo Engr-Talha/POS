@@ -525,12 +525,13 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
 
 ### Still open, and worth doing
 
-- **Report date bucketing uses UTC, not the shop's local day** (reports audit, medium). A report's
-  from/to/as-of compare against UTC timestamps, so a sale in the local midnight–05:00 window (PKT is
-  UTC+5) can land on the neighbouring calendar day. For a shop that does not trade those hours the impact
-  is **nil**, and every report uses the SAME boundary, so they still reconcile with each other. The fix is
-  a **shop-timezone setting** (CLAUDE.md §4) threaded through the date comparisons. NOTE: the *printed*
-  date half of this was fixed in v0.20.0 (`shared/dates.ts`); this is the remaining half.
+- **The list/filter screens still bucket by UTC** (NEW, found while fixing the reports half). `dayAfter`
+  is duplicated in SEVEN services — sales, purchases, returns, purchase-returns, expenses, loyalty, and
+  `daysBetween` in stock — and they all still assume UTC. So filtering the sales *list* by "the 8th" can
+  include a row the sales *report* for the 8th excludes. Contained (a list, not the books — no ledger
+  impact, nothing stops reconciling), but a shop trading past midnight will eventually notice. The clean
+  fix is lifting those helpers into one shared module, which deserves its own scoped change rather than
+  being smuggled into the reports one.
 - **Tax-returns section** (Tiptap rich text + attachments). In §5's screen list; `@mantine/tiptap` is not
   even a dependency yet. The 17 reports already give an accountant everything a return needs, so this is a
   convenience: somewhere to keep the filing itself. **The owner has never asked for it.**
@@ -559,6 +560,28 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   multi-branch depends on the LAN phase above.
 
 ### Done — resolved from this list, kept for the record
+
+- ~~Report date bucketing uses UTC, not the shop's local day~~ — **FIXED v0.21.0.** `shop.timezone`
+  (default Asia/Karachi; 10 zones, because `shop.country` offers 6 countries but the US spans 4 — a
+  country maps to a zone one-to-many, not as a mirror). `reports.ts`'s date helpers now resolve to the
+  UTC instant of LOCAL midnight, threaded through all 10 range reports, both agings (`ageBuckets` was
+  ageing an 01:00 invoice a day early), the trial balance, the P&L, the balance sheet, stock valuation and
+  near-expiry. `Intl.DateTimeFormat` ships with Node/Electron, so no date library. **`endOfDay` is now
+  derived as `dayAfter − 1ms`**, so the trial balance and the balance sheet cut the ledger at the
+  identical instant and cannot drift. The five standing reconciliations all still hold.
+  **TWO EXISTING TESTS HAD ENCODED THE BUG** and were changed — flagged here because "the fix broke a
+  test, so I changed the test" is exactly the move that deserves scrutiny. They wrote `23:59:59Z` and
+  asserted it was the 15th's takings; in Karachi that instant is **04:59 on the 16th**. I verified that
+  independently before accepting it. Their intent (a late sale stays in its own day) was right; the
+  timestamp was not. Now `23:59:59+05:00`.
+- ~~Settings is one long scroll~~ — **FIXED v0.21.0** (owner asked). 34 settings across 12 sections were
+  stacked in one column, so finding the discount limit meant scrolling past the printer and the backup
+  schedule. Now a **sidebar**, one section at a time (largest panel: 9 settings). A sidebar rather than
+  top tabs because there are twelve sections and the registry is DESIGNED to grow — twelve tabs wrap onto
+  a second row and stop reading as tabs. It collapses to a dropdown on a narrow window, and both layouts
+  render the same `SettingsPanel`, so they cannot drift. The nav is built from `SETTING_GROUPS`, so a new
+  group appears by itself — a hand-written nav would be the same trap the hand-written form fields were.
+  "Close the month" joins it as a section (it is an ACT, not a knob, so it stays out of the registry).
 
 - ~~Printed dates ignore the shop's country~~ — **FIXED v0.20.0.** `shared/dates.ts`; `country` travels on
   the receipt/quotation exactly as `currencySymbol` does. Written as an explicit table, not a locale

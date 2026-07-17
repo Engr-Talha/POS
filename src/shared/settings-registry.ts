@@ -98,6 +98,31 @@ export const SETTINGS: SettingDef[] = [
       { value: 'US', label: 'United States' }
     ]
   },
+  // The shop's own clock. A report asks "what did we take on the 8th?" and the answer must be the 8th
+  // as the SHOP counts it, not as UTC does. A sale rung at 01:00 in Karachi is stored as 20:00 UTC the
+  // day before (CLAUDE.md §4: `at` is always a full ISO UTC timestamp, and that storage is correct) —
+  // so without this the takings of a shop trading past midnight land on the wrong day. It is a SETTING
+  // and not the machine's clock: the till's OS zone can be wrong, and the books must not move if it is.
+  {
+    key: 'shop.timezone',
+    type: 'select',
+    default: 'Asia/Karachi',
+    label: 'Time zone',
+    help: 'The shop\'s local day. Reports count a day from midnight to midnight in this zone — set it to where the shop actually trades, or a late-night sale can be counted on the wrong day.',
+    group: 'shop',
+    options: [
+      { value: 'Asia/Karachi', label: 'Pakistan (PKT)' },
+      { value: 'Asia/Dubai', label: 'United Arab Emirates (GST)' },
+      { value: 'Asia/Riyadh', label: 'Saudi Arabia (AST)' },
+      { value: 'Asia/Kolkata', label: 'India (IST)' },
+      { value: 'Europe/London', label: 'United Kingdom (GMT/BST)' },
+      { value: 'America/New_York', label: 'United States — Eastern' },
+      { value: 'America/Chicago', label: 'United States — Central' },
+      { value: 'America/Denver', label: 'United States — Mountain' },
+      { value: 'America/Los_Angeles', label: 'United States — Pacific' },
+      { value: 'UTC', label: 'UTC' }
+    ]
+  },
   {
     key: 'shop.language',
     type: 'select',

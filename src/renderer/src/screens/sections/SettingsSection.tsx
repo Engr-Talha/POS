@@ -3,6 +3,7 @@ import {
   Alert,
   Card,
   Group,
+  NavLink,
   NumberInput,
   Select,
   Skeleton,
@@ -34,7 +35,78 @@ import { Periods } from './Periods'
  * That is the whole point. The owner asked for "as much as possible configurable", and the only way
  * that stays true a year from now is if adding a knob costs one line in one file, rather than another
  * field, another handler, another default and another place to forget.
+ *
+ * ── AND IT NAVIGATES ITSELF ─────────────────────────────────────────────────────────────────────────
+ * The section list is built from SETTING_GROUPS, so a new group appears in the sidebar the moment it is
+ * declared. A hand-written nav would be the same trap the hand-written form fields were: a second place
+ * to remember, and the one that gets forgotten.
  */
+
+/**
+ * The one section that is NOT a settings group. "Close the month" is an ACT, not a knob, so it cannot
+ * come from the registry — but it belongs on this screen, and it belongs in this list. The sentinel is
+ * prefixed so it can never collide with a real group key.
+ */
+const PERIODS_SECTION = '__periods'
+
+/**
+ * ONE SECTION'S WORTH OF SCREEN. Rendered by both layouts — the sidebar one and the narrow dropdown one
+ * — so the two can never drift into showing different things.
+ */
+function SettingsPanel({
+  section,
+  grouped,
+  settings,
+  currencySymbol,
+  readOnly,
+  isOwner,
+  onSave
+}: {
+  section: string
+  grouped: Array<{ group: string; items: SettingDef[] }>
+  settings: Record<string, unknown>
+  currencySymbol: string
+  readOnly: boolean
+  isOwner: boolean
+  onSave: (key: string, value: unknown) => Promise<void>
+}): React.JSX.Element | null {
+  /* ── CLOSING THE MONTH ──────────────────────────────────────────────────────
+     Not a setting — it is an ACT, and an audited one, so it does not come from
+     the registry and must not. It lives on this screen because closing the books
+     is the owner's job ('period.manage').
+
+     Owner-only here is a COURTESY, exactly like `ownerOnly` on a field: MAIN
+     enforces the permission and refuses a non-owner's lock with a plain sentence
+     whether or not this panel was ever drawn (CLAUDE.md §4). */
+  if (section === PERIODS_SECTION) {
+    return isOwner ? <Periods readOnly={readOnly} /> : null
+  }
+
+  const found = grouped.find((g) => g.group === section)
+  if (!found) return null
+
+  return (
+    <Card withBorder padding="lg">
+      <Text fw={600} mb="md">
+        {GROUP_LABEL[found.group as keyof typeof GROUP_LABEL]}
+      </Text>
+
+      <Stack gap="md">
+        {found.items.map((def) => (
+          <SettingField
+            key={def.key}
+            def={def}
+            value={settings[def.key]}
+            currencySymbol={currencySymbol}
+            disabled={readOnly || (def.ownerOnly === true && !isOwner)}
+            onSave={onSave}
+          />
+        ))}
+      </Stack>
+    </Card>
+  )
+}
+
 export function SettingsSection({
   readOnly,
   isOwner
@@ -81,12 +153,23 @@ export function SettingsSection({
     })).filter((g) => g.items.length > 0)
   }, [])
 
+  /**
+   * WHICH SECTION IS OPEN. One at a time — see the note on the layout below.
+   *
+   * It is NOT a setting and NOT persisted: "where was I in Settings" is not a shop's preference, it is
+   * this minute's context, and restoring it a week later would be a surprise rather than a courtesy.
+   * The first group is the landing spot because `shop` is what a new shop fills in first.
+   */
+  const [section, setSection] = useState<string>(SETTING_GROUPS[0])
+
   if (!settings) {
     return (
-      <Stack gap="md" maw={760}>
+      <Stack gap="md">
         <Skeleton height={30} width={200} />
-        <Skeleton height={160} />
-        <Skeleton height={160} />
+        <Group align="flex-start" gap="lg" wrap="nowrap">
+          <Skeleton height={320} width={220} />
+          <Skeleton height={320} style={{ flex: 1, maxWidth: 760 }} />
+        </Group>
       </Stack>
     )
   }
@@ -94,7 +177,8 @@ export function SettingsSection({
   const currencySymbol = (settings['currency.symbol'] as string) ?? 'Rs'
 
   return (
-    <Stack gap="lg" maw={760}>
+    // No maw here any more: the 760px belongs to the PANEL, not the page — the sidebar sits beside it.
+    <Stack gap="lg">
       <div>
         <Title order={2}>Settings</Title>
         <Text c="dimmed" size="sm" mt={4}>
@@ -110,37 +194,80 @@ export function SettingsSection({
         </Alert>
       )}
 
-      {grouped.map(({ group, items }) => (
-        <Card withBorder padding="lg" key={group}>
-          <Text fw={600} mb="md">
-            {GROUP_LABEL[group]}
-          </Text>
+      {/* ── ONE SECTION AT A TIME, DOWN THE SIDE ──────────────────────────────
+          Every group used to be stacked in one column, so 34 settings across 12
+          sections were one long scroll: the owner hunted for the discount limit
+          by dragging a scrollbar past the printer and the backup schedule.
 
-          <Stack gap="md">
-            {items.map((def) => (
-              <SettingField
-                key={def.key}
-                def={def}
-                value={settings[def.key]}
-                currencySymbol={currencySymbol}
-                disabled={readOnly || (def.ownerOnly === true && !isOwner)}
-                onSave={save}
+          A SIDEBAR rather than tabs across the top, for one reason: there are
+          twelve sections and they are growing (the registry is designed to grow —
+          adding a knob is one line in one file). Twelve tabs wrap onto a second
+          row and stop looking like tabs; twelve rows down the side are just a
+          list, and the app already reads left-to-right from a nav. It also means
+          a new group appears here automatically, which is the whole point of the
+          screen rendering itself.
+
+          It collapses to a full-width dropdown on a narrow window — a sidebar
+          that eats half a 1024px laptop is worse than the scroll it replaced. */}
+      <Group align="flex-start" gap="lg" wrap="nowrap" visibleFrom="sm">
+        <Card withBorder padding="xs" w={220} style={{ flexShrink: 0 }}>
+          <Stack gap={2}>
+            {grouped.map(({ group }) => (
+              <NavLink
+                key={group}
+                active={section === group}
+                label={GROUP_LABEL[group]}
+                onClick={() => setSection(group)}
+                style={{ borderRadius: 'var(--mantine-radius-sm)' }}
               />
             ))}
+            {isOwner && (
+              <NavLink
+                active={section === PERIODS_SECTION}
+                label="Close the month"
+                leftSection={<Lock size={16} />}
+                onClick={() => setSection(PERIODS_SECTION)}
+                style={{ borderRadius: 'var(--mantine-radius-sm)' }}
+              />
+            )}
           </Stack>
         </Card>
-      ))}
 
-      {/* ── CLOSING THE MONTH ────────────────────────────────────────────────
-          Not a setting — it is an ACT, and an audited one, so it does not come
-          from the registry and must not. It lives here because this is the
-          owner's screen and closing the books is the owner's job ('period.manage').
+        <div style={{ flex: 1, maxWidth: 760 }}>
+          <SettingsPanel
+            section={section}
+            grouped={grouped}
+            settings={settings}
+            currencySymbol={currencySymbol}
+            readOnly={readOnly}
+            isOwner={isOwner}
+            onSave={save}
+          />
+        </div>
+      </Group>
 
-          Owner-only here is a COURTESY, exactly like `ownerOnly` on a field
-          above: MAIN enforces the permission and refuses a non-owner's lock
-          with a plain sentence whether or not this panel was ever drawn
-          (CLAUDE.md §4). */}
-      {isOwner && <Periods readOnly={readOnly} />}
+      {/* The same thing on a narrow window: the list becomes a dropdown. */}
+      <Stack gap="lg" hiddenFrom="sm">
+        <Select
+          label="Section"
+          value={section}
+          onChange={(value) => value && setSection(value)}
+          data={[
+            ...grouped.map(({ group }) => ({ value: group, label: GROUP_LABEL[group] })),
+            ...(isOwner ? [{ value: PERIODS_SECTION, label: 'Close the month' }] : [])
+          ]}
+          allowDeselect={false}
+        />
+        <SettingsPanel
+          section={section}
+          grouped={grouped}
+          settings={settings}
+          currencySymbol={currencySymbol}
+          readOnly={readOnly}
+          isOwner={isOwner}
+          onSave={save}
+        />
+      </Stack>
     </Stack>
   )
 }

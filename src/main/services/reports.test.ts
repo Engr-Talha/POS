@@ -1117,8 +1117,13 @@ describe('item-wise and category-wise sales', () => {
     expect(page1.totals.net).toBe(50_000)
   })
 
-  /** THE DATE BOUND: `to` includes the WHOLE of that day. A sale at 23:59 is that day's takings. */
-  it('includes a sale at 23:59 on the to-day', () => {
+  /**
+   * THE DATE BOUND: `to` includes the WHOLE of that day. A sale at 23:59 is that day's takings.
+   *
+   * 23:59 in the SHOP's zone (the default, Asia/Karachi) — which is 18:59 UTC. The shop's day is what a
+   * report counts, so the local wall clock is what this test has to state.
+   */
+  it('includes a sale at 23:59 local on the to-day', () => {
     sales.complete(
       t.db,
       cashier,
@@ -1126,7 +1131,7 @@ describe('item-wise and category-wise sales', () => {
         lines: [{ productId: a, qtyM: ONE_UNIT }],
         payments: [{ methodLookupId: cash(), amount: 10_000 }]
       },
-      new Date('2026-07-15T23:59:59.000Z')
+      new Date('2026-07-15T23:59:59.000+05:00')
     )
 
     const report = reports.itemWise(t.db, { from: '2026-07-15', to: '2026-07-15' })
@@ -1608,7 +1613,8 @@ describe('cash book', () => {
     expect(page2.totalIn).toBe(page1.totalIn)
   })
 
-  it('a sale at 23:59 on the to-day is inside the period', () => {
+  /** 23:59 in the SHOP's zone (the default, Asia/Karachi) = 18:59 UTC. The shop's day is what counts. */
+  it('a sale at 23:59 local on the to-day is inside the period', () => {
     const p = makeProduct({ retailPrice: 10_000 })
     openingStock(p, 100, 600_000)
     sales.complete(
@@ -1618,7 +1624,7 @@ describe('cash book', () => {
         lines: [{ productId: p, qtyM: ONE_UNIT }],
         payments: [{ methodLookupId: cash(), amount: 10_000 }]
       },
-      new Date('2026-07-15T23:59:59.000Z')
+      new Date('2026-07-15T23:59:59.000+05:00')
     )
 
     const report = reports.cashBook(t.db, { from: '2026-07-15', to: '2026-07-15' })
@@ -1710,5 +1716,163 @@ describe('general ledger', () => {
     expect(() =>
       reports.generalLedger(t.db, { from: '2026-07-01', to: '2026-07-31', accountCode: '9999' })
     ).toThrow()
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 18. THE SHOP'S DAY — report date bucketing uses the shop's zone, not UTC
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE BUG THIS FIXES: a report's from/to/as-of were compared against UTC timestamps, so a sale rung in
+ * the local midnight–05:00 window (PKT is UTC+5) landed on the NEIGHBOURING calendar day. A shop that
+ * trades past midnight — plenty do — read its takings on the wrong day.
+ *
+ * `sales.at` is still a full ISO UTC timestamp; that storage is correct and did not change. What changed
+ * is that a report now cuts the day at LOCAL midnight in `shop.timezone`.
+ */
+describe("the shop's day (report date bucketing)", () => {
+  it('puts a sale rung at 01:00 local on THAT local day, not the day before', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    // 01:00 on the 8th in Karachi === 20:00 on the 7th in UTC. The UTC day and the shop's day disagree,
+    // which is exactly the window the bug lived in.
+    const when = new Date('2026-07-08T01:00:00.000+05:00')
+    expect(when.toISOString(), 'the fixture must straddle the UTC day boundary').toBe(
+      '2026-07-07T20:00:00.000Z'
+    )
+    sellExact(p, 1, cash(), 10_000, { when })
+
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' }).grossTotal,
+      "a 01:00 sale is the shop's takings for THAT day"
+    ).toBe(10_000)
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-07', to: '2026-07-07' }).grossTotal,
+      'and it must NOT also be counted on the previous day'
+    ).toBe(0)
+
+    holds(t)
+  })
+
+  it('puts a sale rung at 23:59 local on that day, not the next', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    // 23:59 on the 8th in Karachi === 18:59 UTC the same day — the other end of the shop's day.
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-07-08T23:59:59.000+05:00') })
+
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' }).grossTotal,
+      "a 23:59 sale is that day's takings"
+    ).toBe(10_000)
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-09', to: '2026-07-09' }).grossTotal,
+      'and it has not leaked into the next day'
+    ).toBe(0)
+
+    holds(t)
+  })
+
+  /** NOT PKT-ONLY: a negative offset must work too, or the fix is a Karachi special case. */
+  it('honours a NEGATIVE-offset shop (US Eastern)', () => {
+    settings.set(t.db, 'shop.timezone', 'America/New_York')
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    // 23:00 on the 8th in New York === 03:00 on the NINTH in UTC. UTC would file it a day LATE — the
+    // mirror image of the PKT case.
+    const when = new Date('2026-07-08T23:00:00.000-04:00')
+    expect(when.toISOString()).toBe('2026-07-09T03:00:00.000Z')
+    sellExact(p, 1, cash(), 10_000, { when })
+
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' }).grossTotal,
+      "a 23:00 sale in New York is the 8th's takings, not the 9th's"
+    ).toBe(10_000)
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-09', to: '2026-07-09' }).grossTotal,
+      'the UTC day must not claim it'
+    ).toBe(0)
+
+    holds(t)
+  })
+
+  /** The zone is a SETTING: changing it re-cuts the day, it never moves a stored timestamp. */
+  it('re-buckets the same stored sale when the shop changes its zone', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+
+    // One instant, read by two shops. In Karachi it is the 8th at 01:00; in London it is the 7th at 21:00.
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-07-07T20:00:00.000Z') })
+
+    expect(reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' }).grossTotal).toBe(10_000)
+
+    settings.set(t.db, 'shop.timezone', 'Europe/London')
+    expect(
+      reports.salesSummary(t.db, { from: '2026-07-07', to: '2026-07-07' }).grossTotal,
+      'the same instant is the 7th in London — the setting re-cuts the day'
+    ).toBe(10_000)
+    expect(reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' }).grossTotal).toBe(0)
+
+    holds(t)
+  })
+
+  /** DST: London's clocks go forward on 2026-03-29, so that local day is 23 hours long. */
+  it('cuts the day correctly across a DST change', () => {
+    settings.set(t.db, 'shop.timezone', 'Europe/London')
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000, new Date('2026-01-01T10:00:00.000Z'))
+
+    // 23:30 BST on the 29th === 22:30 UTC the same day, the day the clocks jumped forward.
+    sellExact(p, 1, cash(), 10_000, { when: new Date('2026-03-29T23:30:00.000+01:00') })
+
+    expect(
+      reports.salesSummary(t.db, { from: '2026-03-29', to: '2026-03-29' }).grossTotal,
+      'the short DST day still holds its own late sale'
+    ).toBe(10_000)
+    expect(reports.salesSummary(t.db, { from: '2026-03-30', to: '2026-03-30' }).grossTotal).toBe(0)
+
+    holds(t)
+  })
+
+  /**
+   * EVERY REPORT CUTS AT THE SAME INSTANT. The midnight–05:00 window is where a half-applied timezone
+   * would show up as two reports disagreeing, so assert they still agree with each other and the GL.
+   */
+  it('keeps every report on the same boundary, and reconciled with the ledger', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    openingStock(p, 100, 600_000)
+    const customer = makeCustomer('Late Night Udhaar')
+
+    // A credit sale at 01:00 local on the 8th — inside the window the bug lived in.
+    sellExact(p, 1, credit(), 10_000, {
+      customerId: customer,
+      when: new Date('2026-07-08T01:00:00.000+05:00')
+    })
+
+    // The day's own reports agree with each other.
+    const summary = reports.salesSummary(t.db, { from: '2026-07-08', to: '2026-07-08' })
+    const itemWise = reports.itemWise(t.db, { from: '2026-07-08', to: '2026-07-08' })
+    expect(itemWise.totals.net, 'item-wise agrees with the sales summary').toBe(summary.netSales)
+
+    // The as-of reports cut the ledger at the same instant: as of the 7th the sale has not happened yet;
+    // as of the 8th it is on the account — and the aging equals GL Receivable at BOTH dates.
+    const before = reports.customerAging(t.db, { asOf: '2026-07-07' })
+    expect(before.totals.total, 'the sale is not yet on the account on the 7th').toBe(0)
+
+    const after = reports.customerAging(t.db, { asOf: '2026-07-08' })
+    expect(after.totals.total, "and it is on the 8th — the shop's day").toBe(10_000)
+    expect(
+      after.totals.total,
+      'customer aging === GL Receivable, on the shop-local boundary'
+    ).toBe(ledger.accountBalance(t.db, ACC.RECEIVABLE))
+
+    // The trial balance and balance sheet cut at that same instant too.
+    expect(reports.trialBalance(t.db, { asOf: '2026-07-08' }).balanced).toBe(true)
+    expect(reports.balanceSheet(t.db, { asOf: '2026-07-08' }).balanced).toBe(true)
+
+    holds(t)
   })
 })
