@@ -44,7 +44,8 @@ import {
   Truck,
   ShoppingCart,
   HandCoins,
-  BadgePercent
+  BadgePercent,
+  ClipboardCheck
 } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
@@ -67,6 +68,7 @@ import { Suppliers } from './sections/Suppliers'
 import { SettingsSection } from './sections/SettingsSection'
 import { Shifts } from './sections/Shifts'
 import { Stock } from './sections/Stock'
+import { StockTake } from './sections/StockTake'
 import { Users } from './sections/Users'
 
 type Section =
@@ -74,6 +76,7 @@ type Section =
   | 'overview'
   | 'products'
   | 'stock'
+  | 'stockTake'
   | 'sales'
   | 'returns'
   | 'purchases'
@@ -103,6 +106,10 @@ const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?:
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'products', label: 'Items', icon: Package },
   { key: 'stock', label: 'Stock', icon: Boxes },
+  // Beside Stock, because it IS stock — the counting sheet that corrects it. 'stockTake.view' is the
+  // supervisor's READ: a cashier who cannot open a sheet has no use for the nav item. The writes are
+  // 'stockTake.manage' and are enforced in MAIN regardless of what this list draws.
+  { key: 'stockTake', label: 'Stock take', icon: ClipboardCheck, permission: 'stockTake.view' },
   { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
   { key: 'returns', label: 'Returns', icon: Undo2, permission: 'sale.refund' },
   { key: 'purchases', label: 'Purchases', icon: ShoppingCart, permission: 'purchase.view' },
@@ -301,6 +308,9 @@ export function Home({
           )}
           {section === 'stock' && (
             <Stock readOnly={state.readOnly} currencySymbol={currencySymbol} />
+          )}
+          {section === 'stockTake' && (
+            <StockTake readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
           {section === 'sales' && <SalesHistory currencySymbol={currencySymbol} />}
           {section === 'returns' && user && (

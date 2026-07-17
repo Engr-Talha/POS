@@ -80,6 +80,8 @@ export function sampleQuotation(overrides: Partial<QuotationData> = {}): Quotati
     ],
 
     currencySymbol: 'Rs',
+    // A Pakistani shop, like the currency above — so the preview shows the dates a real shop sees.
+    country: 'PK',
 
     footer: 'Prices are subject to stock availability.',
 

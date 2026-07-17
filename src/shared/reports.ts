@@ -40,11 +40,12 @@ import type { TrialBalance } from './accounting'
 
 // ── Shared date params ─────────────────────────────────────────────────────────
 
-/** ISO date, YYYY-MM-DD. The same shape sales.ts / catalog.ts validate their dates with. */
-export const IsoDate = z
-  .string()
-  .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Please pick a date.')
+// A real calendar day, from ONE definition (shared/dates.ts). The bare regex this used to be let
+// 2026-02-30 through, and JS silently rolls that to March 2 — a MARCH date inside a FEBRUARY tax
+// return, with no error. Imported, not re-implemented: seven copies of the guard is seven chances to
+// miss the eighth. Re-exported because callers already import it from here.
+import { IsoDate } from './dates'
+export { IsoDate }
 
 /** A period: [from, to], both inclusive of the whole day. */
 export const DateRangeInput = z.object({

@@ -1,4 +1,5 @@
 import type { ReceiptData, ReceiptWidth, ReceiptLine } from '@shared/receipt'
+import { formatDateTime } from '@shared/dates'
 import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
 
@@ -199,9 +200,9 @@ ${
     // reads back to a customer over the phone. On narrow paper they stack instead.
     width === '58mm'
       ? `<div>${escapeHtml(data.invoiceNo)}</div>
-         <div class="small">${escapeHtml(new Date(data.at).toLocaleString())}</div>`
+         <div class="small">${escapeHtml(formatDateTime(data.at, data.country))}</div>`
       : `<div class="meta"><span>${escapeHtml(data.invoiceNo)}</span><span>${escapeHtml(
-          new Date(data.at).toLocaleString()
+          formatDateTime(data.at, data.country)
         )}</span></div>`
   }
 <div class="meta"><span>Cashier: ${escapeHtml(data.cashierName)}</span>${

@@ -85,6 +85,8 @@ export function sampleReceipt(isDuplicate = false): ReceiptData {
     changeDue: 12_612,
 
     currencySymbol: 'Rs',
+    // A Pakistani shop, like the currency above — so the preview shows the dates a real shop sees.
+    country: 'PK',
     isDuplicate,
 
     pointsEarned: 43,

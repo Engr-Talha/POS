@@ -3,6 +3,7 @@ import type { ReceiptWidth } from '@shared/receipt'
 import { formatMoney } from '@shared/money'
 // SHARED WITH THE RECEIPT, ON PURPOSE. See the header below.
 import { WIDTHS, escapeHtml, rule, formatRate, lineHtml } from './receipt'
+import { formatDate, formatDateTime } from '@shared/dates'
 
 /**
  * THE QUOTATION — the offer, on the same thermal paper the receipt prints on (58 mm / 80 mm).
@@ -43,11 +44,12 @@ import { WIDTHS, escapeHtml, rule, formatRate, lineHtml } from './receipt'
  * building a LOCAL date. `new Date('2026-03-11')` parses as UTC midnight, which west of Greenwich prints
  * as the 10th — the offer would appear to lapse a day early, on the customer's copy, in writing.
  */
-function formatValidUntil(iso: string): string {
+function formatValidUntil(iso: string, country: string | null | undefined): string {
   const [year, month, day] = iso.split('-').map(Number)
   if (!year || !month || !day) return iso // not a date we recognise: print it as it is, never a blank
 
-  return new Date(year, month - 1, day).toLocaleDateString()
+  // The SHOP's country decides the order, not the machine's locale — see shared/dates.ts.
+  return formatDate(new Date(year, month - 1, day), country)
 }
 
 export function renderQuotationHtml(data: QuotationData, width: ReceiptWidth = '80mm'): string {
@@ -186,9 +188,9 @@ ${
     // there is no room for a reference and a date side by side.
     width === '58mm'
       ? `<div>Quote #${data.quoteId}</div>
-         <div class="small">${escapeHtml(new Date(data.at).toLocaleString())}</div>`
+         <div class="small">${escapeHtml(formatDateTime(data.at, data.country))}</div>`
       : `<div class="meta"><span>Quote #${data.quoteId}</span><span>${escapeHtml(
-          new Date(data.at).toLocaleString()
+          formatDateTime(data.at, data.country)
         )}</span></div>`
   }
 <div class="meta"><span>Prepared by: ${escapeHtml(data.cashierName)}</span>${
@@ -243,7 +245,7 @@ ${
 
 <div class="rule">${rule(w.chars, '=')}</div>
 
-<div class="validity">Valid until ${escapeHtml(formatValidUntil(data.validUntil))}</div>
+<div class="validity">Valid until ${escapeHtml(formatValidUntil(data.validUntil, data.country))}</div>
 ${
   // The paper says it has lapsed. It does NOT refuse anything — honouring an expired quote is the
   // shopkeeper's call to make with the customer standing there, not the till's. (Migration 0015.)

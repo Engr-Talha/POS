@@ -21,6 +21,7 @@ import {
   type SettingDef
 } from '@shared/settings-registry'
 import { formatMoney, parseMoney } from '@shared/money'
+import { Periods } from './Periods'
 
 /**
  * THE SETTINGS SCREEN RENDERS ITSELF.
@@ -120,6 +121,17 @@ export function SettingsSection({
           </Stack>
         </Card>
       ))}
+
+      {/* ── CLOSING THE MONTH ────────────────────────────────────────────────
+          Not a setting — it is an ACT, and an audited one, so it does not come
+          from the registry and must not. It lives here because this is the
+          owner's screen and closing the books is the owner's job ('period.manage').
+
+          Owner-only here is a COURTESY, exactly like `ownerOnly` on a field
+          above: MAIN enforces the permission and refuses a non-owner's lock
+          with a plain sentence whether or not this panel was ever drawn
+          (CLAUDE.md §4). */}
+      {isOwner && <Periods readOnly={readOnly} />}
     </Stack>
   )
 }

@@ -302,10 +302,39 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Phase 10, second increment** (v0.19.0): the two UI screens + BOTH deferred date fixes from §7.
+  · **"Close the month"** (Settings, owner-only as a courtesy — MAIN enforces it) and the **STOCK TAKE**
+    screen (scan → count → live variance → apply; keyboard-first for a scanner in one hand). The two
+    period confirmations are deliberately asymmetrical: unlocking leads with MAIN's own journal count
+    ("March 2026 has 412 entries. Reopening it lets them be changed.") because reopening a reported month
+    is the weightier act. The stock-take renderer never computes a variance — it only reads MAIN's, which
+    is the whole reason the preload contract is shaped that way: a renderer that can name its own variance
+    can hide a theft.
+  · **PRINTED DATES NOW FOLLOW THE SHOP, NOT THE PC** (§7 deferred, fixed). Every printed date was
+    `toLocaleString()` with NO locale — "whatever this PC is set to" — so a Pakistani shop on a US Windows
+    image printed **7/22/2026** on its own customers' receipts, while `shop.country` sat in Settings with
+    help text literally promising "Sets the default tax rate and the date format". New `shared/dates.ts`
+    (`formatDate`/`formatDateTime`); `country` travels ON the ReceiptData/QuotationData exactly as
+    `currencySymbol` already did, because the renderer has no settings and must never guess. **Written as
+    an explicit table, NOT a locale string:** `toLocaleDateString('en-PK')` depends on the ICU data
+    compiled into the running Electron build, and a slim ICU build silently falls back to en-US — the same
+    bug again, invisibly, on a machine we cannot inspect. Receipt rendered and LOOKED AT (trap #14):
+    `15/07/2026 6:42 pm`. **Two old tests had encoded the bug** — they asserted
+    `new Date(...).toLocaleDateString()`, i.e. they asked the machine the same question the code did, so
+    they passed on every machine and could never see it. Fixed, and they now name real strings.
+    It matters most on a quotation: "Valid until 07/22/2026" read day-first is a promise held four months
+    too long.
+  · **CALENDAR-INVALID DATES REFUSED EVERYWHERE** (§7 deferred, fixed). The expenses audit added a
+    round-trip guard rejecting 2026-02-30 (which JS silently rolls to **March 2**) — but the same bare
+    regex had been copied WITHOUT it into **seven** other schemas: reports, sales, returns, purchases,
+    customers, suppliers, opening. A February tax return happily accepted a March date. Now ONE `IsoDate`
+    in `shared/dates.ts`, imported everywhere — seven copies of a guard is seven chances to miss the
+    eighth. Proven at the schemas themselves, with the leap-year cases (2000 yes, 1900 no).
+  · STILL OPEN from Phase 10: **dark mode** (`ui.colorScheme` setting + the toggle + a hardcoded-colour
+    sweep). The two new screens are already token-only, so they are ready for it.
 - **Phase 10, first increment** (v0.18.0): **period lock made reachable**, **stock take**, and the
-  **RBAC-in-main proof**. Backends only — the two UI screens, dark mode and the printed-date/locale fix
-  are the next increment (three agent runs died on API errors mid-phase; the services survived complete
-  and verified, so this ships rather than sits).
+  **RBAC-in-main proof**. Backends only (three agent runs died on API errors mid-phase; the services
+  survived complete and verified, so it shipped rather than sat).
   · **PERIOD LOCK: the engine was always there and enforced — nobody could reach it.** `ledger.lockPeriod`
     / `unlockPeriod` / `assertPeriodOpen` existed since Phase 2, with no IPC and no UI, so an owner could
     not actually close a month. Now `periods.ts` + `period:list|lock|unlock` (OWNER only, audited both

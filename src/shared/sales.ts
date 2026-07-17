@@ -387,6 +387,17 @@ export type QuotationData = {
   taxSummary: ReceiptTaxSummaryRow[]
 
   currencySymbol: string
+
+  /**
+   * The shop's own country ('shop.country'), which decides how the dates on this paper are written —
+   * 22/07/2026 in Karachi, 07/22/2026 in Denver. It travels ON the document, exactly as currencySymbol
+   * does, because the renderer has no settings and must never guess: left to the machine's locale, a
+   * Pakistani shop on a US Windows image prints its own customer an American date. It matters more here
+   * than anywhere: "Valid until 07/22/2026" read as day-first is a promise held four months too long.
+   * (See shared/dates.ts for why this is not a locale string.)
+   */
+  country?: string | null
+
   footer?: string | null
 }
 
@@ -460,10 +471,10 @@ const LookupId = z.number().int().positive()
 const ReasonCode = z.string().trim().min(1).max(50)
 const TaxRateBp = z.number().int().min(0).max(100_000)
 /** ISO date, YYYY-MM-DD. A cheque is dated to a DAY, not a timestamp. */
-const IsoDate = z
-  .string()
-  .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Please pick a date.')
+// A real calendar day, from ONE definition (shared/dates.ts). The bare regex this used to be let
+// 2026-02-30 through, and JS silently rolls that to March 2 — a date in the wrong month, with no
+// error. Imported, not re-implemented: seven copies of the guard is seven chances to miss the eighth.
+import { IsoDate } from './dates'
 
 // ── A cart line ──────────────────────────────────────────────────────────────
 

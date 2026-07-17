@@ -216,10 +216,10 @@ const RowId = z.number().int().positive()
 const LookupId = z.number().int().positive()
 
 /** ISO date, YYYY-MM-DD. The wizard's dates are DAYS, not timestamps. */
-const IsoDate = z
-  .string()
-  .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Please pick a date.')
+// A real calendar day, from ONE definition (shared/dates.ts). The bare regex this used to be let
+// 2026-02-30 through, and JS silently rolls that to March 2 — a date in the wrong month, with no
+// error. Imported, not re-implemented: seven copies of the guard is seven chances to miss the eighth.
+import { IsoDate } from './dates'
 
 const Note = z.string().trim().max(500).nullish()
 

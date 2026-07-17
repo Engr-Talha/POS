@@ -3426,6 +3426,8 @@ function buildReceipt(db: DB, sale: SaleDetail, isDuplicate: boolean): ReceiptDa
     changeDue: sale.changeDue,
 
     currencySymbol: setting<string>(db, 'currency.symbol'),
+    // The SHOP's country writes the dates on this paper, not the machine's Windows locale.
+    country: setting<string>(db, 'shop.country'),
     isDuplicate
   }
 }
@@ -3564,7 +3566,9 @@ export function quotationFor(db: DB, actor: User, rawId: unknown, now = new Date
 
     taxSummary: totals.taxSummary,
 
-    currencySymbol: setting<string>(db, 'currency.symbol')
+    currencySymbol: setting<string>(db, 'currency.symbol'),
+    // The SHOP's country writes the dates on this paper, not the machine's Windows locale.
+    country: setting<string>(db, 'shop.country')
   }
 }
 

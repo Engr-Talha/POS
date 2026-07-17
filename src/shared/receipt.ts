@@ -68,6 +68,16 @@ export type ReceiptData = {
 
   currencySymbol: string
 
+  /**
+   * The shop's own country ('shop.country'), which decides how a DATE is written on this paper —
+   * 22/07/2026 in Karachi, 07/22/2026 in Denver. It travels ON the receipt, exactly as currencySymbol
+   * does, because the renderer has no settings and must never guess: left to the machine's locale, a
+   * Pakistani shop on a US Windows image prints 7/22/2026 for its own customers. Optional so an older
+   * caller still compiles; absent means day-first, which is right for five of the six countries the app
+   * offers. (See shared/dates.ts for why this is not a locale string.)
+   */
+  country?: string | null
+
   /** A reprint is stamped DUPLICATE. A second copy of a receipt must never look like the first. */
   isDuplicate?: boolean
 

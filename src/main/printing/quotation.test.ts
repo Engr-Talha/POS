@@ -77,14 +77,18 @@ describe('the quotation', () => {
 
   // ── The shelf life ─────────────────────────────────────────────────────────
 
-  it('shows the valid-until date prominently, as a date and not an ISO string', () => {
-    // 2026-07-22 rendered the way the shopkeeper reads a date. toLocaleDateString so the assertion
-    // does not hard-code this machine's locale.
-    const expected = new Date(2026, 6, 22).toLocaleDateString()
-
+  it('shows the valid-until date prominently, the way THE SHOP writes a date', () => {
+    // This assertion used to read `new Date(2026, 6, 22).toLocaleDateString()` — "so it does not
+    // hard-code this machine's locale". That was the bug wearing the test's clothes: it passed on ANY
+    // machine precisely BECAUSE it asked the machine, so it could never notice that a Pakistani shop was
+    // printing 7/22/2026 for its own customers. The shop's country decides now, so the expected string
+    // is a real one. This fixture names no country, so it takes the day-first default — which is the
+    // case worth pinning: a shop that never opens Settings must still print its own customers a date
+    // they read correctly. The explicit PK/US pair is asserted below.
     for (const html of [html80, html58]) {
       expect(html).toContain('Valid until')
-      expect(html).toContain(expected)
+      expect(html).toContain('22/07/2026')
+      expect(html, 'an American date on a Pakistani shop\'s quotation').not.toContain('7/22/2026')
     }
   })
 
@@ -92,7 +96,23 @@ describe('the quotation', () => {
     // new Date('2026-07-22') is UTC midnight, which west of Greenwich prints as the 21st. The offer
     // would appear to lapse a day early ON THE CUSTOMER'S COPY, in writing.
     const html = renderQuotationHtml(sampleQuotation({ validUntil: '2026-07-22' }), '80mm')
-    expect(html).toContain(new Date(2026, 6, 22).toLocaleDateString())
+    expect(html).toContain('22/07/2026')
+  })
+
+  /**
+   * THE COUNTRY WRITES THE DATE — and on a quotation it is not cosmetic. "Valid until 07/22/2026" read
+   * day-first is a promise the shop is holding four months longer than it meant to.
+   */
+  it('writes the date the way the shop\'s own country does, not the way this PC is set up', () => {
+    const pk = renderQuotationHtml(sampleQuotation({ validUntil: '2026-07-22', country: 'PK' }), '80mm')
+    expect(pk).toContain('22/07/2026')
+
+    const us = renderQuotationHtml(sampleQuotation({ validUntil: '2026-07-22', country: 'US' }), '80mm')
+    expect(us).toContain('07/22/2026')
+
+    // A shop that never opened Settings gets day-first — right for five of the six countries offered.
+    const unset = renderQuotationHtml(sampleQuotation({ validUntil: '2026-07-22', country: null }), '80mm')
+    expect(unset).toContain('22/07/2026')
   })
 
   it('marks an expired quote EXPIRED, and an unexpired one not at all', () => {

@@ -197,10 +197,10 @@ const LookupId = z.number().int().positive()
 /** A lookups(...).code — reason codes are stored and passed as CODES, not ids (survive a re-seed). */
 const ReasonCode = z.string().trim().min(1).max(50)
 /** ISO date, YYYY-MM-DD. */
-const IsoDate = z
-  .string()
-  .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Please pick a date.')
+// A real calendar day, from ONE definition (shared/dates.ts). The bare regex this used to be let
+// 2026-02-30 through, and JS silently rolls that to March 2 — a date in the wrong month, with no
+// error. Imported, not re-implemented: seven copies of the guard is seven chances to miss the eighth.
+import { IsoDate } from './dates'
 
 /**
  * ONE LINE COMING BACK — WHICH sale line, and HOW MANY of it. Not what to refund.
