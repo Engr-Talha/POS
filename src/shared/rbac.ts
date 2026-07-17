@@ -54,7 +54,19 @@ export const PERMISSIONS = {
   // Catalog & stock
   'product.manage': 'manager',
   'stock.adjust': 'manager',
-  'stock.take.approve': 'manager',
+
+  // Stock take — the counting sheet. A manager's job, exactly like the `stock.adjust` it is a batch of
+  // (§4 roles: the Manager owns products and stock). Opening a sheet and keying counts are the same
+  // permission as applying it, deliberately: a sheet nobody may apply is a sheet nobody will finish, and
+  // the control here is not a second role — it is the AUDIT LOG plus the variance total, which is what
+  // the leakage report reads. A big variance is a theft signal, and `stockTake.apply` records who signed
+  // it off with the money against it.
+  'stockTake.manage': 'manager',
+  // READING a sheet back. A supervisor may look at what was counted — and at the variance, which is the
+  // whole point of the sheet — without being able to post the correction. (This is the Phase-0
+  // 'stock.take.approve' placeholder, renamed now that it is real: it never guarded an approval step,
+  // and a permission whose name lies about what it does is worse than no permission at all.)
+  'stockTake.view': 'supervisor',
 
   // Buying — the mirror of selling. The Manager role owns products and purchases (§4 roles), so the
   // supplier record, the goods-received note and paying a supplier down are all a manager's job; a
@@ -97,6 +109,17 @@ export const PERMISSIONS = {
   'user.manage': 'owner',
   'settings.manage': 'owner',
   'lookups.manage': 'manager',
+
+  // CLOSING AND REOPENING THE MONTH — the owner's, and nobody else's (§4 roles name the Owner for
+  // "period unlock" explicitly). Locking freezes a month the shop has already reported on; UNLOCKING
+  // reopens it, which is how books get quietly rewritten after the fact. Both are audited by name.
+  //
+  // ONE permission for both directions, not two. A manager who could LOCK but not unlock could freeze
+  // the owner's month out from under him, and only the owner could undo it — a lock is not the safe half
+  // of this pair, it is just the half that is harder to notice.
+  'period.manage': 'owner',
+  // The Phase-0 name, kept as an alias so nothing that already asks for it silently loses its guard.
+  // Same role, same act. New code asks for 'period.manage'.
   'period.unlock': 'owner',
   'license.activate': 'owner',
   'backup.run': 'manager',

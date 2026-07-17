@@ -385,7 +385,53 @@ export const IPC = {
   // answered by the very same `priceCart` that freezes the sale, which is what stops the discount on the
   // screen and the discount on the receipt from ever drifting apart. Gated 'sale.create' — it is the
   // till's own question — and it takes no date: the clock is MAIN's.
-  salePreviewPromotions: 'sale:previewPromotions'
+  salePreviewPromotions: 'sale:previewPromotions',
+
+  // ── CLOSING THE MONTH (the period lock) ───────────────────────────────────────────────────────────
+  //
+  // The lock itself is not new: `ledger.assertPeriodOpen` has been enforced on every journal since
+  // migration 0002, and on every stock movement since. What was missing was a DOOR — no IPC, no screen,
+  // so an owner could not actually close a month. These three are that door.
+  //
+  // Lock March and nothing new can be dated in March: no sale, no return, no purchase, no expense, no
+  // stock adjustment. April is untouched. This is what stops last year's reported figures from quietly
+  // changing after the accountant has signed them off.
+  //
+  // lock / unlock WRITE and are gated 'period.manage' (OWNER — CLAUDE.md §4 names the Owner for period
+  // unlock) + assertWritable(), and BOTH are audited by the service. The unlock is the one that matters:
+  // reopening a closed month is how books get quietly rewritten, and the log is the only thing that will
+  // ever say who did it. `list` is a READ and takes NO assertWritable() — an expired shop still reads its
+  // own books (CLAUDE.md §6).
+  periodList: 'period:list',
+  periodLock: 'period:lock',
+  periodUnlock: 'period:unlock',
+
+  // ── STOCK TAKE (migration 0019) — the counting sheet ──────────────────────────────────────────────
+  //
+  // The shop walks its shelves, writes down what is actually there, and the books are corrected to
+  // match. THE DOCUMENT WRAPS THE ENGINE: `apply` calls `stock.adjust()` once per varying line — the
+  // same engine the Stock screen's hand adjustment uses, which appends the movement, keeps the weighted
+  // average honest and posts the balanced journal. There is no second path to stock, and no new
+  // accounting (shared/stock-take.ts).
+  //
+  // A LINE CARRIES ONLY A PRODUCT AND A COUNT. It cannot send the expected figure, the variance, the
+  // cost, a date or a user — MAIN reads what the books expect at that instant, freezes it, and derives
+  // the counter from the session. A renderer that could name the expected figure could name its own
+  // variance, which is to say it could hide a theft.
+  //
+  // The writes are gated 'stockTake.manage' (manager — a stock take is a batch of `stock.adjust`, which
+  // is a manager's) + assertWritable(); `apply` is audited with the variance total against it, because a
+  // big variance is a theft signal. list / get are 'stockTake.view' (supervisor) READS and take NO
+  // assertWritable(): an expired shop still reads its own books.
+  stockTakeCreate: 'stockTake:create',
+  stockTakeSetCount: 'stockTake:setCount',
+  stockTakeAddLines: 'stockTake:addLines',
+  stockTakeRemoveLine: 'stockTake:removeLine',
+  stockTakeMarkCounted: 'stockTake:markCounted',
+  stockTakeApply: 'stockTake:apply',
+  stockTakeCancel: 'stockTake:cancel',
+  stockTakeList: 'stockTake:list',
+  stockTakeGet: 'stockTake:get'
 } as const
 
 export type SystemInfo = {

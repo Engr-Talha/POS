@@ -499,7 +499,21 @@ describe('schema invariants — asserted against the WHOLE database, not one tab
     // shop did not have, never HOW MUCH. It is caught here only because the rule above matches on the
     // NAME, and the name ends in "_stock". The exemption is EARNED, not asserted: the assertion below
     // proves the column cannot hold a quantity even if someone later tried to make it.
-    const ALLOWED = new Set(['min_stock_m', 'qty_m', 'pack_size', 'had_negative_stock'])
+    // `stock_take_id` (migration 0019) is NOT a quantity either. It is a FOREIGN KEY to the counting
+    // sheet a line belongs to, and it is caught here for the same reason as the flag above: the rule
+    // matches on the NAME, and this one starts with "stock_". Its exemption is EARNED the same way —
+    // the assertion below proves it is a reference to a real stock_takes row, so it cannot hold a
+    // stock figure even if a future write path tried.
+    //
+    // The rule is deliberately NOT loosened to stop matching these. A heuristic that stopped looking at
+    // anything beginning "stock_" would wave through a genuine `stock_qty` on the day someone adds one.
+    const ALLOWED = new Set([
+      'min_stock_m',
+      'qty_m',
+      'pack_size',
+      'had_negative_stock',
+      'stock_take_id'
+    ])
 
     const stockish = allColumns().filter(
       (column) =>
@@ -537,5 +551,17 @@ describe('schema invariants — asserted against the WHOLE database, not one tab
     expect(productColumns).not.toContain('quantity')
     expect(productColumns).not.toContain('balance_qty')
     expect(productColumns).toContain('min_stock_m') // the re-order LEVEL is not a stock figure
+
+    // AND `stock_take_id` IS A REFERENCE, NOT A FIGURE. This is what pays for its place in ALLOWED:
+    // it is declared REFERENCES stock_takes(id), so a write path cannot put "how many we counted" in
+    // it — the only values it accepts are ids of real counting sheets.
+    const foreignKeys = t.db.prepare('PRAGMA foreign_key_list(stock_take_lines)').all() as Array<{
+      table: string
+      from: string
+      to: string
+    }>
+    const takeRef = foreignKeys.find((key) => key.from === 'stock_take_id')
+    expect(takeRef?.table).toBe('stock_takes')
+    expect(takeRef?.to).toBe('id')
   })
 })

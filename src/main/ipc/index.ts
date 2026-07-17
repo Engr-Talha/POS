@@ -141,6 +141,20 @@ import {
   UpdatePromotionInput,
   type PromotionDetail
 } from '@shared/promotions'
+// CLOSING THE MONTH. The lock has been enforced since migration 0002; these are the door to it.
+import { ListPeriodsInput, LockPeriodInput, UnlockPeriodInput } from '@shared/periods'
+// THE COUNTING SHEET (migration 0019). A line carries a product and a count — never the expected
+// figure, the variance, the cost, a date or a user. MAIN freezes all of those.
+import {
+  AddStockTakeLinesInput,
+  ApplyStockTakeInput,
+  CancelStockTakeInput,
+  CreateStockTakeInput,
+  ListStockTakesInput,
+  RemoveStockTakeLineInput,
+  SetCountInput,
+  StockTakeIdInput
+} from '@shared/stock-take'
 import {
   CreateProductInput,
   UpdateProductInput,
@@ -197,6 +211,8 @@ import * as shiftsService from '../services/shifts'
 import * as expensesService from '../services/expenses'
 import * as loyaltyService from '../services/loyalty'
 import * as promotionsService from '../services/promotions'
+import * as periodsService from '../services/periods'
+import * as stockTakeService from '../services/stock-take'
 import * as printer from '../printing/printer'
 import * as reportsService from '../services/reports'
 import { reportToXlsxBuffer } from '../services/reports-excel'
@@ -2334,5 +2350,98 @@ export function registerIpcHandlers(): void {
   handle<void, PromotionDetail[]>(IPC.promotionActive, null, () => {
     session.requirePermissionOf('promotion.view')
     return promotionsService.activeFor(getDb(), new Date())
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // CLOSING THE MONTH — the door to a lock that has been enforced since migration 0002
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // Nothing about the ENFORCEMENT is here. `ledger.assertPeriodOpen` already refuses every journal and
+  // every stock movement dated in a locked month. These handlers are the way an owner finally reaches
+  // it. Both writes are OWNER-only and audited by the service — the unlock especially: reopening a
+  // closed month is how books get quietly rewritten.
+
+  handle(IPC.periodList, ListPeriodsInput, (input) => {
+    // A READ, and NO assertWritable(). An expired shop still reads its own books (CLAUDE.md §6) — and
+    // it is exactly the shop most likely to be looking at which months are closed.
+    session.requirePermissionOf('period.manage')
+    return periodsService.list(getDb(), input)
+  })
+
+  handle(IPC.periodLock, LockPeriodInput, (input) => {
+    const user = session.requirePermissionOf('period.manage')
+    assertWritable()
+    return periodsService.lock(getDb(), user, input)
+  })
+
+  handle(IPC.periodUnlock, UnlockPeriodInput, (input) => {
+    const user = session.requirePermissionOf('period.manage')
+    assertWritable()
+    // REOPENING A CLOSED MONTH. Owner-only and audited with the journal count against it — the
+    // difference between reopening a quiet month and reopening the shop's busiest quarter.
+    return periodsService.unlock(getDb(), user, input)
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // STOCK TAKE — the counting sheet (migration 0019)
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // THE DOCUMENT WRAPS THE ENGINE. `apply` calls stock.adjust() once per varying line; there is no
+  // second path to stock and no new accounting here. Note what a line CANNOT send: the expected
+  // figure, the variance, the cost, a date, a user. MAIN freezes all of them.
+
+  handle(IPC.stockTakeCreate, CreateStockTakeInput, (input) => {
+    const user = session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    return stockTakeService.create(getDb(), user, input)
+  })
+
+  handle(IPC.stockTakeSetCount, SetCountInput, (input) => {
+    const user = session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    return stockTakeService.setCount(getDb(), user, input)
+  })
+
+  handle(IPC.stockTakeAddLines, AddStockTakeLinesInput, (input) => {
+    const user = session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    return stockTakeService.addLines(getDb(), user, input)
+  })
+
+  handle(IPC.stockTakeRemoveLine, RemoveStockTakeLineInput, (input) => {
+    session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    return stockTakeService.removeLine(getDb(), input)
+  })
+
+  handle(IPC.stockTakeMarkCounted, StockTakeIdInput, (input) => {
+    session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    return stockTakeService.markCounted(getDb(), input)
+  })
+
+  handle(IPC.stockTakeApply, ApplyStockTakeInput, (input) => {
+    const user = session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    // THE ONE THAT MOVES STOCK AND MONEY. Audited by the service with the variance total against it —
+    // a big variance is a theft signal, and that row is what the leakage report and the owner read.
+    return stockTakeService.apply(getDb(), user, input)
+  })
+
+  handle(IPC.stockTakeCancel, CancelStockTakeInput, (input) => {
+    const user = session.requirePermissionOf('stockTake.manage')
+    assertWritable()
+    // Cancelled, never deleted: an abandoned sheet is evidence too.
+    return stockTakeService.cancel(getDb(), user, input)
+  })
+
+  handle(IPC.stockTakeList, ListStockTakesInput, (input) => {
+    session.requirePermissionOf('stockTake.view')
+    return stockTakeService.list(getDb(), input)
+  })
+
+  handle(IPC.stockTakeGet, StockTakeIdInput, (input) => {
+    session.requirePermissionOf('stockTake.view')
+    return stockTakeService.get(getDb(), input)
   })
 }

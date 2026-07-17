@@ -335,6 +335,36 @@ const api: PosApi = {
     get: (input) => ipcRenderer.invoke(IPC.promotionGet, input),
     rules: (input) => ipcRenderer.invoke(IPC.promotionRules, input),
     active: () => ipcRenderer.invoke(IPC.promotionActive)
+  },
+
+  // CLOSING THE MONTH — the door to a lock that has been enforced since migration 0002. `assertPeriodOpen`
+  // already refuses every journal and every stock movement dated in a locked month; there was simply no
+  // way for an owner to turn it. Neither write takes a user or a date — MAIN stamps the actor from the
+  // session and reads its own clock, because a renderer that could name the user could sign someone
+  // else's name to the act that freezes the books. Owner-gated + audited in MAIN, not by this whitelist.
+  periods: {
+    list: (input) => ipcRenderer.invoke(IPC.periodList, input),
+    lock: (input) => ipcRenderer.invoke(IPC.periodLock, input),
+    unlock: (input) => ipcRenderer.invoke(IPC.periodUnlock, input)
+  },
+
+  // THE STOCK TAKE — the counting sheet. Look at what a line CANNOT carry across this line: the expected
+  // quantity, the variance, the unit cost, a timestamp, or who counted it. The renderer says WHICH
+  // product and HOW MANY were on the shelf; MAIN reads what the books expected AT THAT INSTANT, freezes
+  // it, and derives the counter from the session — a renderer that could name the expected figure could
+  // name its own variance, which is to say it could hide a theft. `apply` posts one stock.adjust per
+  // varying line (never a journal of its own) and is audited with the variance total against it. Gated
+  // 'stockTake.manage' + assertWritable() in MAIN, not by this whitelist.
+  stockTake: {
+    create: (input) => ipcRenderer.invoke(IPC.stockTakeCreate, input),
+    setCount: (input) => ipcRenderer.invoke(IPC.stockTakeSetCount, input),
+    addLines: (input) => ipcRenderer.invoke(IPC.stockTakeAddLines, input),
+    removeLine: (input) => ipcRenderer.invoke(IPC.stockTakeRemoveLine, input),
+    markCounted: (input) => ipcRenderer.invoke(IPC.stockTakeMarkCounted, input),
+    apply: (input) => ipcRenderer.invoke(IPC.stockTakeApply, input),
+    cancel: (input) => ipcRenderer.invoke(IPC.stockTakeCancel, input),
+    list: (input) => ipcRenderer.invoke(IPC.stockTakeList, input),
+    get: (input) => ipcRenderer.invoke(IPC.stockTakeGet, input)
   }
 }
 

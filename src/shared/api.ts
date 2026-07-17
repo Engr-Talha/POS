@@ -216,6 +216,21 @@ import type {
   SetPromotionRulesInput,
   UpdatePromotionInput
 } from './promotions'
+import type { ListPeriodsInput, LockPeriodInput, PeriodRow, UnlockPeriodInput } from './periods'
+import type {
+  AddStockTakeLinesInput,
+  ApplyStockTakeInput,
+  ApplyStockTakeResult,
+  CancelStockTakeInput,
+  CreateStockTakeInput,
+  ListStockTakesInput,
+  RemoveStockTakeLineInput,
+  SetCountInput,
+  StockTakeDetail,
+  StockTakeIdInput,
+  StockTakeLineRow,
+  StockTakeRow
+} from './stock-take'
 
 /**
  * The shape of `window.pos` — the ENTIRE surface the renderer has.
@@ -1045,5 +1060,74 @@ export interface PosApi {
      * sold. It reports which offers exist, never what a given line is worth — MAIN decides the money.
      */
     active: () => Promise<Result<PromotionDetail[]>>
+  }
+
+  /**
+   * CLOSING THE MONTH — the period lock.
+   *
+   * The lock is not new: `ledger.assertPeriodOpen` has refused every journal dated in a locked month
+   * since migration 0002, and every stock movement since. What was missing was a way to reach it. Lock
+   * March and nothing new can be dated in March — no sale, no return, no purchase, no expense, no stock
+   * adjustment. April is untouched.
+   *
+   * `lock` / `unlock` are OWNER-only ('period.manage') + assertWritable(), and BOTH are audited in MAIN.
+   * `list` is a read and keeps working on an expired licence (CLAUDE.md §6). Neither write takes a user
+   * or a date: MAIN stamps the actor from the session and reads its own clock.
+   */
+  periods: {
+    /** The last N months (default 24), newest first — status, who locked it, and how many journals are in it. */
+    list: (input?: ListPeriodsInput) => Promise<Result<PeriodRow[]>>
+    /**
+     * CLOSE A MONTH. Refuses a future month — there is nothing in it to freeze, and locking one silently
+     * stops the till the day it arrives. Locking an already-locked month is a no-op, not an error.
+     */
+    lock: (input: LockPeriodInput) => Promise<Result<PeriodRow>>
+    /**
+     * REOPEN A CLOSED MONTH. The act to watch: it is how a reported figure changes after the fact. The
+     * audit log records who, which month, when, and how many journals were sitting in it.
+     */
+    unlock: (input: UnlockPeriodInput) => Promise<Result<PeriodRow>>
+  }
+
+  /**
+   * THE STOCK TAKE — the counting sheet. The shop counts its shelves; the books are corrected to match.
+   *
+   * THE DOCUMENT WRAPS THE ENGINE: `apply` calls `stock.adjust()` once per varying line — the same
+   * engine a hand adjustment uses, which appends the movement, keeps the weighted average honest and
+   * posts the balanced journal. No second path to stock, no new accounting.
+   *
+   * A LINE CARRIES A PRODUCT AND A COUNT, and nothing else. It cannot send the expected figure, the
+   * variance, the cost, a date or a user — MAIN reads what the books expect at that instant and freezes
+   * all of it. A renderer that could name the expected figure could name its own variance.
+   *
+   * Writes are 'stockTake.manage' (manager) + assertWritable(); reads are 'stockTake.view'
+   * (supervisor) and keep working on an expired licence. Enforced in MAIN, not by this interface.
+   */
+  stockTake: {
+    /** Open a sheet. Dated and stamped with the actor in MAIN. */
+    create: (input?: CreateStockTakeInput) => Promise<Result<StockTakeDetail>>
+    /**
+     * Record what was counted for ONE product. Counting the same product again UPDATES the line and
+     * RE-freezes what the books expect — it is a correction, not a second opinion.
+     */
+    setCount: (input: SetCountInput) => Promise<Result<StockTakeLineRow>>
+    /** Key a whole shelf in one go. One transaction — a half-saved shelf is a shelf nobody trusts. */
+    addLines: (input: AddStockTakeLinesInput) => Promise<Result<StockTakeDetail>>
+    /** Take a line off a sheet that has not been applied. */
+    removeLine: (input: RemoveStockTakeLineInput) => Promise<Result<StockTakeDetail>>
+    /** Counting finished, waiting to be applied. A soft gate: more counts may still be keyed. */
+    markCounted: (input: StockTakeIdInput) => Promise<Result<StockTakeDetail>>
+    /**
+     * APPLY THE SHEET — one `stock.adjust` per VARYING line, in ONE transaction. A zero-variance line
+     * posts nothing. Applying twice is refused. Audited with the variance total: a big one is a theft
+     * signal.
+     */
+    apply: (input: ApplyStockTakeInput) => Promise<Result<ApplyStockTakeResult>>
+    /** Abandon a sheet. It is marked cancelled and KEPT — never deleted. An abandoned sheet is evidence. */
+    cancel: (input: CancelStockTakeInput) => Promise<Result<StockTakeDetail>>
+    /** The sheets, newest first — paginated, always. */
+    list: (input?: ListStockTakesInput) => Promise<Result<PagedResult<StockTakeRow>>>
+    /** ONE sheet, with its lines and their variances. */
+    get: (input: StockTakeIdInput) => Promise<Result<StockTakeDetail>>
   }
 }

@@ -302,6 +302,34 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
   now bounded to `asOf` so `Σ aging === GL Receivable/Payable` for the report date, with anonymous udhaar
   surfaced as an "Unassigned" row. The remaining §5 reports (item/category-wise, payment-method, tax
   summary, low-stock/near-expiry as reports, Cash Book, General Ledger, dashboard) follow in a later increment.
+- **Phase 10, first increment** (v0.18.0): **period lock made reachable**, **stock take**, and the
+  **RBAC-in-main proof**. Backends only — the two UI screens, dark mode and the printed-date/locale fix
+  are the next increment (three agent runs died on API errors mid-phase; the services survived complete
+  and verified, so this ships rather than sits).
+  · **PERIOD LOCK: the engine was always there and enforced — nobody could reach it.** `ledger.lockPeriod`
+    / `unlockPeriod` / `assertPeriodOpen` existed since Phase 2, with no IPC and no UI, so an owner could
+    not actually close a month. Now `periods.ts` + `period:list|lock|unlock` (OWNER only, audited both
+    ways; an unlock reports how many journals sit in the month it would reopen — the difference between
+    reopening a quiet month and the busiest quarter).
+    **I verified the lock myself rather than trusting it:** the tests covered expenses and stock
+    corrections, but the file's own header PROMISED sales, purchases and returns were refused and NONE of
+    those were tested — the paths a shop touches a thousand times a day, where one gap makes the lock a
+    lie. All three correctly refuse, for one reason worth stating: every journal goes through
+    `ledger.post`, which asks `assertPeriodOpen` first. One door, one lock. Now pinned by three tests,
+    mutation-checked (disabling the lock fails all three).
+  · **STOCK TAKE** (migration 0019): the counting sheet. It calls `stock.adjust()` and posts NO journal of
+    its own — one stock path, not two. The subtle decision: `expected` is FROZEN AT COUNT TIME, not
+    recomputed at apply. Recompute it and a theft erases its own evidence — count short, sell the missing
+    stock before pressing Apply, and the variance reads zero. Applying twice is refused; a zero-variance
+    line posts nothing; an applied sheet is history.
+  · **THE RBAC-IN-MAIN PROOF** — PLAN's stated acceptance test for this phase, now real:
+    `src/main/security/rbac-enforcement.test.ts` (52 tests). It walks the PERMISSIONS map ITSELF, so a
+    permission added tomorrow without a guard fails THERE rather than shipping unguarded. Proves: every
+    role below the bar is refused BY MAIN for all 35 permissions (and every role at/above is let through —
+    a guard that refuses everyone is an outage, not a guard); nobody signed in is refused everything;
+    `requirePermissionOf` takes ONE argument, so **there is no seat for a claimed role** — a tampered
+    renderer cannot say "I am the owner"; and the map grants monotonically by rank. Mutation-checked:
+    silently downgrading `sale.void` to cashier fails it immediately.
 - **Promotions done** (v0.17.0) — the last feature; Phase 8 complete. Migration 0018 (`promotions`, `promotion_rules`,
   `sale_line_promotions`). Four kinds: percent_off, amount_off, buy_x_get_y, fixed_price — scoped by
   product / category / brand / department / all, with a date window, a Monday-first weekday mask and a
