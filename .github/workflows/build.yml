@@ -41,8 +41,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: insha-pos-windows-installer
-          path: |
-            release/*.exe
-            release/latest.yml
+          # The .exe is the shareable installer and is what MUST be here. `latest.yml` is the
+          # auto-UPDATE manifest, and `build:win` runs `--publish never`, which does NOT generate it —
+          # so globbing for it was making the upload find one file, not two. That was harmless until
+          # `if-no-files-found: error` treated a MISSING latest.yml as a failed step and threw away a
+          # perfectly-built .exe on the last line. The manifest only matters for the real release
+          # (that is `release.yml`, which publishes and DOES generate it), never for a build artifact.
+          path: release/*.exe
           if-no-files-found: error
           retention-days: 30
