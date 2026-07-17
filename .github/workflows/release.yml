@@ -1,0 +1,159 @@
+name: Release (manual)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# THIS WORKFLOW IS THE ONLY THING IN THE REPO THAT PUBLISHES ANYTHING, AND IT CANNOT FIRE BY ITSELF.
+#
+# `workflow_dispatch` only. No push trigger, no tag trigger, no schedule. Somebody has to open the
+# Actions tab, pick this workflow, type the version, and press the button. That is deliberate: pushing
+# an installer to the public is irreversible — a user's app can auto-install it within the hour — and
+# it is not something a `git push` should ever do by accident.
+#
+# ── BEFORE THIS CAN WORK, THREE THINGS MUST EXIST (docs/RELEASING.md walks through them) ───────────
+#   1. A SEPARATE PUBLIC repo for the installers, e.g. `Engr-Talha/pos-releases`.
+#      TRAP #4: the code repo is PRIVATE. The updater in the shop's app fetches the feed with NO
+#      credentials, so the FEED must be public. Never embed a token in the app to read a private repo:
+#      the app ships to customers, and a token in it is a token given away.
+#   2. `electron-builder.yml`'s publish.owner / publish.repo pointing at that repo (they are
+#      PLACEHOLDER-* today, which is what stops an accidental publish from going anywhere real).
+#   3. A repo secret `RELEASES_TOKEN` — a PAT with `contents: write` on the RELEASES repo ONLY.
+#      TRAP #4 again: the PAT lives here, in CI, and nowhere else. Not in the app, not in the code.
+#
+# ── THE TRAPS THIS FILE EXISTS TO NOT FALL INTO ────────────────────────────────────────────────────
+#   #2  electron-builder's GitHub publish defaults to a DRAFT release, and the updater CANNOT SEE
+#       drafts. `releaseType: release` in electron-builder.yml is what stops that. A draft release is
+#       the classic "I published it and nothing updated" afternoon.
+#   #3  You cannot create a release in an EMPTY repo (422 "Repository is empty"). Seed the releases
+#       repo with a README commit first — see docs/RELEASING.md.
+#   #6  Every OTHER build in this repo uses `--publish never` so it cannot demand a token. This one is
+#       the exception, and it is why it is a separate file rather than a flag on the normal build.
+#   #7  macOS auto-update needs a REAL Apple Developer certificate; our ad-hoc signature is rejected by
+#       Squirrel.Mac. So this publishes WINDOWS ONLY — which is the real target anyway. The .dmg stays
+#       a local dev-loop artifact.
+#   #10c `rebuild:electron` deletes node_modules/better-sqlite3/build FIRST. Without that, a Node-ABI
+#       binary left by `npm test` gets shipped inside the app and it dies on launch with
+#       "NODE_MODULE_VERSION 127 ... requires 148". It nearly shipped once. `build:win` already does
+#       this; the ABI check below is the belt to that braces.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (must ALREADY be package.json version, e.g. 0.20.0)'
+        required: true
+        type: string
+      confirm:
+        description: 'Type PUBLISH to confirm this goes to real users'
+        required: true
+        type: string
+
+jobs:
+  guard:
+    # A cheap gate before anything is built, so a mistyped run costs seconds rather than a release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse unless PUBLISH was typed
+        run: |
+          if [ "${{ inputs.confirm }}" != "PUBLISH" ]; then
+            echo "::error::Confirmation was '${{ inputs.confirm }}', not PUBLISH. Nothing was published."
+            exit 1
+          fi
+
+      - name: The version must match package.json exactly
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$PKG" != "${{ inputs.version }}" ]; then
+            echo "::error::You asked to release ${{ inputs.version }} but package.json says $PKG."
+            echo "::error::Bump the version, commit it, and run again — the app shows its version in the header,"
+            echo "::error::and a release whose number disagrees with the app is unsupportable."
+            exit 1
+          fi
+          echo "Releasing $PKG"
+
+      - name: The publish target must be real, not the placeholder
+        run: |
+          if grep -q 'PLACEHOLDER' electron-builder.yml; then
+            echo "::error::electron-builder.yml still has PLACEHOLDER-* as its publish target."
+            echo "::error::Create the PUBLIC releases repo and point publish.owner/publish.repo at it first."
+            echo "::error::See docs/RELEASING.md."
+            exit 1
+          fi
+
+  test:
+    # The same gate every other push gets. A release is not the moment to skip it.
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Build WITHOUT publishing first, so the ABI check below runs against the exact binary that would
+      # ship — not one rebuilt afterwards.
+      - run: npm run build:win
+
+      # TRAP #10c, checked rather than trusted. The native module inside the app must be built for
+      # ELECTRON's ABI (148 on Electron 43). If plain Node can LOAD it, it is a Node build, and the
+      # installed app would die on launch — with green tests, a green typecheck and a clean installer.
+      - name: The shipped better-sqlite3 must be Electron's ABI, not Node's
+        shell: bash
+        run: |
+          NODE_FILE=$(find release -path '*app.asar.unpacked*better_sqlite3.node' | head -1)
+          if [ -z "$NODE_FILE" ]; then
+            echo "::error::better_sqlite3.node is not asarUnpacked in the build (trap #8) — it will not load at runtime."
+            exit 1
+          fi
+          node -e "
+            try {
+              process.dlopen({ exports: {} }, require('path').resolve('$NODE_FILE'));
+              console.error('::error::The SHIPPED better-sqlite3 loaded under plain Node — it is a NODE-ABI build.');
+              console.error('::error::The installed app would die on launch: NODE_MODULE_VERSION 127 ... requires 148.');
+              console.error('::error::This is trap #10c. Do not publish this build.');
+              process.exit(1);
+            } catch (e) {
+              if (/NODE_MODULE_VERSION/.test(String(e.message))) {
+                console.log('OK: Node refuses it, so it is built for Electron. ' + String(e.message).split('\n')[1]);
+              } else {
+                console.error('::error::Unexpected error loading the shipped module: ' + e.message);
+                process.exit(1);
+              }
+            }
+          "
+
+      # THE ACTUAL PUBLISH. Everything above had to pass first.
+      # The token is a CI secret and reaches only this step. `--publish always` is the one place in the
+      # whole repo that is not `--publish never` (trap #6).
+      - name: Publish the installer to the PUBLIC releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: npx electron-builder --win --publish always
+
+      # A copy on the workflow run too, so there is always an installer to hand even if the release
+      # needs deleting.
+      - name: Keep the installer as an artifact as well
+        uses: actions/upload-artifact@v4
+        with:
+          name: insha-pos-windows-${{ inputs.version }}
+          path: |
+            release/*.exe
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 90

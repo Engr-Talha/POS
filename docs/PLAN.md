@@ -521,32 +521,50 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
 
 ## 7. Deferred, deliberately
 
-- **Printed dates ignore the shop's country — they use the MACHINE's locale** (found while eyeballing the
-  quotation, medium; PRE-EXISTING and app-wide, not new). `shop.country` defaults to PK and its help says
-  it "sets the default tax rate and the date format", but **nothing reads a date format**: the receipt
-  (`new Date(data.at).toLocaleString()`) and the quotation (`toLocaleDateString()`) both take whatever the
-  OS locale is — so a Pakistani shop's paper currently prints **7/22/2026** (US m/d/y) instead of
-  22/07/2026. Ambiguous dates on a customer-facing offer are exactly where this bites. Fix with the
-  timezone work below: derive a date format from `shop.country` (or add an explicit `shop.dateFormat`) and
-  route EVERY printed/exported date through one formatter. Phase 10.
+*Kept honest as of v0.20.0 — every feature in the plan is BUILT. What follows is what is genuinely left.*
+
+### Still open, and worth doing
+
 - **Report date bucketing uses UTC, not the shop's local day** (reports audit, medium). A report's
-  from/to/as-of are compared against UTC timestamps, so a sale in the local midnight–05:00 window (for
-  PKT, UTC+5) can land on the neighbouring calendar day. For a shop that does not trade those hours the
-  impact is nil, and all reports use the SAME boundary so they still reconcile with each other. The proper
-  fix is a **shop-timezone setting** (CLAUDE.md §4) threaded through the date comparisons — slated for the
-  Phase 10 polish pass.
-- **Returns-to-supplier** (purchase returns) — sending goods back to a supplier, reducing the payable.
-  The mirror of a customer return; deferred from the v0.10.0 buying increment to keep it reviewable.
+  from/to/as-of compare against UTC timestamps, so a sale in the local midnight–05:00 window (PKT is
+  UTC+5) can land on the neighbouring calendar day. For a shop that does not trade those hours the impact
+  is **nil**, and every report uses the SAME boundary, so they still reconcile with each other. The fix is
+  a **shop-timezone setting** (CLAUDE.md §4) threaded through the date comparisons. NOTE: the *printed*
+  date half of this was fixed in v0.20.0 (`shared/dates.ts`); this is the remaining half.
+- **Tax-returns section** (Tiptap rich text + attachments). In §5's screen list; `@mantine/tiptap` is not
+  even a dependency yet. The 17 reports already give an accountant everything a return needs, so this is a
+  convenience: somewhere to keep the filing itself. **The owner has never asked for it.**
+- **A price override records no REASON CODE** (Phase 5, low). It is already PIN-authenticated against
+  `selling.priceOverrideRole`, stamped with `price_override_by`, and audited — so WHO and WHAT are
+  answered; only WHY is not. **Needs the owner to say what the reason options should be** (it would be a
+  lookups list, like void/refund/discount reasons).
+- **Orange and green fail WCAG AA in light mode even at shade 9** (4.30 / 4.37) — found by the dark-mode
+  sweep. They are only icons and badges today, so nothing is failing; `c="green"` on body text would be a
+  real defect.
+- **The renderer bundle is 2.34 MB in one chunk** (Vite warns). It is a desktop app loading from disk, so
+  it costs a little startup time, not a download.
+
+### Deliberately not built (a decision, not a gap)
 
 - **Guided exchange** (a return + a linked replacement sale, settling the difference either way). Phase 6a
-  ships a *minimal* exchange that parks store credit on a named customer's account (`exchange_group_id`
-  seam is in the schema). Best built alongside the next selling work.
-- **Petty-cash categories.** Phase 6b's pay-out posts to General Expenses and pay-in to Owner Equity so
-  GL Cash stays honest; proper expense/supplier categorisation arrives with the **Expenses** phase.
+  ships a *minimal* exchange that parks store credit on a named customer's account; the
+  `exchange_group_id` seam is in the schema. Best built alongside the next selling work, if it is wanted.
+- **FBR real-time invoice reporting** (Pakistan Tier-1 retailers) — needs internet, which the app
+  deliberately does not require. The schema seams (`fbr_invoice_no`, `fbr_qr`, `fbr_sync_status`,
+  `sync_queue`) have been in since day one so it drops in later.
+- **LAN / multi-terminal** — the `services/` layer is transport-agnostic, so this is a transport swap, not
+  a rewrite. When it is needed, ONE machine runs a server that owns the DB. **Never share the SQLite file
+  over a network drive** (trap #20).
+- **Multi-branch / stock transfer** — single shop confirmed. A `branch_id` seam stays in the schema; real
+  multi-branch depends on the LAN phase above.
 
-- **FBR real-time invoice reporting** (Pakistan Tier-1 retailers) — needs internet. Schema seams
-  (`fbr_invoice_no`, `fbr_qr`, `fbr_sync_status`, `sync_queue`) are in from day one so it drops in later.
-- **LAN / multi-terminal** — the `services/` layer is transport-agnostic. When it's needed, one machine
-  runs a server that owns the DB. **Never share the SQLite file over a network drive** (trap #20).
-- **Multi-branch / stock transfer** — single shop confirmed. A `branch_id` seam stays in the schema;
-  real multi-branch depends on the LAN phase above.
+### Done — resolved from this list, kept for the record
+
+- ~~Printed dates ignore the shop's country~~ — **FIXED v0.20.0.** `shared/dates.ts`; `country` travels on
+  the receipt/quotation exactly as `currencySymbol` does. Written as an explicit table, not a locale
+  string (a slim-ICU Electron build silently falls back to en-US — the same bug, invisibly).
+- ~~Calendar-invalid dates (2026-02-30 rolling to March 2)~~ — **FIXED v0.20.0.** One canonical `IsoDate`;
+  seven schemas had copied the bare regex without the guard.
+- ~~Returns-to-supplier~~ — **BUILT v0.14.0** (migration 0016).
+- ~~Petty-cash categories~~ — **BUILT v0.12.0** with the Expenses phase.
+- ~~The wholesale-tier permission is only surfaced at Pay~~ — pure UX, and the tier is enforced in MAIN.
