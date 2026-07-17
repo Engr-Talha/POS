@@ -14,6 +14,7 @@ import type {
 } from '@shared/catalog'
 import * as settings from './settings'
 import { ONE_UNIT } from '@shared/qty'
+import { normalizeBarcode } from '@shared/barcode'
 // The supplier RECORD (create/update/list/getById) is the canonical party service. This file keeps
 // only the product↔supplier LINK; it reaches into suppliers.getById to prove a supplier exists before
 // linking a product to it. No cycle: suppliers.ts does not import catalog.ts.
@@ -260,7 +261,10 @@ function pageOf(input: { page?: number | undefined; pageSize?: number | undefine
 
 /** Scanners append whitespace and newlines. Trim, and nothing else — case can be significant. */
 function normalizeCode(raw: string, what: string): string {
-  const code = raw.trim()
+  // A barcode gets its AIM identifier (]C1, ]E0, …) stripped so it is STORED the same way it will later
+  // be SEARCHED (findProductByBarcode uses the same normaliser). A non-barcode code — a SKU typed by
+  // hand — has no AIM identifier, so normalizeBarcode only trims it, which is what we want anyway.
+  const code = what === 'barcode' ? normalizeBarcode(raw) : raw.trim()
   if (!code) {
     throw new AppError(ErrorCode.VALIDATION, `Please enter a ${what}.`, `empty ${what}`)
   }
@@ -420,7 +424,10 @@ export function listBarcodes(db: DB, productId: number): ProductBarcode[] {
  * customer's loyalty card, a coupon, a smudged label) — it is not an error, and it must not throw.
  */
 export function findProductByBarcode(db: DB, rawBarcode: string): BarcodeMatch | null {
-  const barcode = rawBarcode.trim()
+  // Normalise the SAME way the code was stored (addBarcode → normalizeCode → normalizeBarcode), or a
+  // scanner that prepends an AIM identifier (]C1, ]E0, …) would search for a code that never matches
+  // what is on file. Store and lookup must agree; this is the one place that guarantees they do.
+  const barcode = normalizeBarcode(rawBarcode)
   if (!barcode) return null
 
   const row = db

@@ -51,6 +51,7 @@ import {
   BadgePercent
 } from 'lucide-react'
 
+import { normalizeBarcode } from '@shared/barcode'
 import type { Result } from '@shared/result'
 import type { Lookup } from '@shared/types'
 import type { Customer } from '@shared/opening'
@@ -507,7 +508,11 @@ export function Sell({
       return
     }
 
-    let code = raw.trim()
+    // First strip a STANDARD AIM identifier (]C1, ]E0, …) — the same normaliser the store and lookup
+    // sides use, so a scanned code matches whatever was saved, with no setting to configure. THEN apply
+    // the per-shop prefix/suffix, which exist for the odd scanner that wraps a code in something
+    // non-standard. Main normalises again on lookup, so this is belt-and-braces, not the only guard.
+    let code = normalizeBarcode(raw)
     const { prefix, suffix, minLength } = settings.scanner
     if (prefix !== '' && code.startsWith(prefix)) code = code.slice(prefix.length)
     if (suffix !== '' && code.endsWith(suffix)) code = code.slice(0, code.length - suffix.length)

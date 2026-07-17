@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { DB } from '../db'
 import type { User } from '@shared/types'
 import { AppError, ErrorCode } from '@shared/result'
+import { normalizeBarcode } from '@shared/barcode'
 import {
   CreateProductInput,
   CreateVariantGroupInput,
@@ -373,7 +374,13 @@ function insertBarcodes(db: DB, productId: number, barcodes: string[], at: strin
     'INSERT INTO product_barcodes (product_id, barcode, is_primary, created_at) VALUES (?, ?, ?, ?)'
   )
 
-  barcodes.forEach((barcode) => {
+  barcodes.forEach((raw) => {
+    // Strip a scanner's AIM identifier (]C1, ]E0, …) HERE, so a barcode scanned straight into the
+    // product form is STORED the same way findProductByBarcode will later SEARCH for it. Without this,
+    // a Code-128 item created by a scan is saved as `]C19200108` but rung up as `9200108`, and never
+    // matches — the exact bug this normaliser exists to close. Dedup and the availability check must see
+    // the cleaned value too, or two scans of one item read as a clash.
+    const barcode = normalizeBarcode(raw)
     if (seen.has(barcode)) {
       throw new AppError(
         ErrorCode.VALIDATION,

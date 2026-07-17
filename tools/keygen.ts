@@ -1,9 +1,9 @@
 /**
  * VENDOR KEY GENERATOR. Mints a licence key for one customer, on one machine.
  *
- *   npx tsx tools/keygen.ts --licensee "Insha Store" --machine-id A1B2-C3D4-E5F6-7890 --plan annual
- *   npx tsx tools/keygen.ts --licensee "Test Shop"   --machine-id ... --plan trial --days 14
- *   npx tsx tools/keygen.ts --licensee "Big Shop"    --machine-id ... --plan lifetime
+ *   npm run keygen -- --licensee "Insha Store" --machine-id A1B2-C3D4-E5F6-7890 --plan annual
+ *   npm run keygen -- --licensee "Test Shop"   --machine-id ... --plan trial --days 14
+ *   npm run keygen -- --licensee "Big Shop"    --machine-id ... --plan lifetime
  *
  * The customer reads the Machine ID off their Activation screen and sends it to you. Paste the key
  * this prints back to them; they enter it and they are running. No internet, either side.
@@ -32,7 +32,7 @@ const days = arg('days') ? Number(arg('days')) : undefined
 if (!licensee || !machineId) {
   console.error(`
   Usage:
-    npx tsx tools/keygen.ts --licensee "<shop name>" --machine-id <ID> [--plan annual|trial|lifetime] [--days N]
+    npm run keygen -- --licensee "<shop name>" --machine-id <ID> [--plan annual|trial|lifetime] [--days N]
 
     --plan annual    (default)  expires 1 year from today
     --plan trial     --days 14  expires in N days, full features, shows a TRIAL banner
@@ -42,7 +42,7 @@ if (!licensee || !machineId) {
 }
 
 if (!existsSync(PRIVATE_PATH)) {
-  console.error(`\n  No private key at ${PRIVATE_PATH}\n  Run: npx tsx tools/make-keypair.ts\n`)
+  console.error(`\n  No private key at ${PRIVATE_PATH}\n  Run: npm run make:keypair\n`)
   process.exit(1)
 }
 

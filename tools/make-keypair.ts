@@ -1,7 +1,7 @@
 /**
  * ONE-TIME vendor setup. Creates the Ed25519 licence keypair.
  *
- *   npx tsx tools/make-keypair.ts
+ *   npm run make:keypair
  *
  * ┌──────────────────────────────────────────────────────────────────────────────┐
  * │  THE PRIVATE KEY IS THE PRODUCT.                                             │

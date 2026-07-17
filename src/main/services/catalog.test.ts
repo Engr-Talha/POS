@@ -118,6 +118,36 @@ describe('barcodes', () => {
     expect(match!.pack).toBeNull() // a plain barcode sells ONE base unit
   })
 
+  /**
+   * REGRESSION — THE OWNER'S SCANNER BUG. A Datalogic set to send AIM identifiers prepends `]C1` to a
+   * Code-128 scan. The item was ADDED by scanning `]C19200108` into the product form and RUNG UP by
+   * scanning `]C19200108` at the till — but the store side kept the code raw while the lookup side
+   * stripped a configured prefix, so the two disagreed and the item the shop had just created would not
+   * ring up. Both sides now normalise identically (normalizeBarcode), so the stored code and the
+   * searched code are the same string whatever the scanner prepends.
+   */
+  it('an item scanned in WITH an AIM prefix rings up when scanned again', () => {
+    const id = makeProduct(t.db, { name: 'Biscuits', sku: 'BISC1' })
+    // Added exactly as the scanner sends it — prefix and all.
+    catalog.addBarcode(t.db, { productId: id, barcode: ']C19200108' })
+
+    // Stored WITHOUT the prefix, so the number on the box matches what is on file.
+    expect(catalog.listBarcodes(t.db, id)[0]!.barcode).toBe('9200108')
+
+    // And it is found whether the till scan carries the prefix or not.
+    expect(catalog.findProductByBarcode(t.db, ']C19200108')?.product.id, 'scan with prefix').toBe(id)
+    expect(catalog.findProductByBarcode(t.db, '9200108')?.product.id, 'the plain number too').toBe(id)
+  })
+
+  it('a clean barcode (no AIM prefix) is unaffected — the ones that already worked', () => {
+    for (const code of ['3001-0016', '90311017', '01234565']) {
+      const id = makeProduct(t.db, { name: `Item ${code}`, sku: `SKU-${code}` })
+      catalog.addBarcode(t.db, { productId: id, barcode: code })
+      expect(catalog.listBarcodes(t.db, id)[0]!.barcode).toBe(code)
+      expect(catalog.findProductByBarcode(t.db, code)?.product.id).toBe(id)
+    }
+  })
+
   it('an unknown barcode returns null — it is not an error', () => {
     // A customer's loyalty card, a coupon, a smudged label. This happens fifty times a week and it
     // must never throw a red box at a cashier with a queue.

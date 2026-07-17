@@ -13,6 +13,13 @@ release/
 # ─────────────────────────────────────────────────────────────────────────────
 *.private.pem
 *.private.key
+# The real filenames the keygen writes, in case a key is ever copied into the repo by mistake.
+# (`*.private.pem` above does NOT match `license-private.pem` — different shape — so name them.)
+*private*.pem
+*private*.key
+license-private.*
+license-public.*
+.insha-pos-keys/
 keys/
 secrets/
 .env
