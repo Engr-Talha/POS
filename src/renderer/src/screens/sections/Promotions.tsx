@@ -379,8 +379,8 @@ export function Promotions({
                           )}
                           {appliesToNothing && (
                             <Group gap={4} wrap="nowrap" mt={4}>
-                              <TriangleAlert size={13} color="var(--mantine-color-orange-6)" />
-                              <Text size="xs" c="orange.7" fw={500}>
+                              <TriangleAlert size={13} color="var(--mantine-color-orange-text)" />
+                              <Text size="xs" c="var(--mantine-color-orange-text)" fw={500}>
                                 Applies to nothing yet
                               </Text>
                             </Group>
@@ -827,7 +827,7 @@ function OfferModal({
           )}
 
           {noDayPicked && (
-            <Text size="xs" c="red" mt={6}>
+            <Text size="xs" c="var(--mantine-color-red-text)" mt={6}>
               An offer must run on at least one day of the week.
             </Text>
           )}

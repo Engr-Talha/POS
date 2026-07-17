@@ -1319,7 +1319,7 @@ export function Sell({
                           <Table.Td ta="right">
                             <Text size="sm">{money(lineMath?.unitPrice ?? 0)}</Text>
                             {(lineMath?.lineDiscount ?? 0) > 0 && (
-                              <Text size="xs" c="teal">
+                              <Text size="xs" c="var(--mantine-color-teal-text)">
                                 −{money(lineMath?.lineDiscount ?? 0)}
                               </Text>
                             )}
@@ -1413,7 +1413,7 @@ export function Sell({
               </Button>
 
               {customer != null && outstanding != null && outstanding > 0 && (
-                <Text size="xs" c="orange">
+                <Text size="xs" c="var(--mantine-color-orange-text)">
                   Already owes {money(outstanding)}
                   {customer.creditLimit > 0 && ` of a ${money(customer.creditLimit)} limit`}
                 </Text>
@@ -1424,8 +1424,8 @@ export function Sell({
                   out here. Spending them happens at Pay, where the rest of the tenders are. */}
               {settings?.loyaltyEnabled === true && points != null && points.points > 0 && (
                 <Group gap={6} wrap="nowrap">
-                  <Award size={14} color="var(--mantine-color-violet-6)" />
-                  <Text size="xs" c="violet">
+                  <Award size={14} color="var(--mantine-color-violet-text)" />
+                  <Text size="xs" c="var(--mantine-color-violet-text)">
                     {points.points.toLocaleString('en-US')} points
                     {points.valueMinor > 0 && ` — worth ${money(points.valueMinor)}`}
                   </Text>
@@ -1764,7 +1764,7 @@ function CompletedOverlay({
       <Card withBorder padding="xl" style={{ width: 560, maxWidth: '100%' }}>
         <Stack gap="md" align="center">
           <Group gap={8}>
-            <CircleCheck size={22} color="var(--mantine-color-teal-6)" />
+            <CircleCheck size={22} color="var(--mantine-color-teal-text)" />
             <Text fw={700} size="lg">
               Sale complete
             </Text>
@@ -1781,7 +1781,7 @@ function CompletedOverlay({
               <Text size="sm" c="dimmed" fw={600} tt="uppercase">
                 Change due
               </Text>
-              <Text fw={800} c="teal" style={{ fontSize: 64, lineHeight: 1.1 }}>
+              <Text fw={800} c="var(--mantine-color-teal-text)" style={{ fontSize: 64, lineHeight: 1.1 }}>
                 {money(sale.changeDue)}
               </Text>
             </Stack>
@@ -3116,7 +3116,7 @@ function PaymentModal({
               <Stack gap={8}>
                 <Group justify="space-between" wrap="nowrap">
                   <Group gap={8} wrap="nowrap">
-                    <Award size={18} color="var(--mantine-color-violet-6)" />
+                    <Award size={18} color="var(--mantine-color-violet-text)" />
                     <Text size="sm" fw={600}>
                       {customer.name} has {points.points.toLocaleString('en-US')} points
                     </Text>

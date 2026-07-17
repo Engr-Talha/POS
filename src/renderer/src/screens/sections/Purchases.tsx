@@ -398,7 +398,7 @@ function PurchaseList({
                         </Table.Td>
                         <Table.Td ta="right">
                           {owed > 0 ? (
-                            <Text size="sm" fw={600} c="red">
+                            <Text size="sm" fw={600} c="var(--mantine-color-red-text)">
                               {formatMoney(owed, { symbol: currencySymbol })}
                             </Text>
                           ) : (

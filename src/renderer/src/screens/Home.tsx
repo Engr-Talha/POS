@@ -163,6 +163,29 @@ export function Home({
     }
   }, [])
 
+  /**
+   * The quick flip. It resolves what is ON SCREEN right now (so from 'auto' at night, one click
+   * gives light, not another dark), applies it immediately, and writes it to the DB — the choice is
+   * a setting, so it must outlive the window. 'auto' is not in this cycle on purpose: it lives in
+   * Settings → Appearance, where there is room to say what it means.
+   *
+   * The save is deliberately not awaited before the screen changes: the cashier gets the new colours
+   * on the click, and a failed write only means the toggle does not stick, which the next flip fixes.
+   */
+  async function toggleColorScheme(): Promise<void> {
+    const next = dark ? 'light' : 'dark'
+    setColorScheme(next)
+
+    const result = await window.pos.settings.set({ key: 'ui.colorScheme', value: next })
+    if (!result.ok) {
+      notifications.show({
+        color: 'orange',
+        title: 'Appearance not saved',
+        message: 'The screen changed, but the choice will not be remembered next time.'
+      })
+    }
+  }
+
   async function signOut(): Promise<void> {
     const result = await window.pos.auth.signOut()
     if (result.ok) onStateChange(result.data)
@@ -207,7 +230,7 @@ export function Home({
           variant="default"
           size="lg"
           aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-          onClick={() => setColorScheme(dark ? 'light' : 'dark')}
+          onClick={() => void toggleColorScheme()}
         >
           {dark ? <Sun size={18} /> : <Moon size={18} />}
         </ActionIcon>

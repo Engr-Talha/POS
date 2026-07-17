@@ -330,8 +330,26 @@ After **every** phase: `typecheck` → `vitest` → **build the installer** → 
     customers, suppliers, opening. A February tax return happily accepted a March date. Now ONE `IsoDate`
     in `shared/dates.ts`, imported everywhere — seven copies of a guard is seven chances to miss the
     eighth. Proven at the schemas themselves, with the leap-year cases (2000 yes, 1900 no).
-  · STILL OPEN from Phase 10: **dark mode** (`ui.colorScheme` setting + the toggle + a hardcoded-colour
-    sweep). The two new screens are already token-only, so they are ready for it.
+- **Dark mode done** (v0.20.0) — **Phase 10 complete**. `ui.colorScheme` (auto | light | dark, default
+  auto) in the registry under a new "Appearance" group, so the Settings screen renders the picker itself.
+  **The toggle already existed in the header and already used lucide Sun/Moon — what it did not do was
+  PERSIST:** Mantine's own `setColorScheme` writes to **localStorage**, which §4 forbids for something two
+  shops would set differently (and which does not survive a reinstall). It now writes through to the DB;
+  `ColorSchemeSync` applies it on mount OUTSIDE the phase switch, so the Login screen wears the shop's
+  theme too.
+  **THE SWEEP FOUND A PRE-EXISTING LIGHT-MODE ACCESSIBILITY BUG, which is the opposite of what it went
+  looking for.** The renderer had ZERO `#fff`/`rgb()`/`white`/`black` literals — every background was
+  already a Mantine variable. The real problem was 23 bare shade-6 colours (`c="red"`, `c="teal"`, icons
+  pinned to `-6`), and **shade 6 was already failing WCAG AA on the EXISTING light theme**: red 3.28 and
+  teal 2.55 against the 4.5 minimum. I verified those numbers independently rather than take them on
+  trust. They now use `var(--mantine-color-<c>-text)`, which resolves to shade 9 on light and shade 4 on
+  dark and passes AA on both (red 5.46/7.44, teal 5.00/9.57). `violet.6` at 3.14 on dark was the one true
+  dark-mode failure. Status colours stay semantically red/teal — only the shade moves.
+  **`src/main/printing/*` deliberately untouched** (verified): receipts and reports print on WHITE PAPER,
+  and a "dark mode receipt" is a black rectangle (traps #12/#13).
+  KNOWN, out of scope, flagged not fixed: orange and green fail AA in light mode even at shade 9
+  (4.30 / 4.37). They are only icons and badges today, so nothing is failing — but `c="green"` on body
+  text would be a real defect. Also: the renderer bundle is 2.34 MB in one chunk (Vite warns).
 - **Phase 10, first increment** (v0.18.0): **period lock made reachable**, **stock take**, and the
   **RBAC-in-main proof**. Backends only (three agent runs died on API errors mid-phase; the services
   survived complete and verified, so it shipped rather than sat).

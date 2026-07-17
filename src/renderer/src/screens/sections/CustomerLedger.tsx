@@ -95,14 +95,14 @@ export function BalanceText({
   }
   if (balance > 0) {
     return (
-      <Text size={size} fw={fw} c="red">
+      <Text size={size} fw={fw} c="var(--mantine-color-red-text)">
         {formatMoney(balance, { symbol: currencySymbol })}
       </Text>
     )
   }
   return (
     <Group gap={6} wrap="nowrap" justify="flex-end">
-      <Text size={size} fw={fw} c="teal">
+      <Text size={size} fw={fw} c="var(--mantine-color-teal-text)">
         {formatMoney(-balance, { symbol: currencySymbol })}
       </Text>
       {withBadge ? (
@@ -110,7 +110,7 @@ export function BalanceText({
           in credit
         </Badge>
       ) : (
-        <Text size="xs" c="teal">
+        <Text size="xs" c="var(--mantine-color-teal-text)">
           cr
         </Text>
       )}
@@ -664,7 +664,7 @@ function StatementRow({
       </Table.Td>
       <Table.Td ta="right">
         {row.payment > 0 ? (
-          <Text size="sm" c="teal">
+          <Text size="sm" c="var(--mantine-color-teal-text)">
             {formatMoney(row.payment, { symbol: currencySymbol })}
           </Text>
         ) : (

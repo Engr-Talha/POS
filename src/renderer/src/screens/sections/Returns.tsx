@@ -550,9 +550,9 @@ function ProcessReturn({
                                   }
                                   thumbIcon={
                                     isDamaged ? (
-                                      <PackageX size={12} color="var(--mantine-color-red-6)" />
+                                      <PackageX size={12} color="var(--mantine-color-red-text)" />
                                     ) : (
-                                      <PackageCheck size={12} color="var(--mantine-color-teal-6)" />
+                                      <PackageCheck size={12} color="var(--mantine-color-teal-text)" />
                                     )
                                   }
                                   label={

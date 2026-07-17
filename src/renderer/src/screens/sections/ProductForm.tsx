@@ -1486,7 +1486,7 @@ export function ProductForm({
                     </Text>
                   </Group>
                   {netProfitMinor < 0 && (
-                    <Text size="xs" c="red" mt={6}>
+                    <Text size="xs" c="var(--mantine-color-red-text)" mt={6}>
                       This item sells for less than it costs.
                     </Text>
                   )}

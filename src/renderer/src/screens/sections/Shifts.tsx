@@ -534,8 +534,10 @@ function OpenShiftView({
               Count the cash in the drawer and enter the total. The over or short is worked out for you.
             </Text>
           </Stack>
+          {/* Not color="dark": that is a FIXED near-black, and in dark mode it is a black button on
+              a black counter. `filled` follows the theme and stays visible in both. */}
           <Button
-            color="dark"
+            variant="filled"
             leftSection={<Lock size={16} />}
             disabled={readOnly}
             onClick={() => setClosing(true)}
@@ -838,7 +840,7 @@ function CloseShiftModal({
             Cancel
           </Button>
           <Button
-            color="dark"
+            variant="filled"
             leftSection={<Lock size={16} />}
             loading={busy}
             disabled={counted < 0}

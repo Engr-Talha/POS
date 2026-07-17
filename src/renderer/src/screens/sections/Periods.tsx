@@ -357,7 +357,7 @@ function ConfirmModal({
       title={
         <Group gap="sm">
           {unlocking ? (
-            <TriangleAlert size={20} color="var(--mantine-color-red-6)" />
+            <TriangleAlert size={20} color="var(--mantine-color-red-text)" />
           ) : (
             <Lock size={20} />
           )}

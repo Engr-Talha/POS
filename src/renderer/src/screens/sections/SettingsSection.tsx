@@ -10,7 +10,9 @@ import {
   Switch,
   Text,
   TextInput,
-  Title
+  Title,
+  useMantineColorScheme,
+  type MantineColorScheme
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { TriangleAlert, Lock } from 'lucide-react'
@@ -41,6 +43,7 @@ export function SettingsSection({
   isOwner: boolean
 }): React.JSX.Element {
   const [settings, setSettings] = useState<Record<string, unknown> | null>(null)
+  const { setColorScheme } = useMantineColorScheme()
 
   useEffect(() => {
     let cancelled = false
@@ -58,6 +61,12 @@ export function SettingsSection({
 
     if (result.ok) {
       setSettings(result.data)
+
+      // Appearance is the one setting you must SEE take effect — saving "Dark" and staying white
+      // reads as a broken switch. Every other knob here changes a number the next sale will use;
+      // this one changes the screen you are looking at, so apply it on the spot.
+      if (key === 'ui.colorScheme') setColorScheme(value as MantineColorScheme)
+
       notifications.show({ color: 'teal', title: 'Saved', message: key, autoClose: 1500 })
     } else {
       // The message comes from the registry's own validation, so it already reads like a sentence.

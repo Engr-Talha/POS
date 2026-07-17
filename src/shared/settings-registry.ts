@@ -41,6 +41,7 @@ export type SettingDef = {
 
 export const SETTING_GROUPS = [
   'shop',
+  'ui',
   'currency',
   'tax',
   'invoice',
@@ -56,6 +57,7 @@ export type SettingGroup = (typeof SETTING_GROUPS)[number]
 
 export const GROUP_LABEL: Record<SettingGroup, string> = {
   shop: 'Shop',
+  ui: 'Appearance',
   currency: 'Currency',
   tax: 'Tax',
   invoice: 'Invoices & financial year',
@@ -105,6 +107,24 @@ export const SETTINGS: SettingDef[] = [
     options: [
       { value: 'en', label: 'English' },
       { value: 'ur', label: 'اردو (Urdu)' }
+    ]
+  },
+
+  // ── Appearance ─────────────────────────────────────────────────────────────
+  // A shop counter can sit under fluorescent light at midday or a single bulb at night, and the two
+  // want opposite screens. So it is a SETTING, not localStorage: it lives in the DB, it survives a
+  // reinstall, and it is the same answer on the till in the morning as it was last night.
+  {
+    key: 'ui.colorScheme',
+    type: 'select',
+    default: 'auto',
+    label: 'Appearance',
+    help: 'Follow the computer means the screen turns dark when Windows does. The sun/moon button in the top bar switches light and dark right now, whatever is chosen here.',
+    group: 'ui',
+    options: [
+      { value: 'auto', label: 'Follow the computer' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' }
     ]
   },
 

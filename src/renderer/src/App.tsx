@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Center, Loader, Stack, Text } from '@mantine/core'
 import type { AppState } from '@shared/app-state'
+import { ColorSchemeSync } from './components/ColorSchemeSync'
 import { Activation } from './screens/Activation'
 import { CreateOwner } from './screens/CreateOwner'
 import { Login } from './screens/Login'
@@ -19,6 +20,17 @@ import { Home } from './screens/Home'
  *      no local auth state left to accidentally reset.
  */
 export function App(): React.JSX.Element {
+  return (
+    <>
+      {/* The shop's saved light/dark choice, applied on every screen including the login one — the
+          till should look the same at the sign-in prompt as it does mid-sale. Renders nothing. */}
+      <ColorSchemeSync />
+      <Phase />
+    </>
+  )
+}
+
+function Phase(): React.JSX.Element {
   const [state, setState] = useState<AppState | null>(null)
   const [fatal, setFatal] = useState<string | null>(null)
 
