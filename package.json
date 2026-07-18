@@ -16,6 +16,7 @@
     "make:icon": "electron scripts/make-icon.cjs",
     "make:keypair": "tsx --tsconfig tsconfig.node.json tools/make-keypair.ts",
     "keygen": "tsx --tsconfig tsconfig.node.json tools/keygen.ts",
+    "check:license": "tsx --tsconfig tsconfig.node.json tools/check-license.ts",
     "rebuild:node": "npm rebuild better-sqlite3",
     "rebuild:electron": "rm -rf node_modules/better-sqlite3/build && electron-builder install-app-deps",
     "test": "npm run rebuild:node && vitest run",
