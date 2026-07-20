@@ -55,6 +55,23 @@ export function Products({
   // showing the figures it happened to load ten minutes ago.
   const [version, setVersion] = useState(0)
 
+  // WHERE SAVING LEAVES YOU. Setting a shop up, you want the item to stay open — its barcodes and its
+  // opening stock are the next two things you need. Running a shop, fixing one price on one item, you
+  // want to be back at the list. Two shops, opposite answers, so it is a setting (CLAUDE.md §4).
+  const [returnToList, setReturnToList] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const result = await window.pos.settings.getAll()
+      if (!cancelled && result.ok) {
+        setReturnToList(result.data['catalog.returnToListAfterSave'] === true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   if (open !== null) {
     return (
       <ProductForm
@@ -63,9 +80,10 @@ export function Products({
         currencySymbol={currencySymbol}
         onClose={() => setOpen(null)}
         onSaved={(productId) => {
-          // Saving does NOT close the form. A new item swaps to edit mode in place, which is what
-          // unlocks its barcodes and its opening stock — the two things you want next.
-          setOpen(productId)
+          // By default saving does NOT close the form: a new item swaps to edit mode in place, which
+          // is what unlocks its barcodes and its opening stock. A shop that would rather go straight
+          // back to the list turns `catalog.returnToListAfterSave` on.
+          setOpen(returnToList ? null : productId)
           setVersion((current) => current + 1)
         }}
       />

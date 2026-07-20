@@ -644,6 +644,35 @@ describe('list — paginated, searchable, and never an unbounded SELECT *', () =
     expect(stock.lowStock(t.db, {}).rows.map((r) => r.sku)).not.toContain('BAG-001')
   })
 
+  /**
+   * A REAL SHOP ASKED FOR THIS. They search by name, by barcode — and by the SHELF, because the
+   * question at the shelf is "what is meant to be here?". Name, SKU, the Urdu name and barcodes were
+   * all searchable; the shelf was the one term they had that found nothing.
+   */
+  it('finds an item by the SHELF it sits on', () => {
+    const now = new Date().toISOString()
+    const shelf = Number(
+      t.db
+        .prepare(
+          `INSERT INTO lookups (list_key, code, label, sort_order, is_active, is_system, created_at, updated_at)
+           VALUES ('location', 'a3', 'Aisle 3 — Top Shelf', 0, 1, 0, ?, ?)`
+        )
+        .run(now, now).lastInsertRowid
+    )
+
+    products.create(t.db, actor, legacyItem({ sku: 'SHELF-1', name: 'Rice 5kg', locationId: shelf }))
+    products.create(t.db, actor, legacyItem({ sku: 'SHELF-2', name: 'Soap' })) // no shelf
+
+    const found = products.list(t.db, { search: 'Aisle 3' })
+    expect(found.rows.map((r) => r.sku), 'searching the shelf name finds what is on it').toEqual([
+      'SHELF-1'
+    ])
+
+    // And it did not break the searches that already worked.
+    expect(products.list(t.db, { search: 'Soap' }).rows.map((r) => r.sku)).toEqual(['SHELF-2'])
+    expect(products.list(t.db, { search: 'SHELF-1' }).rows.map((r) => r.sku)).toEqual(['SHELF-1'])
+  })
+
   it('does not treat a search term’s % as a wildcard', () => {
     products.create(t.db, actor, legacyItem({ sku: 'STK-004', name: '50% Off Bundle' }))
 

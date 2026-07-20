@@ -25,6 +25,7 @@ import {
 } from '@shared/settings-registry'
 import { formatMoney, parseMoney } from '@shared/money'
 import { Periods } from './Periods'
+import { BackupPanel } from './BackupPanel'
 
 /**
  * THE SETTINGS SCREEN RENDERS ITSELF.
@@ -102,6 +103,12 @@ function SettingsPanel({
             onSave={onSave}
           />
         ))}
+
+        {/* WHERE backups go cannot be a registry field — picking a folder needs a native OS dialog,
+            which no declarative text/number/select can express. It belongs on this screen all the
+            same: a shop looked in Settings → Backup, saw only the two reminder toggles, and concluded
+            the app could not choose a folder. It always could; the only button was on Overview. */}
+        {found.group === 'backup' && <BackupPanel readOnly={readOnly} />}
       </Stack>
     </Card>
   )

@@ -327,6 +327,19 @@ export const SETTINGS: SettingDef[] = [
 
   // ── Stock ──────────────────────────────────────────────────────────────────
   {
+    key: 'catalog.returnToListAfterSave',
+    type: 'boolean',
+    // Two shops genuinely want opposite things here, which is exactly what makes it a setting
+    // (CLAUDE.md §4). Setting a shop up for the first time, you save an item and immediately want its
+    // barcodes and its opening stock — so the form STAYS OPEN. Once the shop is running and you are
+    // fixing one price on one item, staying on the form means an extra click every single time, and a
+    // real shop asked for it to go back. Default false keeps the setup flow that already worked.
+    default: false,
+    label: 'Go back to the item list after saving an item',
+    help: 'Off: the item stays open so you can add its barcodes and opening stock straight away.',
+    group: 'stock'
+  },
+  {
     key: 'stock.nearExpiryDays',
     type: 'number',
     default: 30,
@@ -412,9 +425,14 @@ export const SETTINGS: SettingDef[] = [
   {
     key: 'scanner.minLength',
     type: 'number',
-    default: 4,
+    // 1, not 4. A real shop reported stock whose barcodes are THREE digits, and some are words — a
+    // 4-character floor silently refused to scan a chunk of their catalogue, with no message that
+    // explained why. The guard against a stray keypress being read as a scan matters less than the
+    // till refusing goods that are physically on the shelf, so it is off by default and a shop that
+    // wants it can raise the number.
+    default: 1,
     label: 'Shortest barcode to accept',
-    help: 'Stops a stray keypress being read as a scan.',
+    help: 'Stops a stray keypress being read as a scan. Set to 1 to accept short or word barcodes.',
     group: 'hardware',
     min: 1,
     max: 40

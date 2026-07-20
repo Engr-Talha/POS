@@ -733,9 +733,12 @@ const SORT_COLUMNS: Record<string, string> = {
 /**
  * THE PRODUCTS LIST. Paginated, indexed, and never a bare SELECT * — assume 100k rows. (CLAUDE.md §4)
  *
- * Searches stock code, item name, the Urdu name, and barcodes (product barcodes AND pack barcodes,
- * because both of them scan). A barcode is matched exactly or by prefix, never by "contains" — an
- * exact match rides the unique index, and nobody searches for the middle of a barcode.
+ * Searches stock code, item name, the Urdu name, the SHELF it sits on, and barcodes (product barcodes
+ * AND pack barcodes, because both of them scan). A barcode is matched exactly or by prefix, never by
+ * "contains" — an exact match rides the unique index, and nobody searches for the middle of a barcode.
+ *
+ * The shelf is in there because a shopkeeper looking at a shelf and asking "what is meant to be here?"
+ * is a real question a real shop asked, and it is the one search term they had that did not work.
  *
  * `on_hand` is SUM(stock_movements.qty_m), joined in — so the list can show and sort by a stock
  * figure without a second round trip, and without there being a stock column anywhere to go stale.
@@ -762,6 +765,8 @@ export function list(db: DB, raw: ListInput = {}): PagedResult<ProductListItem> 
                   WHERE b.product_id = p.id AND (b.barcode = @term OR b.barcode LIKE @prefix ESCAPE '\\'))
       OR EXISTS (SELECT 1 FROM product_packs k
                   WHERE k.product_id = p.id AND (k.barcode = @term OR k.barcode LIKE @prefix ESCAPE '\\'))
+      OR EXISTS (SELECT 1 FROM lookups loc
+                  WHERE loc.id = p.location_id AND loc.label LIKE @like ESCAPE '\\')
     )`)
     params['like'] = `%${escapeLike(input.search)}%`
     params['prefix'] = `${escapeLike(input.search)}%`
