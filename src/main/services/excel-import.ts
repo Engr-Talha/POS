@@ -2,13 +2,15 @@ import { Workbook, type Row, type Worksheet, type Xlsx } from 'exceljs'
 import type { DB } from '../db'
 import type { User } from '@shared/types'
 import { AppError, ErrorCode } from '@shared/result'
-import type { ItemType } from '@shared/catalog'
+import type { ItemType, PriceEntryMode } from '@shared/catalog'
 import type { OpeningSummary } from '@shared/opening'
 import { parseMoney } from '@shared/money'
 import { parseCost, costToPriceMinor } from '@shared/cost'
 import { parseQty, ONE_UNIT } from '@shared/qty'
 import * as audit from './audit'
 import * as catalog from './catalog'
+import * as settings from './settings'
+import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 import * as customers from './customers'
 import * as suppliers from './suppliers'
 import * as lookups from './lookups'
@@ -1098,7 +1100,7 @@ function parseParty(
 
     // ONE OPENING BALANCE PER PERSON. Two rows for Rashid would double what he owes, and he would be
     // chased for money he never borrowed.
-    const identity = `${name.toLowerCase()} ${(phone ?? '').toLowerCase()}`
+    const identity = `${name.toLowerCase()}\u0000${(phone ?? '').toLowerCase()}`
     const duplicate = seen.get(identity)
     if (duplicate !== undefined) {
       errors.add(sheet.name, rowNumber, 'NAME', name, `"${name}" is already on row ${duplicate}. Please put the whole amount they owe on one row — two rows would double it.`)
@@ -1514,6 +1516,22 @@ function writeProducts(
 
   const uomId = defaultSaleUomId(db)
 
+  // THE SHOP'S OWN TAX MODE, read once for the whole import.
+  //
+  // An imported item used to land as 'exclusive' ALWAYS — the CreateProductInput schema's hardcoded
+  // fallback — while an item typed in by hand honoured `tax.defaultMode`. So a shop that prices
+  // INCLUSIVE (the shelf price is what the customer pays) got a spreadsheet full of items priced the
+  // other way round, and every one of them would ring up with tax added on top. Nothing warned them.
+  // The setting existed; the import path simply never read it (CLAUDE.md §4).
+  //
+  // A row can still say otherwise — this is the DEFAULT for rows that do not, which is all of them
+  // today, because the sheet has no tax-mode column.
+  const shopPriceEntryMode = settings.get<PriceEntryMode>(
+    db,
+    'tax.defaultMode',
+    REGISTRY_DEFAULTS['tax.defaultMode'] as PriceEntryMode
+  )
+
   for (const row of rows) {
     const lookupFor = (list: ImportLookupList): number | null => {
       const label = row.lookupLabels[list]
@@ -1528,6 +1546,8 @@ function writeProducts(
         name: row.name,
         saleUomId: uomId,
         itemType: row.itemType,
+        // The shop's own tax mode, not the schema's hardcoded 'exclusive' — see above.
+        priceEntryMode: shopPriceEntryMode,
         // NO costPrice. Not an oversight — see the note above, and the file header.
         ...(row.nameOtherLang !== undefined ? { nameOtherLang: row.nameOtherLang } : {}),
         ...(row.sizeVolume !== undefined ? { sizeVolume: row.sizeVolume } : {}),

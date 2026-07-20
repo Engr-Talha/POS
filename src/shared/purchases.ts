@@ -33,6 +33,10 @@ import { z } from 'zod'
 
 // ── Row types ────────────────────────────────────────────────────────────────
 
+/** A purchase is live, or it has been reversed by a contra. There is no third state. */
+export const PURCHASE_STATUSES = ['completed', 'voided'] as const
+export type PurchaseStatus = (typeof PURCHASE_STATUSES)[number]
+
 /**
  * A purchase header — a goods-received note. The counterpart of a `Sale`.
  *
@@ -57,6 +61,20 @@ export type Purchase = {
   paidTotal: number
 
   notes: string | null
+
+  /**
+   * 'completed' — the goods were received and the books have it. Every new purchase is this.
+   * 'voided'    — reversed by a contra. The document KEEPS its number and all its lines; the reversing
+   *               stock movements and journal stay too. TERMINAL — a void is never undone, it is
+   *               followed by entering the corrected invoice. (migration 0020)
+   */
+  status: PurchaseStatus
+  /** lookups('void_reason').code. Non-null exactly when status is 'voided'. */
+  voidReasonCode: string | null
+  /** WHO cancelled it, and WHEN. Non-null exactly when status is 'voided'. */
+  voidedBy: number | null
+  voidedAt: string | null
+
   /** WHO received it. Never null. */
   userId: number
   /** The balanced journal this purchase posted. Null only for a zero-value receipt (a free sample). */
@@ -123,7 +141,14 @@ export type PurchaseDetail = Purchase & {
 /** A row in the purchases list — the mirror of `SaleListItem`. */
 export type PurchaseListItem = Pick<
   Purchase,
-  'id' | 'supplierInvoiceNo' | 'at' | 'supplierId' | 'grandTotal' | 'paidTotal' | 'userId'
+  | 'id'
+  | 'supplierInvoiceNo'
+  | 'at'
+  | 'supplierId'
+  | 'grandTotal'
+  | 'paidTotal'
+  | 'userId'
+  | 'status'
 > & {
   supplierName?: string | null
   userName?: string | null
@@ -241,7 +266,31 @@ export const ListPurchasesInput = z.object({
 
 export const GetPurchaseInput = z.object({ id: RowId })
 
+/**
+ * CANCEL A PURCHASE — the first half of "Correct this invoice".
+ *
+ * Deliberately tiny: an id and a reason. There is nothing to edit here, because a void does not edit
+ * anything — it reverses. The corrected invoice is a separate `createPurchase` with the right numbers on
+ * it, which is what keeps both documents honest and separately explainable.
+ */
+export const VoidPurchaseInput = z.object({
+  id: RowId,
+  /** lookups('void_reason').code — the owner's own list. Never a hardcoded dropdown (CLAUDE.md §4). */
+  reasonCode: z.string().trim().min(1).max(50),
+  /** Free text the manager adds on top of the code ("keyed 10 not 100"). */
+  reasonText: z.string().trim().max(500).nullish(),
+  /**
+   * Reversing stock that has SINCE BEEN SOLD drives the shelf negative. The service refuses unless this
+   * is set, exactly as the Sell screen confirms a negative-stock sale — and only when the shop's own
+   * `selling.negativeStock` setting is 'warn'. On 'block' this flag cannot rescue it; on 'allow' it is
+   * not asked for. Main enforces it, because the renderer is not a security boundary.
+   */
+  acceptNegativeStock: z.boolean().optional()
+})
+
 // ── Inferred input types ─────────────────────────────────────────────────────
+
+export type VoidPurchaseInput = z.infer<typeof VoidPurchaseInput>
 
 export type PurchaseLineInput = z.infer<typeof PurchaseLineInput>
 export type PurchasePaymentInput = z.infer<typeof PurchasePaymentInput>

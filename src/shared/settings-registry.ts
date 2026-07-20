@@ -282,6 +282,34 @@ export const SETTINGS: SettingDef[] = [
     ]
   },
   {
+    key: 'documents.correctionRole',
+    type: 'select',
+    // THE CLIENT ASKED FOR THIS: "invoice editable ho ya nahi, iska bhi setting mein daal do — jo bhi
+    // purchasing ya jo bhi doc ho jo edit nahi ho raha, usko setting mein daal do."
+    //
+    // READ WHAT THIS DOES AND DOES NOT DO. It controls WHO may correct a finished document — a sale, a
+    // purchase. It does NOT control whether a correction goes through the books. Even set to 'cashier',
+    // a correction still REVERSES the original with a proper contra entry and re-enters it. There is no
+    // setting that lets a document be silently rewritten, and there must never be: the moment one
+    // exists, last month's profit can change after the owner has reported it, the trial balance stops
+    // meaning anything, and every figure in the app becomes a rumour. What the shopkeeper sees is one
+    // button, "Correct this invoice" — the honesty is underneath it, not optional.
+    //
+    // 'owner' would be the safest default, but a one-person shop IS the owner and a two-person shop
+    // needs the manager to fix a typo without ringing the boss. 'manager' matches who is allowed to
+    // create a purchase in the first place.
+    default: 'manager',
+    label: 'Who may correct a finished invoice',
+    help: 'A correction always reverses the original and re-enters it, so the books stay balanced. Nothing is ever erased.',
+    group: 'selling',
+    options: [
+      { value: 'cashier', label: 'Cashier' },
+      { value: 'supervisor', label: 'Supervisor' },
+      { value: 'manager', label: 'Manager' },
+      { value: 'owner', label: 'Owner only' }
+    ]
+  },
+  {
     key: 'selling.wholesaleTierRole',
     type: 'select',
     default: 'supervisor',

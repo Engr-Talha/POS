@@ -252,6 +252,8 @@ export type ProductListItem = Pick<
   primaryBarcode: string | null
   categoryLabel: string | null
   brandLabel: string | null
+  /** The shelf. Searchable already; shown so "what is meant to be here?" is answerable at a glance. */
+  locationLabel: string | null
 }
 
 /** Everything the product form needs, in one call. */

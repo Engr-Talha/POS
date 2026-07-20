@@ -733,6 +733,112 @@ describe('supplier aging', () => {
     expect(row.total, 'a cash refund must not reduce what the shop owes on the bill').toBe(60_000)
     expect(report.totals.total).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
   })
+
+  /**
+   * REGRESSION — a CANCELLED purchase must come off the aging report.
+   *
+   * `voidPurchase` contra-posts the original journal, tax leg and all, so its DR Payable takes the bill
+   * straight back off the supplier's account. `supplier-ledger.balance()` and the statement both filter
+   * `status <> 'voided'` to match. This report RECOMPUTES the balance from the source tables instead,
+   * and it was summing EVERY purchase — so it went on chasing a distributor for a delivery the books
+   * say was never received: GL Payable and the supplier ledger said Rs 0, the aging report said Rs 600.
+   *
+   * This is the same shape that drifted twice before on this exact report (payments-only, then goods
+   * already returned). The trial balance stays green throughout — only this reconciliation catches it.
+   * (CLAUDE.md trap #17: derived state must be correct from EVERY path that can change it.)
+   */
+  it('takes a cancelled purchase off the bill, and still ties to GL Payable', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const acme = makeSupplier('Acme')
+
+    purchaseOnAccount(acme, p, 5, 600_000, at('2026-07-14')) // Rs 300, kept
+    purchaseOnAccount(acme, p, 10, 600_000, at('2026-07-15')) // Rs 600, keyed wrong
+    const wrong = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+
+    purchases.voidPurchase(t.db, owner, { id: wrong, reasonCode: 'keyed_wrong' }, NOW)
+
+    const report = reports.supplierAging(t.db, { asOf: '2026-07-15' })
+    const row = report.rows.find((r) => r.supplierId === acme)!
+
+    expect(row.total, 'a cancelled purchase is still being chased on the aging report').toBe(30_000)
+    expect(row.total).toBe(supplierLedger.balance(t.db, acme))
+    expect(report.totals.total).toBe(ledger.accountBalance(t.db, ACC.PAYABLE))
+  })
+
+  /**
+   * THE WHOLE BUYING LIFECYCLE ON ONE SUPPLIER, with Σ supplier balances === GL Payable asserted after
+   * EVERY step — a purchase, a payment against it, goods sent back on credit, and a cancelled bill.
+   *
+   * Each of those four is a different write path into Payable, and each has drifted from at least one
+   * reader before. Walking them in sequence is what proves the aging report, the supplier ledger and the
+   * GL still agree after the combination, not just after each one alone.
+   */
+  it('keeps Σ supplier balances === GL Payable through purchase, payment, return and void', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const acme = makeSupplier('Acme')
+    const oldco = makeSupplier('OldCo')
+
+    const reconciles = (step: string): void => {
+      const sumOfBalances =
+        supplierLedger.balance(t.db, acme) + supplierLedger.balance(t.db, oldco)
+      const gl = ledger.accountBalance(t.db, ACC.PAYABLE)
+      expect(sumOfBalances, `after ${step}: Σ supplier balances !== GL Payable`).toBe(gl)
+      expect(
+        reports.supplierAging(t.db, { asOf: FAR }).totals.total,
+        `after ${step}: supplier aging !== GL Payable`
+      ).toBe(gl)
+    }
+
+    // 1. Two bills on account: Rs 600 to Acme, Rs 200 to OldCo.
+    purchaseOnAccount(acme, p, 10, 600_000, at('2026-07-10'))
+    const acmeBill = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    purchaseOnAccount(oldco, p, 4, 500_000, at('2026-07-11'))
+    reconciles('the purchases')
+    expect(supplierLedger.balance(t.db, acme)).toBe(60_000)
+
+    // 2. Rs 100 paid off Acme's account.
+    supplierLedger.recordPayment(
+      t.db,
+      owner,
+      { supplierId: acme, amount: 10_000, methodLookupId: cash() },
+      at('2026-07-12')
+    )
+    reconciles('the payment')
+    expect(supplierLedger.balance(t.db, acme)).toBe(50_000)
+
+    // 3. 3 of the 10 tins go back on credit: Rs 180 off the bill.
+    const acmeLine = t.db
+      .prepare('SELECT id FROM purchase_lines WHERE purchase_id = ?')
+      .pluck()
+      .get(acmeBill) as number
+    purchaseReturns.createPurchaseReturn(
+      t.db,
+      owner,
+      {
+        purchaseId: acmeBill,
+        lines: [{ purchaseLineId: acmeLine, qtyM: 3 * ONE_UNIT }],
+        settlement: 'supplier_credit',
+        reasonCode: 'damaged'
+      },
+      at('2026-07-13')
+    )
+    reconciles('the supplier return')
+    expect(supplierLedger.balance(t.db, acme)).toBe(32_000) // 600 − 100 − 180
+
+    // 4. OldCo's bill was keyed against the wrong supplier: cancelled outright.
+    const oldBill = t.db
+      .prepare('SELECT id FROM purchases WHERE supplier_id = ?')
+      .pluck()
+      .get(oldco) as number
+    purchases.voidPurchase(t.db, owner, { id: oldBill, reasonCode: 'wrong_supplier' }, NOW)
+    reconciles('the void')
+    expect(supplierLedger.balance(t.db, oldco), 'a cancelled bill is not owed').toBe(0)
+
+    // OldCo drops off the aging report entirely — nothing is owed, so nothing is chased.
+    const finalReport = reports.supplierAging(t.db, { asOf: FAR })
+    expect(finalReport.rows.find((r) => r.supplierId === oldco)).toBeUndefined()
+    expect(finalReport.totals.total).toBe(32_000)
+  })
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1493,6 +1599,99 @@ describe('tax summary', () => {
     expect(report.inputTax, 'input tax !== GL INPUT_TAX after a supplier return').toBe(
       ledger.accountBalance(t.db, ACC.INPUT_TAX)
     )
+  })
+
+  /**
+   * REGRESSION — A CANCELLED PURCHASE MUST NOT BE CLAIMED AS INPUT TAX.
+   *
+   * The BUYING side of the void rule the sale side already got right. `voidPurchase` contra-posts the
+   * original journal, and the purchase DEBITED Input Tax, so the contra CREDITS it straight back out —
+   * GL Input Tax drops to zero on a cancelled bill.
+   *
+   * `inputTaxPaid` was summing `tax_total` over EVERY purchase in the period, cancelled or not, so the
+   * report claimed back tax on a delivery the books say was never received. That is a wrong number
+   * handed to the government, off a bill the shop cannot produce. The trial balance stays green.
+   *
+   * The mirror of the sale side, and the same "counted once" logic: the cancelled purchase simply
+   * leaves `inputTaxPaid`. It is NOT also subtracted through `inputTaxReversed` — that line is for
+   * purchase RETURNS only, exactly as `taxReversed` is for sale returns only.
+   */
+  it('a cancelled purchase drops out of input tax, and it still ties to the GL', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const supplier = makeSupplier('Acme')
+
+    // The bill that stands: Rs 51 of input tax.
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: supplier,
+        lines: [{ productId: p, qtyM: 5 * ONE_UNIT, unitCost: 600_000 }],
+        taxTotal: 5_100,
+        payments: []
+      },
+      NOW
+    )
+
+    // The bill keyed wrong and cancelled: its Rs 102 must never reach the tax return.
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: supplier,
+        lines: [{ productId: p, qtyM: 10 * ONE_UNIT, unitCost: 600_000 }],
+        taxTotal: 10_200,
+        payments: []
+      },
+      NOW
+    )
+    const wrong = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    purchases.voidPurchase(t.db, owner, { id: wrong, reasonCode: 'keyed_wrong' }, NOW)
+
+    const report = reports.taxSummary(t.db, { from: '2026-07-15', to: '2026-07-15' })
+
+    expect(report.inputTaxPaid, 'a cancelled purchase is still being claimed as input tax').toBe(5_100)
+    expect(report.inputTaxReversed, 'a void must not reverse tax that was never claimed').toBe(0)
+    expect(report.inputTax).toBe(5_100)
+    expect(report.inputTax, 'input tax !== GL INPUT_TAX after a cancelled purchase').toBe(
+      ledger.accountBalance(t.db, ACC.INPUT_TAX)
+    )
+  })
+
+  /**
+   * The buying-side mirror of "a June sale voided in July is still June's tax". A purchase BILLED in
+   * June and cancelled in JULY still belongs to June's input tax: June's GL still shows the debit,
+   * because the contra is dated July. A filed June return is not rewritten by a July correction.
+   */
+  it('a purchase cancelled in a LATER period still counts as the earlier period’s input tax', () => {
+    const p = makeProduct({ retailPrice: 10_000 })
+    const supplier = makeSupplier('Acme')
+
+    purchases.createPurchase(
+      t.db,
+      owner,
+      {
+        supplierId: supplier,
+        lines: [{ productId: p, qtyM: 10 * ONE_UNIT, unitCost: 600_000 }],
+        taxTotal: 10_200,
+        payments: []
+      },
+      at('2026-06-10')
+    )
+    const billed = t.db.prepare('SELECT id FROM purchases ORDER BY id DESC').pluck().get() as number
+    purchases.voidPurchase(t.db, owner, { id: billed, reasonCode: 'keyed_wrong' }, at('2026-07-15'))
+
+    // JUNE still shows the debit — the contra is dated July — so June's report must too.
+    const june = reports.taxSummary(t.db, { from: '2026-06-01', to: '2026-06-30' })
+    expect(june.inputTaxPaid, "a later cancellation must not rewrite June's filed input tax").toBe(
+      10_200
+    )
+    expect(june.inputTax).toBe(10_200)
+
+    // Over the whole book the two cancel out, exactly as the GL does.
+    const all = reports.taxSummary(t.db, { from: '2026-01-01', to: FAR })
+    expect(all.inputTax).toBe(ledger.accountBalance(t.db, ACC.INPUT_TAX))
+    expect(all.inputTax).toBe(0)
   })
 })
 

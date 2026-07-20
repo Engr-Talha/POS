@@ -1,7 +1,7 @@
 {
   "name": "pos-insha-desktop",
   "productName": "Insha POS",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Offline Point of Sale",
   "main": "./out/main/index.js",
   "author": "Insha",

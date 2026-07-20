@@ -361,43 +361,67 @@ function PurchaseList({
                 </Table.Thead>
                 <Table.Tbody>
                   {rows.map((row) => {
-                    const owed = row.payableRemaining ?? row.grandTotal - row.paidTotal
+                    // A CANCELLED bill is not owed and was never really received, so it must LOOK
+                    // different at a glance — otherwise the shopkeeper cancels a purchase and the list
+                    // reads exactly as it did before. Struck through, dimmed, with a badge, exactly as a
+                    // voided sale reads in Sales History. Never strike the badge itself.
+                    const voided = row.status === 'voided'
+                    const struck = voided ? { textDecoration: 'line-through' as const } : undefined
+                    const owed = voided ? 0 : (row.payableRemaining ?? row.grandTotal - row.paidTotal)
                     return (
                       <Table.Tr
                         key={row.id}
-                        style={{ cursor: 'pointer' }}
+                        style={{ cursor: 'pointer', opacity: voided ? 0.6 : undefined }}
                         onClick={() => setSelectedId(row.id)}
                       >
                         <Table.Td>
-                          <Text size="sm">{new Date(row.at).toLocaleDateString()}</Text>
+                          <Text size="sm" style={struck}>
+                            {new Date(row.at).toLocaleDateString()}
+                          </Text>
                         </Table.Td>
                         <Table.Td>
-                          <Text size="sm" c={row.supplierName ? undefined : 'dimmed'}>
+                          <Text size="sm" c={row.supplierName ? undefined : 'dimmed'} style={struck}>
                             {row.supplierName ?? '—'}
                           </Text>
                         </Table.Td>
                         <Table.Td>
-                          <Text size="sm" ff="monospace" c={row.supplierInvoiceNo ? undefined : 'dimmed'}>
-                            {row.supplierInvoiceNo ?? '—'}
-                          </Text>
+                          <Group gap={6} wrap="nowrap">
+                            <Text
+                              size="sm"
+                              ff="monospace"
+                              c={row.supplierInvoiceNo ? undefined : 'dimmed'}
+                              style={struck}
+                            >
+                              {row.supplierInvoiceNo ?? '—'}
+                            </Text>
+                            {voided && (
+                              <Badge size="xs" variant="light" color="red">
+                                Cancelled
+                              </Badge>
+                            )}
+                          </Group>
                         </Table.Td>
                         <Table.Td ta="right">
-                          <Text size="sm" c={row.lineCount ? undefined : 'dimmed'}>
+                          <Text size="sm" c={row.lineCount ? undefined : 'dimmed'} style={struck}>
                             {row.lineCount ?? '—'}
                           </Text>
                         </Table.Td>
                         <Table.Td ta="right">
-                          <Text size="sm" fw={600}>
+                          <Text size="sm" fw={600} style={struck}>
                             {formatMoney(row.grandTotal, { symbol: currencySymbol })}
                           </Text>
                         </Table.Td>
                         <Table.Td ta="right">
-                          <Text size="sm" c="dimmed">
+                          <Text size="sm" c="dimmed" style={struck}>
                             {formatMoney(row.paidTotal, { symbol: currencySymbol })}
                           </Text>
                         </Table.Td>
                         <Table.Td ta="right">
-                          {owed > 0 ? (
+                          {voided ? (
+                            <Text size="sm" c="dimmed">
+                              —
+                            </Text>
+                          ) : owed > 0 ? (
                             <Text size="sm" fw={600} c="var(--mantine-color-red-text)">
                               {formatMoney(owed, { symbol: currencySymbol })}
                             </Text>
@@ -489,7 +513,10 @@ function PurchaseDetailDrawer({
     }
   }, [purchaseId, reloadKey])
 
-  const owed = purchase ? purchase.grandTotal - purchase.paidTotal : 0
+  // A CANCELLED bill owes nothing: voidPurchase contra-posted the Payable, so the supplier ledger and
+  // GL Payable both say zero. Showing grandTotal − paidTotal here would contradict both, in red.
+  const owed =
+    purchase && purchase.status !== 'voided' ? purchase.grandTotal - purchase.paidTotal : 0
 
   return (
     <Drawer
@@ -519,6 +546,21 @@ function PurchaseDetailDrawer({
         </Stack>
       ) : (
         <Stack gap="lg">
+          {/* ── CANCELLED, said plainly and FIRST ─────────────────────────── */}
+          {/* The stock came back off and the bill is no longer owed. The document keeps its number and
+              every line, so without this banner the drawer reads like a live purchase. Mirrors the
+              voided-sale banner in Sales History. */}
+          {purchase.status === 'voided' && (
+            <Alert color="red" variant="light" icon={<CircleAlert size={16} />} title="Cancelled">
+              <Text size="sm">
+                Cancelled
+                {purchase.voidedAt ? ` on ${new Date(purchase.voidedAt).toLocaleString()}` : ''}
+                {purchase.voidReasonCode ? ` — reason: ${purchase.voidReasonCode}` : ''}. The stock was
+                taken back off and this bill is no longer owed. It keeps its number and its lines.
+              </Text>
+            </Alert>
+          )}
+
           {/* ── The heading facts ────────────────────────────────────────── */}
           <Stack gap={6}>
             <Group gap={8} wrap="nowrap">

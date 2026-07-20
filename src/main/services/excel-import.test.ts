@@ -5,6 +5,7 @@ import { AppError } from '@shared/result'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
 import * as excel from './excel-import'
+import * as settings from './settings'
 import { buildTemplate, CASH_COLUMNS, PARTY_COLUMNS, SHEET_CASH, SHEET_DUES, SHEET_STOCK, SHEET_UDHAAR, STOCK_COLUMNS } from './excel-template'
 import * as ledger from './ledger'
 import * as lookups from './lookups'
@@ -325,6 +326,30 @@ describe('the float trap — Excel hands you doubles', () => {
     expect(stored.retail_price).toBe(399_900)
     expect(stored.wholesale_price).toBe(230_000)
     expect(Number.isInteger(stored.retail_price)).toBe(true)
+  })
+
+  /**
+   * REGRESSION — AN IMPORTED ITEM MUST BE PRICED THE WAY THE SHOP PRICES.
+   *
+   * `CreateProductInput` defaults `priceEntryMode` to a HARDCODED 'exclusive', and the importer never
+   * passed one — so a shop that prices INCLUSIVE (the shelf price is what the customer pays) got a
+   * whole spreadsheet of items priced the other way round, every one of which would ring up with tax
+   * added on top. An item typed in by hand honoured `tax.defaultMode`; only the import ignored it.
+   * The setting existed. The import path simply never read it. (CLAUDE.md §4; found via client feedback.)
+   */
+  it('imports items in the SHOP’s tax mode, not a hardcoded one', async () => {
+    settings.set(t.db, 'tax.defaultMode', 'inclusive', new Date())
+
+    const buffer = await makeWorkbook({
+      stock: [{ 'STOCK CODE': 'TEA-1', 'ITEM NAME': 'Tea 250g', PACKING: 1, 'RETAIL PRICE': '100.00' }]
+    })
+    await excel.applyImport(t.db, actor, buffer)
+
+    const stored = t.db
+      .prepare('SELECT price_entry_mode FROM products WHERE sku = ?')
+      .get('TEA-1') as { price_entry_mode: string }
+
+    expect(stored.price_entry_mode, 'an inclusive shop must not get exclusive items').toBe('inclusive')
   })
 
   it('REFUSES a money cell with 3 decimal places — it does not round it', async () => {

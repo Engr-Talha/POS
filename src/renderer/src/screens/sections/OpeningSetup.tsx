@@ -587,7 +587,8 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
         isBelowReorder: detail.data.stock.isBelowReorder,
         primaryBarcode: null,
         categoryLabel: null,
-        brandLabel: null
+        brandLabel: null,
+        locationLabel: null
       },
       trackBatches: product.trackBatches,
       qtyM: line.qtyM,

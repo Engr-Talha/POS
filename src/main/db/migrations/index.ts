@@ -37,6 +37,7 @@ import { migration0016 } from './0016_purchase_returns'
 import { migration0017 } from './0017_loyalty'
 import { migration0018 } from './0018_promotions'
 import { migration0019 } from './0019_stock_takes'
+import { migration0020 } from './0020_purchase_void'
 
 /** Applied in ascending version order. Never renumber, never reorder, never edit a shipped one. */
 export const MIGRATIONS: Migration[] = [
@@ -58,7 +59,8 @@ export const MIGRATIONS: Migration[] = [
   migration0016,
   migration0017,
   migration0018,
-  migration0019
+  migration0019,
+  migration0020
 ]
 
 export function runMigrations(db: DB): { applied: number[]; alreadyAt: number } {

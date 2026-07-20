@@ -12,8 +12,14 @@ import {
   type PurchaseDetail,
   type PurchaseLine,
   type PurchaseListItem,
-  type PurchasePayment
+  type PurchasePayment,
+  type PurchaseStatus,
+  VoidPurchaseInput
 } from '@shared/purchases'
+import { roleCan } from '@shared/rbac'
+import * as settings from './settings'
+import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
+import { formatQty } from '@shared/qty'
 import * as audit from './audit'
 import * as catalog from './catalog'
 import * as ledger from './ledger'
@@ -67,6 +73,13 @@ import { accountForPaymentMethod } from './sales'
 
 /** What caused the stock movements and the journal — one string, so reports can point back at it. */
 export const PURCHASE_REF_TYPE = 'purchase'
+
+/**
+ * What caused the CONTRA movements and journal when a purchase is cancelled. DISTINCT from 'purchase',
+ * deliberately: a report that sums purchases must not count a reversal as another delivery, and the
+ * owner must be able to see that a correction happened rather than find a mysterious negative receipt.
+ */
+export const PURCHASE_VOID_REF_TYPE = 'purchase_void'
 
 // ═════════════════════════════════════════════════════════════════════════════
 // CREATE — the one that matters
@@ -322,6 +335,333 @@ function movementValue(db: DB, movementId: number): number {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// CORRECTING A PURCHASE — reverse, then re-enter
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** The owner's own list of settings, with the registry default behind it. (Mirrors sales.ts.) */
+function setting<T>(db: DB, key: string): T {
+  return settings.get<T>(db, key, REGISTRY_DEFAULTS[key] as T)
+}
+
+/** A real, CURRENT entry on the owner's own list — never a hardcoded option (CLAUDE.md §4). */
+function requireLookupByCode(
+  db: DB,
+  listKey: string,
+  code: string,
+  userMessage: string
+): { id: number; code: string; label: string } {
+  const row = db
+    .prepare('SELECT id, code, label FROM lookups WHERE list_key = ? AND code = ? AND is_active = 1')
+    .get(listKey, code) as { id: number; code: string; label: string } | undefined
+
+  if (!row) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      userMessage,
+      `unknown or inactive ${listKey} code "${code}"`
+    )
+  }
+  return row
+}
+
+/**
+ * CANCEL A WRONGLY-KEYED PURCHASE. The shopkeeper's "Correct this invoice", first half.
+ *
+ * THE CLIENT ASKED TO EDIT A PURCHASE. THIS REVERSES IT INSTEAD, AND THAT IS DELIBERATE.
+ *
+ * A purchase has already put stock on the shelf and money in the books. Editing it in place would
+ * rewrite months the owner has already read: last month's stock value and last month's profit would BOTH
+ * silently change after they were reported. And the weighted-average cost is a running blend of every
+ * movement IN ORDER — rewrite one cost in the middle of that chain and every sale costed off it is
+ * quietly wrong, on invoices already handed to customers. So:
+ *
+ *   THE WRONG INVOICE IS REVERSED WITH A CONTRA. THE CORRECTED ONE IS ENTERED FRESH. NOTHING IS ERASED.
+ *
+ * The UI presents both halves as ONE button, so it FEELS like editing to the shopkeeper. Underneath, the
+ * books can still explain themselves: what was received, that it was cancelled, why, and by whom.
+ *
+ * This is `sales.voidSale` pointing the other way, and it solves the same four hard parts identically:
+ *
+ *   · THE STOCK COMES OFF AT THE COST IT CAME ON AT — the ORIGINAL movement's own frozen `unit_cost`,
+ *     never today's weighted average. Buy 10 @ 60 then 10 @ 80 and the average is 70; reversing the
+ *     first at 70 would take 700 off Inventory for goods that cost 600, and GL Inventory and the stock
+ *     valuation would part company on the spot. Reversing at the frozen 60 keeps them equal to the paisa.
+ *   · THE JOURNAL IS CONTRA-POSTED BY MIRRORING THE ORIGINAL'S OWN LINES — reversing what was actually
+ *     POSTED, not what today's pricing code would post. It balances because the original balanced, and
+ *     it stays right even if this file changes next year.
+ *   · THE DOCUMENT IS MARKED, NEVER DELETED. It keeps its id and every line. `ON DELETE CASCADE` on
+ *     purchase_lines is exactly why deleting would be a catastrophe: the GRN would vanish while its
+ *     stock movements and journal remained, and nothing would explain them.
+ *   · A REASON CODE from the owner's own lookups list, plus an audit row with a NAME on it.
+ *
+ * `void` is a reserved word in JavaScript. Hence `voidPurchase`.
+ */
+export function voidPurchase(db: DB, actor: User, raw: unknown, now = new Date()): PurchaseDetail {
+  const input = parseOrThrow(VoidPurchaseInput, raw, 'purchase.void')
+
+  // RBAC IN MAIN. The UI is not a security boundary (CLAUDE.md §4) — hiding the button is a courtesy.
+  if (!roleCan(actor.role, 'purchase.void')) {
+    throw new AppError(
+      ErrorCode.FORBIDDEN,
+      'Correcting a purchase invoice needs a manager. Please ask one to do it.',
+      `purchase.void needs manager; actor=${actor.role}`
+    )
+  }
+
+  const purchase = getPurchase(db, input.id)
+
+  // ── Already cancelled: refuse. Voiding twice would reverse the stock and the journal a SECOND time —
+  //    inventory would go down by the value of goods that were only ever received once. ──
+  if (purchase.status === 'voided') {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `${describe(purchase)} has already been cancelled.`,
+      `purchase ${input.id} is already voided`
+    )
+  }
+
+  // ── GOODS ALREADY SENT BACK TO THE SUPPLIER: refuse. ──────────────────────
+  // A void reverses the WHOLE bill. A purchase return has ALREADY reversed part of it — its own negative
+  // movements and its own journal. Voiding on top would take the returned goods off the shelf a second
+  // time (phantom negative stock) and credit the supplier twice. The two documents are mutually
+  // exclusive, exactly as voidSale refuses a sale with returns against it.
+  const returnCount = db
+    .prepare('SELECT COUNT(*) FROM purchase_returns WHERE purchase_id = ?')
+    .pluck()
+    .get(input.id) as number
+  if (returnCount > 0) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `${describe(purchase)} has goods already returned to the supplier against it, so it cannot be cancelled. Please deal with those returns first.`,
+      `purchase ${input.id} has ${returnCount} supplier return(s); refusing to void to avoid double reversal`
+    )
+  }
+
+  // ── ALREADY PAID: refuse, and say what to do instead. ─────────────────────
+  //
+  // THE DECISION (documented because it is a judgement call, not a rule the schema forced):
+  //
+  // `paid_total` is money that PHYSICALLY LEFT the drawer or the bank at receipt time. A contra can
+  // reverse a BOOK entry; it cannot walk to the distributor and bring cash back. Contra-posting the
+  // original journal would DEBIT Cash for the amount paid — the books would say the money is back in the
+  // till, and the shop would be short by exactly that much at the next count, with a green trial balance
+  // hiding it. (The trial balance would still balance. It always does. That is why it is not the only
+  // test that matters here.)
+  //
+  // Nor can we quietly leave the tender leg out of the contra: then the journal would not balance, and
+  // ledger.post would rightly refuse it.
+  //
+  // So a paid purchase is refused, and pointed at the instrument that ALREADY handles money coming back:
+  // a purchase RETURN settled as 'refund', which records the real tender the supplier actually refunds
+  // through. An UNPAID purchase — the overwhelmingly common case, and the one the client hit, keying a
+  // delivery that goes on the account — reverses cleanly, because the only money involved is a Payable
+  // that no one has settled yet.
+  if (purchase.paidTotal > 0) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `${describe(purchase)} has already been paid, so it cannot simply be cancelled — the money has left the shop. Please record a return to the supplier instead, so the refund is recorded against a real payment method.`,
+      `purchase ${input.id} has paid_total=${purchase.paidTotal}; refusing to void (a contra cannot un-spend real money)`
+    )
+  }
+
+  // ── A LOCKED MONTH refuses it. ─────────────────────────────────────────────
+  // ledger.post enforces this anyway, but it is checked UP FRONT so the manager gets a sentence rather
+  // than a rolled-back transaction — and so a zero-value receipt (a free sample, which posts no journal
+  // at all) is covered too. The message is already a friendly one; it is re-thrown untouched.
+  ledger.assertPeriodOpen(db, now.getFullYear(), now.getMonth() + 1)
+
+  // ── WHY, from the owner's OWN void_reason list — the same list a sale void uses. ──
+  const reason = requireLookupByCode(
+    db,
+    'void_reason',
+    input.reasonCode,
+    'Please choose a reason for cancelling this purchase.'
+  )
+
+  // ── THE STOCK HAS SINCE BEEN SOLD. ─────────────────────────────────────────
+  //
+  // THE DECISION: allow, warn, or block — following the shop's OWN `selling.negativeStock` setting,
+  // because being inconsistent with it would be its own bug. If the owner has decided the shelf may go
+  // negative at the till (the default, 'warn' — a stock count is usually just out of date), it makes no
+  // sense to hold a keying correction to a stricter standard than a sale. And REFUSING outright would be
+  // actively harmful: a wrongly-keyed purchase that has since been partly sold is EXACTLY the case the
+  // client needs fixed, and the alternative — leaving 100 units on the books when 10 arrived — is a
+  // bigger lie than a temporarily negative shelf. The correcting invoice, entered moments later, puts
+  // the right quantity back.
+  const movements = db
+    .prepare(
+      `SELECT id, product_id, batch_id, qty_m, unit_cost
+         FROM stock_movements
+        WHERE ref_type = ? AND ref_id = ? AND type = 'purchase' AND qty_m > 0`
+    )
+    .all(PURCHASE_REF_TYPE, String(input.id)) as Array<{
+    id: number
+    product_id: number
+    batch_id: number | null
+    qty_m: number
+    unit_cost: number
+  }>
+
+  assertReversalStockPolicy(db, movements, input.acceptNegativeStock === true)
+
+  const run = db.transaction((): void => {
+    // ── The stock comes back OFF the shelf, at the cost it came ON at ────────
+    //
+    // The ORIGINAL movement's frozen unit_cost, reused. Taking it off at TODAY'S weighted average would
+    // remove a value the shop never paid, and GL Inventory would drift from the stock valuation
+    // permanently. Onto the SAME batch it arrived on, so a batch-tracked product's FEFO picture is
+    // reversed as precisely as it was created.
+    for (const movement of movements) {
+      stock.record(db, {
+        productId: movement.product_id,
+        type: 'purchase',
+        qtyM: -movement.qty_m, // the mirror image: what came in goes back out
+        unitCost: movement.unit_cost, // AT THE COST IT CAME IN AT
+        batchId: movement.batch_id,
+        refType: PURCHASE_REF_TYPE,
+        refId: input.id,
+        note: `Cancelled: ${describe(purchase)}`,
+        userId: actor.id,
+        at: now
+      })
+    }
+
+    // ── The CONTRA journal. The original is NEVER touched. ──────────────────
+    //
+    // Built by MIRRORING the original journal's own lines, so it reverses what was actually POSTED —
+    // not what the code above would post today. Every debit becomes a credit and every credit a debit,
+    // so it balances because the original balanced. DR Payable here is what takes the bill back off the
+    // supplier's account; supplier-ledger.balance() excludes a voided purchase to match, and a test
+    // asserts the two still agree.
+    const original = db
+      .prepare(
+        `SELECT l.debit AS debit, l.credit AS credit, a.code AS code
+           FROM journals j
+           JOIN journal_lines l ON l.journal_id = j.id
+           JOIN accounts a      ON a.id = l.account_id
+          WHERE j.ref_type = ? AND j.ref_id = ?
+          ORDER BY l.id`
+      )
+      .all(PURCHASE_REF_TYPE, String(input.id)) as Array<{
+      debit: number
+      credit: number
+      code: string
+    }>
+
+    if (original.length > 0) {
+      ledger.post(db, {
+        at: now,
+        refType: PURCHASE_VOID_REF_TYPE,
+        refId: input.id,
+        memo: `Cancelled: ${describe(purchase)} (${reason.label})`,
+        userId: actor.id,
+        lines: original.map((line) =>
+          line.debit > 0
+            ? { account: line.code, credit: line.debit }
+            : { account: line.code, debit: line.credit }
+        )
+      })
+    }
+
+    // ── The purchase is marked cancelled. IT KEEPS ITS NUMBER AND ITS LINES. ──
+    // Never deleted: purchase_lines cascades on delete, so deleting the header would erase every line
+    // while its stock movements and its journal remained — figures in the books with nothing left to
+    // explain them. A migration-0020 trigger enforces that these four columns move together.
+    db.prepare(
+      `UPDATE purchases
+          SET status = 'voided', void_reason_code = ?, voided_by = ?, voided_at = ?
+        WHERE id = ?`
+    ).run(reason.code, actor.id, now.toISOString(), input.id)
+
+    // ── WHO cancelled it, WHY, and what it was worth. (CLAUDE.md §4) ────────
+    audit.record(
+      db,
+      actor,
+      {
+        action: 'purchase.void',
+        entity: 'purchase',
+        entityId: input.id,
+        reasonCode: reason.code,
+        ...(input.reasonText != null ? { reasonText: input.reasonText } : {}),
+        before: {
+          status: 'completed',
+          supplierId: purchase.supplierId,
+          supplierInvoiceNo: purchase.supplierInvoiceNo,
+          grandTotal: purchase.grandTotal,
+          paidTotal: purchase.paidTotal
+        },
+        after: { status: 'voided', supplierInvoiceNo: purchase.supplierInvoiceNo }
+      },
+      now
+    )
+  })
+
+  run()
+  return getPurchase(db, input.id)
+}
+
+/** How a purchase names itself in a sentence a shopkeeper reads. */
+function describe(purchase: Purchase): string {
+  return purchase.supplierInvoiceNo
+    ? `Purchase ${purchase.supplierInvoiceNo}`
+    : `Purchase #${purchase.id}`
+}
+
+/**
+ * REVERSING STOCK THAT HAS SINCE BEEN SOLD. Consistent with `selling.negativeStock` — see the long note
+ * at the call site for why this follows the shop's own setting rather than inventing a stricter one.
+ *
+ *   'block' refused, in plain language.
+ *   'warn'  refused UNTIL the manager confirms (`acceptNegativeStock`), then allowed. Enforced HERE, in
+ *           MAIN — a warning the renderer could simply not show is not a warning.
+ *   'allow' nothing is asked.
+ */
+function assertReversalStockPolicy(
+  db: DB,
+  movements: Array<{ product_id: number; qty_m: number }>,
+  accepted: boolean
+): void {
+  // What the reversal would leave on the shelf, per product — several lines may share one product.
+  const wanted = new Map<number, number>()
+  for (const movement of movements) {
+    wanted.set(movement.product_id, (wanted.get(movement.product_id) ?? 0) + movement.qty_m)
+  }
+
+  const shortages: string[] = []
+  for (const [productId, qtyM] of wanted) {
+    const onHandM = stock.onHand(db, productId)
+    if (onHandM < qtyM) {
+      const name = db.prepare('SELECT name FROM products WHERE id = ?').pluck().get(productId) as
+        | string
+        | undefined
+      shortages.push(
+        `${name ?? `product #${productId}`} (${formatQty(onHandM)} in stock, cancelling ${formatQty(qtyM)})`
+      )
+    }
+  }
+  if (shortages.length === 0) return
+
+  const detail = shortages.join(', ')
+  const policy = setting<string>(db, 'selling.negativeStock')
+
+  if (policy === 'block') {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `Some of this delivery has already been sold, so cancelling it would leave less than zero in stock: ${detail}. Please adjust the stock first, or record a return to the supplier instead.`,
+      `purchase void would drive stock negative, blocked by selling.negativeStock=block: ${detail}`
+    )
+  }
+
+  if (policy === 'warn' && !accepted) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `Some of this delivery has already been sold, so cancelling it will leave less than zero in stock for now: ${detail}. That is usually fine — entering the corrected invoice will put it right. Confirm to continue.`,
+      `purchase void negative-stock warning not yet accepted: ${detail}`
+    )
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // LIST + GET
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -363,6 +703,7 @@ export function listPurchases(db: DB, raw: unknown = {}): PagedResult<PurchaseLi
   const rows = db
     .prepare(
       `SELECT p.id, p.supplier_invoice_no, p.at, p.supplier_id, p.grand_total, p.paid_total, p.user_id,
+              p.status,
               s.name      AS supplier_name,
               u.full_name AS user_name,
               (SELECT COUNT(*) FROM purchase_lines l WHERE l.purchase_id = p.id) AS line_count
@@ -384,6 +725,7 @@ export function listPurchases(db: DB, raw: unknown = {}): PagedResult<PurchaseLi
     supplier_name: string | null
     user_name: string | null
     line_count: number
+    status: PurchaseStatus
   }>
 
   return {
@@ -398,10 +740,14 @@ export function listPurchases(db: DB, raw: unknown = {}): PagedResult<PurchaseLi
       grandTotal: row.grand_total,
       paidTotal: row.paid_total,
       userId: row.user_id,
+      status: row.status,
       supplierName: row.supplier_name,
       userName: row.user_name,
       lineCount: row.line_count,
-      payableRemaining: row.grand_total - row.paid_total
+      // A CANCELLED bill owes nothing. Its contra already took the payable back off the supplier's
+      // account, so showing the original remainder here would have the list contradict both the
+      // supplier ledger and the books.
+      payableRemaining: row.status === 'voided' ? 0 : row.grand_total - row.paid_total
     }))
   }
 }
@@ -439,6 +785,10 @@ type PurchaseRow = {
   grand_total: number
   paid_total: number
   notes: string | null
+  status: PurchaseStatus
+  void_reason_code: string | null
+  voided_by: number | null
+  voided_at: string | null
   user_id: number
   journal_id: number | null
   created_at: string
@@ -479,6 +829,10 @@ function toPurchase(row: PurchaseRow): Purchase {
     grandTotal: row.grand_total,
     paidTotal: row.paid_total,
     notes: row.notes,
+    status: row.status,
+    voidReasonCode: row.void_reason_code,
+    voidedBy: row.voided_by,
+    voidedAt: row.voided_at,
     userId: row.user_id,
     journalId: row.journal_id,
     createdAt: row.created_at

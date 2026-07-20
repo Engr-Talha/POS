@@ -78,9 +78,17 @@ export function balance(db: DB, supplierId: number): number {
 
   // Each purchase's UNPAID PORTION — what it left owing after the tenders paid at receipt time. This is
   // exactly what the purchase journal credited to Payable (purchases.ts), so the two stay reconciled.
+  //
+  // A VOIDED purchase is excluded. Its contra journal (purchases.voidPurchase) DEBITED Payable back by
+  // exactly the amount the original credited, so the GL no longer says the shop owes it. Leave it in
+  // this sum and the supplier screen chases a distributor for money the books say is settled, while the
+  // trial balance stays perfectly green — CLAUDE.md trap #17, derived state correct from EVERY path.
+  // This is precisely the bug the purchase-return comment below was written about; not repeated here.
   const onAccount = db
     .prepare(
-      'SELECT COALESCE(SUM(grand_total - paid_total), 0) FROM purchases WHERE supplier_id = ?'
+      `SELECT COALESCE(SUM(grand_total - paid_total), 0)
+         FROM purchases
+        WHERE supplier_id = ? AND status <> 'voided'`
     )
     .pluck()
     .get(supplierId) as number
@@ -152,6 +160,10 @@ const LEDGER_UNION = `
     FROM purchases pu
    WHERE pu.supplier_id = @supplierId
      AND (pu.grand_total - pu.paid_total) > 0
+     -- A cancelled purchase is off the bill entirely: its contra reversed the Payable credit, so it is
+     -- not a charge any more. It must drop out HERE too, or the running balance on this page stops
+     -- landing on balance() above — the two must always agree, on every page.
+     AND pu.status <> 'voided'
 
   UNION ALL
 

@@ -835,11 +835,13 @@ export function list(db: DB, raw: ListInput = {}): PagedResult<ProductListItem> 
               ${onHand},
               cat.label AS category_label,
               br.label  AS brand_label,
+              loc.label AS location_label,
               (SELECT barcode FROM product_barcodes pb
                 WHERE pb.product_id = p.id AND pb.is_primary = 1) AS primary_barcode
        ${from}
        LEFT JOIN lookups cat ON cat.id = p.category_id
        LEFT JOIN lookups br  ON br.id  = p.brand_id
+       LEFT JOIN lookups loc ON loc.id = p.location_id
        ${whereSql}
        ORDER BY ${sortColumn} ${sortDir}, p.id ASC
        LIMIT @limit OFFSET @offset`
@@ -871,7 +873,8 @@ export function list(db: DB, raw: ListInput = {}): PagedResult<ProductListItem> 
       isBelowReorder: row.item_type === 'inventory' && row.on_hand <= row.min_stock_m,
       primaryBarcode: row.primary_barcode,
       categoryLabel: row.category_label,
-      brandLabel: row.brand_label
+      brandLabel: row.brand_label,
+      locationLabel: row.location_label
     }))
   }
 }
@@ -1020,6 +1023,7 @@ type ListRow = Pick<
   on_hand: number
   category_label: string | null
   brand_label: string | null
+  location_label: string | null
   primary_barcode: string | null
 }
 

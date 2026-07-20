@@ -49,7 +49,14 @@ const SEED_LOOKUPS: Record<string, SeedLookup[]> = {
     { code: 'customer_changed_mind', label: 'Customer changed mind' },
     { code: 'wrong_item', label: 'Wrong item rung up' },
     { code: 'price_error', label: 'Price error' },
-    { code: 'test_sale', label: 'Test sale' }
+    { code: 'test_sale', label: 'Test sale' },
+    // The BUYING side uses this same list (purchases.voidPurchase). A purchase is cancelled for
+    // different reasons than a sale — nobody "changed their mind" about a delivery — so the reasons a
+    // manager correcting a supplier's bill would actually reach for are seeded here too. All of it is
+    // editable in Settings -> Manage Lists; these are a starting point, not a fixed set.
+    { code: 'keyed_wrong', label: 'Keyed in wrong' },
+    { code: 'wrong_supplier', label: 'Wrong supplier' },
+    { code: 'duplicate_entry', label: 'Entered twice' }
   ],
   refund_reason: [
     { code: 'damaged', label: 'Damaged / faulty' },

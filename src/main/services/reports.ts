@@ -702,10 +702,18 @@ export function supplierAging(db: DB, raw: unknown): SupplierAgingReport {
   )
   // One row per purchase UP TO asOf that left something owing, carrying its unpaid remainder (frozen at
   // receipt: paid_total is the tenders paid then; later supplier_payments are the credits below).
+  //
+  // A CANCELLED purchase is excluded, exactly as supplier-ledger.balance() and the statement exclude it.
+  // voidPurchase contra-posts the original journal, so its DR Payable already took the bill back off the
+  // account: the GL no longer says the shop owes it. Leave it in and this report chases a distributor for
+  // a delivery the books say was never received, while the trial balance stays perfectly green — the
+  // third time this exact recompute has drifted from `balance()` (payments-only, then goods returned).
+  // CLAUDE.md trap #17: derived state must be correct from EVERY path that can change it.
   const owedPurchases = db.prepare(
     `SELECT at AS at, (grand_total - paid_total) AS amount
      FROM purchases
-     WHERE supplier_id = @supplierId AND (grand_total - paid_total) > 0 AND at < @bound`
+     WHERE supplier_id = @supplierId AND (grand_total - paid_total) > 0 AND at < @bound
+       AND status <> 'voided'`
   )
   // What the shop has PAID this supplier by asOf, reducing the payable oldest-first.
   const paymentsUpTo = db.prepare(
@@ -1495,9 +1503,26 @@ export function taxSummary(db: DB, raw: unknown): TaxSummaryReport {
   const outputTax = taxCollected - taxReversed
 
   // ── INPUT: paid to suppliers on the bills, less what came back with returns ─
+  //
+  // A CANCELLED purchase is excluded, on exactly the same rule as the sale side above — and for exactly
+  // the same reason. voidPurchase contra-posts the original journal, and a purchase DEBITED Input Tax,
+  // so the contra CREDITS it back out: the GL no longer says the shop paid it. Claiming it would hand
+  // the government a reclaim against a bill the shop cannot produce.
+  //
+  // COUNTED ONCE, NOT TWICE: the cancelled bill simply leaves this sum. It is NOT also subtracted via
+  // `inputTaxReversed` — that reads `purchase_returns`, which a void can never create (voidPurchase
+  // refuses a purchase that has returns against it). The mirror of the void/return split on the sale
+  // side, where subtracting both reversed the same tax twice.
+  //
+  // The `voided_at >= @toExclusive` clause is the buying-side twin of COLLECTED_WHERE: a JUNE bill
+  // cancelled in JULY is still June's input tax, because June's GL still shows the debit — the contra
+  // is dated July. A filed June return is not rewritten by a July correction.
   const inputTaxPaid = db
     .prepare(
-      `SELECT COALESCE(SUM(tax_total), 0) FROM purchases WHERE at >= @from AND at < @toExclusive`
+      `SELECT COALESCE(SUM(tax_total), 0)
+         FROM purchases
+        WHERE at >= @from AND at < @toExclusive
+          AND (status <> 'voided' OR voided_at >= @toExclusive)`
     )
     .pluck()
     .get(bounds) as number

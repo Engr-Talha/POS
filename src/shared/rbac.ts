@@ -73,6 +73,14 @@ export const PERMISSIONS = {
   // cashier neither buys stock nor settles supplier accounts.
   'purchase.manage': 'manager', // create a purchase / GRN
   'purchase.view': 'manager', // read the purchase history
+  // CORRECTING A KEYING MISTAKE ON A BILL. Same role as creating one, deliberately: the manager who
+  // keys a delivery at 3pm is the one who spots at 3.05pm that they typed 100 for 10, and a correction
+  // nobody present may make is a correction that never happens — the shop just lives with wrong stock.
+  // The control here is not a higher role, it is that NOTHING IS ERASED: the void posts a contra, keeps
+  // the document and its number, demands a reason from the owner's list, and writes an audit row with a
+  // name on it. (A sale void is a supervisor's because it happens at the till in front of a customer
+  // with cash in the drawer; a purchase void is back-office paperwork against a supplier's bill.)
+  'purchase.void': 'manager', // reverse a wrongly-keyed purchase with a contra
   // Sending goods BACK to the supplier moves stock off the shelf and money off the bill, so it sits
   // with the rest of buying: a manager's job, never a cashier's. (The customer-facing refund is
   // `sale.refund` — a supervisor's — because it happens at the till, in front of the customer.)

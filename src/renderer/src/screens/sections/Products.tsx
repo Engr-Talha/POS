@@ -173,8 +173,8 @@ function ProductList({
         <div>
           <Title order={2}>Items</Title>
           <Text c="dimmed" size="sm" mt={4}>
-            Your catalogue. Search by stock code, name, Urdu name or barcode — old barcodes still
-            find their item.
+            Your catalogue. Search by stock code, name, Urdu name, shelf or barcode — old barcodes
+            still find their item. Results update as you type.
           </Text>
         </div>
 
@@ -195,7 +195,7 @@ function ProductList({
           <TextInput
             style={{ flex: 1, minWidth: 260 }}
             label="Search"
-            placeholder="Stock code, name, or scan a barcode…"
+            placeholder="Stock code, name, shelf, or scan a barcode…"
             leftSection={<Search size={16} />}
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
@@ -277,15 +277,17 @@ function ProductList({
               </Text>
             </Group>
 
-            <Table.ScrollContainer minWidth={900}>
+            <Table.ScrollContainer minWidth={1100}>
               <Table striped highlightOnHover withTableBorder>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Stock code</Table.Th>
                     <Table.Th>Item</Table.Th>
                     <Table.Th>Category</Table.Th>
+                    <Table.Th>Shelf</Table.Th>
                     <Table.Th>Barcode</Table.Th>
                     <Table.Th ta="right">Retail</Table.Th>
+                    <Table.Th ta="right">Wholesale</Table.Th>
                     <Table.Th ta="right">On hand</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -334,6 +336,12 @@ function ProductList({
                       </Table.Td>
 
                       <Table.Td>
+                        <Text size="sm" c={row.locationLabel ? undefined : 'dimmed'}>
+                          {row.locationLabel ?? '—'}
+                        </Text>
+                      </Table.Td>
+
+                      <Table.Td>
                         {row.primaryBarcode ? (
                           <Group gap={4} wrap="nowrap">
                             <BarcodeIcon size={13} opacity={0.6} />
@@ -351,6 +359,16 @@ function ProductList({
                       <Table.Td ta="right">
                         <Text size="sm">
                           {formatMoney(row.retailPrice, { symbol: currencySymbol })}
+                        </Text>
+                      </Table.Td>
+
+                      {/* Wholesale beside retail: the owner asked, because seeing it used to mean
+                          starting a bill. A zero wholesale price means "not set", not "free". */}
+                      <Table.Td ta="right">
+                        <Text size="sm" c={row.wholesalePrice > 0 ? undefined : 'dimmed'}>
+                          {row.wholesalePrice > 0
+                            ? formatMoney(row.wholesalePrice, { symbol: currencySymbol })
+                            : '—'}
                         </Text>
                       </Table.Td>
 

@@ -5,6 +5,8 @@ import * as suppliers from './suppliers'
 import * as supplierLedger from './supplier-ledger'
 import * as stock from './stock'
 import * as ledger from './ledger'
+import * as settings from './settings'
+import * as purchaseReturns from './purchase-returns'
 import { ACC } from '../db/chart-of-accounts'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
@@ -557,5 +559,401 @@ describe('listPurchases + getPurchase', () => {
   it('rejects a malformed date filter with a friendly message, not a crash or a silent empty page', () => {
     expectUserMessage(() => purchases.listPurchases(t.db, { to: 'garbage' }), /pick a date/i)
     expectUserMessage(() => purchases.listPurchases(t.db, { from: '31-12-2026' }), /pick a date/i)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CORRECTING A PURCHASE INVOICE — reverse + re-enter, never edit in place
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The client keyed a delivery wrong and could not fix it. A purchase has already moved stock and money,
+// so it is REVERSED with a contra and a corrected one is entered — never edited, which would silently
+// rewrite months the owner has already read.
+//
+// The three standing assertions in afterEach() run after EVERY test below, which is the point: the trial
+// balance must still balance, GL Inventory must still equal SUM(stock_movements.value_minor), and the
+// summed supplier balances must still equal GL Payable — after a void, and after a refused void.
+
+describe('cancelling a purchase', () => {
+  /** Receive `qty` @ `unitCostRs`, fully on account (nothing paid) — the case a void is designed for. */
+  function receiveOnAccount(
+    supplierId: number,
+    productId: number,
+    qty: number,
+    unitCostRs: number,
+    invoiceNo: string | null = null
+  ): ReturnType<typeof purchases.createPurchase> {
+    return purchases.createPurchase(t.db, manager, {
+      supplierId,
+      supplierInvoiceNo: invoiceNo,
+      lines: [{ productId, qtyM: qty * ONE_UNIT, unitCost: cost(unitCostRs) }],
+      payments: []
+    })
+  }
+
+  // ── THE ONE THAT MATTERS ──────────────────────────────────────────────────
+  it('reverses the stock at the ORIGINAL FROZEN cost, not at today’s weighted average', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+
+    // Buy 10 @ Rs 60, then 10 @ Rs 80. The weighted average is now Rs 70.
+    const first = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-1')
+    receiveOnAccount(supplierId, productId, 10, 80, 'BILL-2')
+
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(rs(1400)) // 600 + 800
+    expect(stock.onHand(t.db, productId)).toBe(20 * ONE_UNIT)
+
+    purchases.voidPurchase(t.db, manager, { id: first.id, reasonCode: 'keyed_wrong' })
+
+    // EXACTLY 600 comes off — what that delivery cost — NOT 700, which is what 10 @ today's average
+    // would have removed. Reversing at the average would take out money the shop never paid, and GL
+    // Inventory and the stock valuation would part company permanently.
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(rs(800))
+    expect(stock.onHand(t.db, productId)).toBe(10 * ONE_UNIT)
+
+    everythingHolds(t)
+  })
+
+  it('takes the bill back off the supplier’s account, and off their statement', () => {
+    const supplierId = makeSupplier('Acme Distributors')
+    const productId = makeProduct()
+
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(0)
+
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-7')
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(rs(600))
+    expect(ledger.accountBalance(t.db, ACC.PAYABLE)).toBe(rs(600))
+
+    purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' })
+
+    // Back exactly where it started — on BOTH sides. The contra DEBITED Payable; balance() excludes a
+    // voided purchase to match. If only one of those had been done, this pair would disagree while the
+    // trial balance stayed green (CLAUDE.md trap #17).
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(0)
+    expect(ledger.accountBalance(t.db, ACC.PAYABLE)).toBe(0)
+
+    // And it is no longer a charge the owner sees when they open the supplier's statement.
+    const statement = supplierLedger.ledger(t.db, { supplierId })
+    expect(statement.rows.filter((row) => row.kind === 'purchase')).toHaveLength(0)
+    expect(statement.balance).toBe(0)
+
+    everythingHolds(t)
+  })
+
+  it('keeps the document, its number and all its lines — nothing is ever deleted', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-42')
+
+    const voided = purchases.voidPurchase(t.db, manager, {
+      id: purchase.id,
+      reasonCode: 'keyed_wrong',
+      reasonText: 'Keyed 10 when 100 arrived'
+    })
+
+    expect(voided.status).toBe('voided')
+    expect(voided.voidReasonCode).toBe('keyed_wrong')
+    expect(voided.voidedBy).toBe(manager.id)
+    expect(voided.voidedAt).not.toBeNull()
+
+    // It KEEPS its number, its totals and its lines. purchase_lines cascades on delete, so deleting the
+    // header would erase every line while its movements and journal remained — figures with nothing left
+    // to explain them.
+    expect(voided.supplierInvoiceNo).toBe('BILL-42')
+    expect(voided.grandTotal).toBe(rs(600))
+    expect(voided.lines).toHaveLength(1)
+
+    // The ORIGINAL journal is untouched. The reversal is a SEPARATE, contra journal.
+    const journals = t.db
+      .prepare('SELECT ref_type FROM journals WHERE ref_id = ? ORDER BY id')
+      .pluck()
+      .all(String(purchase.id)) as string[]
+    expect(journals).toEqual(['purchase', 'purchase_void'])
+
+    everythingHolds(t)
+  })
+
+  it('refuses to cancel the same purchase twice', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-3')
+
+    purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' })
+
+    // A second void would reverse the stock and the journal AGAIN — inventory would fall by the value of
+    // goods that were only ever received once.
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /already been cancelled/i
+    )
+
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(0)
+    expect(stock.onHand(t.db, productId)).toBe(0)
+
+    everythingHolds(t)
+  })
+
+  it('refuses a purchase that already has goods returned to the supplier', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-4')
+
+    purchaseReturns.createPurchaseReturn(t.db, manager, {
+      purchaseId: purchase.id,
+      lines: [{ purchaseLineId: purchase.lines[0]!.id, qtyM: 2 * ONE_UNIT }],
+      settlement: 'supplier_credit',
+      reasonCode: 'damaged'
+    })
+
+    // The return has ALREADY reversed part of this bill. A void reverses the WHOLE of it, so together
+    // they would take the returned goods off twice and credit the supplier twice.
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /already returned to the supplier/i
+    )
+
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('completed')
+    everythingHolds(t)
+  })
+
+  it('refuses a purchase that has already been paid, and says what to do instead', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+
+    const purchase = purchases.createPurchase(t.db, manager, {
+      supplierId,
+      supplierInvoiceNo: 'BILL-5',
+      lines: [{ productId, qtyM: 10 * ONE_UNIT, unitCost: cost(60) }],
+      payments: [{ methodLookupId: cash(), amount: rs(600) }]
+    })
+
+    // A contra can reverse a BOOK entry; it cannot walk to the distributor and bring the cash back.
+    // Contra-posting would DEBIT Cash — the books would claim the money is back in the till, and the
+    // shop would be short by exactly that much at the next count, with the trial balance still green.
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /already been paid/i
+    )
+
+    expect(ledger.accountBalance(t.db, ACC.CASH)).toBe(rs(-600))
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('completed')
+    everythingHolds(t)
+  })
+
+  it('refuses a locked month with a sentence, not a stack trace', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-6')
+
+    const now = new Date()
+    ledger.lockPeriod(t.db, now.getFullYear(), now.getMonth() + 1, manager.id)
+
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /has been closed.*unlock/is
+    )
+
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('completed')
+    everythingHolds(t)
+  })
+
+  it('records WHO cancelled it and WHY — an audit row', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-8')
+
+    purchases.voidPurchase(t.db, manager, {
+      id: purchase.id,
+      reasonCode: 'duplicate_entry',
+      reasonText: 'Same delivery entered twice'
+    })
+
+    const row = t.db
+      .prepare(
+        `SELECT user_id, user_name, user_role, entity, entity_id, reason_code, reason_text
+           FROM audit_log WHERE action = 'purchase.void'`
+      )
+      .get() as Record<string, string | number>
+
+    expect(row['user_id']).toBe(manager.id)
+    expect(row['user_name']).toBe('Meena Manager')
+    expect(row['user_role']).toBe('manager')
+    expect(row['entity']).toBe('purchase')
+    expect(row['entity_id']).toBe(String(purchase.id))
+    expect(row['reason_code']).toBe('duplicate_entry')
+    expect(row['reason_text']).toBe('Same delivery entered twice')
+
+    everythingHolds(t)
+  })
+
+  it('demands a reason from the owner’s own list — never a hardcoded one', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-9')
+
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'made_up_code' }),
+      /choose a reason/i
+    )
+
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('completed')
+    everythingHolds(t)
+  })
+
+  it('refuses a cashier — the check is in MAIN, not the hidden button', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-10')
+    const cashier = makeUser('cashier', 'kamal', 'Kamal Cashier')
+
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, cashier, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /needs a manager/i
+    )
+
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('completed')
+    everythingHolds(t)
+  })
+
+  // ── The stock has since been SOLD ────────────────────────────────────────
+  it('follows the shop’s own negative-stock setting when the goods are already sold', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-11')
+
+    // 8 of the 10 have left the shelf. Reversing all 10 would leave −8.
+    stock.adjust(t.db, manager, {
+      productId,
+      qtyM: -8 * ONE_UNIT,
+      reasonCode: 'damage'
+    })
+    expect(stock.onHand(t.db, productId)).toBe(2 * ONE_UNIT)
+
+    // Default is 'warn': refused until the manager confirms — enforced in MAIN, because a warning the
+    // renderer could simply not show is not a warning.
+    expectUserMessage(
+      () => purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' }),
+      /already been sold.*Confirm to continue/is
+    )
+
+    // 'block' means blocked, and confirming cannot rescue it.
+    settings.set(t.db, 'selling.negativeStock', 'block')
+    expectUserMessage(
+      () =>
+        purchases.voidPurchase(t.db, manager, {
+          id: purchase.id,
+          reasonCode: 'keyed_wrong',
+          acceptNegativeStock: true
+        }),
+      /less than zero in stock/i
+    )
+
+    // Back to 'warn', confirmed: it goes through, and the shelf legitimately goes negative until the
+    // corrected invoice is entered. Refusing outright would leave 10 on the books when 1 arrived — a
+    // bigger lie than a temporarily negative shelf.
+    settings.set(t.db, 'selling.negativeStock', 'warn')
+    purchases.voidPurchase(t.db, manager, {
+      id: purchase.id,
+      reasonCode: 'keyed_wrong',
+      acceptNegativeStock: true
+    })
+
+    expect(stock.onHand(t.db, productId)).toBe(-8 * ONE_UNIT)
+    everythingHolds(t)
+  })
+
+  it('reverses a free-sample receipt, which posted no journal at all', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+
+    // Everything zero: stock moves, but there is nothing to post — ledger.post rightly refuses a
+    // one-line journal. The void must cope with an original that has no journal to mirror.
+    const purchase = receiveOnAccount(supplierId, productId, 10, 0, 'FREE-1')
+    expect(purchase.journalId).toBeNull()
+    expect(stock.onHand(t.db, productId)).toBe(10 * ONE_UNIT)
+
+    purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' })
+
+    expect(stock.onHand(t.db, productId)).toBe(0)
+    expect(purchases.getPurchase(t.db, purchase.id).status).toBe('voided')
+    everythingHolds(t)
+  })
+
+  it('reverses every line of a multi-line bill, each at its own frozen cost', () => {
+    const supplierId = makeSupplier('Acme')
+    const productA = makeProduct()
+    const productB = makeProduct()
+
+    const purchase = purchases.createPurchase(t.db, manager, {
+      supplierId,
+      supplierInvoiceNo: 'BILL-12',
+      lines: [
+        { productId: productA, qtyM: 10 * ONE_UNIT, unitCost: cost(60) }, // Rs 600
+        { productId: productB, qtyM: 5 * ONE_UNIT, unitCost: cost(20) } // Rs 100
+      ],
+      payments: []
+    })
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(rs(700))
+
+    purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'wrong_supplier' })
+
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(0)
+    expect(stock.onHand(t.db, productA)).toBe(0)
+    expect(stock.onHand(t.db, productB)).toBe(0)
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(0)
+    everythingHolds(t)
+  })
+
+  it('reverses the recoverable input tax too, not just the goods', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+
+    const purchase = purchases.createPurchase(t.db, manager, {
+      supplierId,
+      supplierInvoiceNo: 'BILL-13',
+      taxTotal: rs(102), // 17% input tax on Rs 600
+      lines: [{ productId, qtyM: 10 * ONE_UNIT, unitCost: cost(60) }],
+      payments: []
+    })
+
+    expect(ledger.accountBalance(t.db, ACC.INPUT_TAX)).toBe(rs(102))
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(rs(702))
+
+    // The contra mirrors the ORIGINAL journal's own lines, so the tax leg reverses with everything else
+    // — no special case, and it would still be right if the tax rules changed next year.
+    purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' })
+
+    expect(ledger.accountBalance(t.db, ACC.INPUT_TAX)).toBe(0)
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(0)
+    everythingHolds(t)
+  })
+
+  // ── The whole point, end to end ──────────────────────────────────────────
+  it('the shopkeeper’s correction: cancel the wrong bill, enter the right one', () => {
+    const supplierId = makeSupplier('Acme Distributors')
+    const productId = makeProduct()
+
+    // Keyed 100 @ Rs 60 when 10 arrived. Rs 6,000 of stock the shop never received.
+    const wrong = receiveOnAccount(supplierId, productId, 100, 60, 'BILL-77')
+    expect(stock.onHand(t.db, productId)).toBe(100 * ONE_UNIT)
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(rs(6000))
+
+    purchases.voidPurchase(t.db, manager, {
+      id: wrong.id,
+      reasonCode: 'keyed_wrong',
+      reasonText: 'Keyed 100, only 10 arrived'
+    })
+    receiveOnAccount(supplierId, productId, 10, 60, 'BILL-77')
+
+    // The shelf and the bill are both right, and BOTH documents survive to explain how.
+    expect(stock.onHand(t.db, productId)).toBe(10 * ONE_UNIT)
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(rs(600))
+    expect(ledger.accountBalance(t.db, ACC.INVENTORY)).toBe(rs(600))
+
+    const all = purchases.listPurchases(t.db)
+    expect(all.total).toBe(2)
+    expect(all.rows.filter((row) => row.status === 'voided')).toHaveLength(1)
+
+    everythingHolds(t)
   })
 })

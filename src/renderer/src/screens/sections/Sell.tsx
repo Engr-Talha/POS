@@ -1195,7 +1195,7 @@ export function Sell({
                       <Table.Th ta="right" w={140}>
                         Amount
                       </Table.Th>
-                      <Table.Th w={44} />
+                      <Table.Th w={84} />
                     </Table.Tr>
                   </Table.Thead>
 
@@ -1342,17 +1342,37 @@ export function Sell({
                           </Table.Td>
 
                           <Table.Td>
-                            <ActionIcon
-                              variant="subtle"
-                              color="red"
-                              aria-label={`Remove ${name}`}
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                removeAt(index)
-                              }}
-                            >
-                              <Trash2 size={16} />
-                            </ActionIcon>
+                            <Group gap={2} wrap="nowrap" justify="flex-end">
+                              {/* The SAME modal F3 opens — one path to a price override, never two.
+                                  Shown to everyone: if the role may not override, the modal says so
+                                  in plain words rather than the button quietly not being there. */}
+                              <Tooltip label="Change price (F3)">
+                                <ActionIcon
+                                  variant="subtle"
+                                  color="gray"
+                                  aria-label={`Change the price of ${name}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    setSelected(index)
+                                    setModal({ kind: 'line', index })
+                                  }}
+                                >
+                                  <Tag size={16} />
+                                </ActionIcon>
+                              </Tooltip>
+
+                              <ActionIcon
+                                variant="subtle"
+                                color="red"
+                                aria-label={`Remove ${name}`}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  removeAt(index)
+                                }}
+                              >
+                                <Trash2 size={16} />
+                              </ActionIcon>
+                            </Group>
                           </Table.Td>
                         </Table.Tr>
                       )
@@ -2155,6 +2175,18 @@ function LineModal({
               onChange={setReason}
             />
 
+            {/* The role check that MATTERS is in the main process. This only explains it: a cashier
+                who cannot re-price is told why, instead of hunting for a button that is not there. */}
+            {line.openItem == null && !mayOverride && (
+              <>
+                <Divider label="Changing the price" labelPosition="center" />
+                <Alert color="gray" icon={<CircleAlert size={18} />}>
+                  Only a supervisor can change the price of an item. Ask one to sign in, or give a
+                  discount on this line instead.
+                </Alert>
+              </>
+            )}
+
             {line.openItem == null && mayOverride && (
               <>
                 <Divider label="Or change the price" labelPosition="center" />
@@ -2165,8 +2197,8 @@ function LineModal({
                 ) : (
                   <Stack gap={6}>
                     <MoneyInput
-                      label="New price"
-                      description="Recorded against your name in the audit log."
+                      label="New price for this bill only"
+                      description={`Replaces the retail price of ${money(catalogPrice)}. This bill only — the item keeps its catalogue price. Recorded against your name in the audit log.`}
                       value={override}
                       onChange={setOverride}
                     />
