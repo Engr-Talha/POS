@@ -180,7 +180,8 @@ const api: PosApi = {
   purchases: {
     create: (input) => ipcRenderer.invoke(IPC.purchaseCreate, input),
     list: (input) => ipcRenderer.invoke(IPC.purchaseList, input),
-    get: (input) => ipcRenderer.invoke(IPC.purchaseGet, input)
+    get: (input) => ipcRenderer.invoke(IPC.purchaseGet, input),
+    void: (input) => ipcRenderer.invoke(IPC.purchaseVoid, input)
   },
 
   // Goods going BACK to the supplier, and the credit that follows. `create` sends only WHICH purchase

@@ -862,6 +862,60 @@ describe('cancelling a purchase', () => {
     everythingHolds(t)
   })
 
+  /**
+   * THE `technical` LINE IS A CONTRACT, NOT A LOG MESSAGE — pinned because the UI branches on it.
+   *
+   * Both negative-stock refusals are ErrorCode.VALIDATION, exactly like "already paid" and "has
+   * returns". The ONLY thing that tells the Correct-this-invoice modal to offer "Cancel it anyway"
+   * rather than a dead-end error is the substring 'negative-stock warning not yet accepted' in the
+   * technical line (Purchases.tsx, VoidPurchaseModal.submit).
+   *
+   * Reword that sentence and NOTHING ELSE FAILS: the confirm button silently disappears, and a manager
+   * correcting a delivery that has since partly sold hits a refusal with no way past it — with a green
+   * suite. That is precisely the class of break this repo keeps getting bitten by (trap #17's cousin:
+   * a derived behaviour that only ONE path knows about). So the seam is asserted here, in main, where
+   * the string actually lives.
+   *
+   * If this test fails because the wording changed, update the renderer's check IN THE SAME COMMIT.
+   */
+  it('signals the negative-stock WARNING and the BLOCK with distinguishable technical lines', () => {
+    const supplierId = makeSupplier('Acme')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 10, 60, 'BILL-TECH')
+
+    stock.adjust(t.db, manager, { productId, qtyM: -8 * ONE_UNIT, reasonCode: 'damage' })
+
+    // 'warn', not yet confirmed → the modal MUST recognise this one and offer the confirm.
+    let warned: unknown
+    try {
+      purchases.voidPurchase(t.db, manager, { id: purchase.id, reasonCode: 'keyed_wrong' })
+    } catch (caught) {
+      warned = caught
+    }
+    // NOTE the property: AppError has no `technical` field — the technical string is passed to
+    // `super()`, so it lives on `.message`, and the IPC envelope's `error.technical` is built from
+    // `error.message` (ipc/index.ts). `.message` here IS what the renderer branches on.
+    expect((warned as Error).message).toContain('negative-stock warning not yet accepted')
+
+    // 'block' → a refusal, NOT a question. It must NOT carry the warning marker, or the modal would
+    // offer an "anyway" button that main will refuse forever however often it is pressed.
+    settings.set(t.db, 'selling.negativeStock', 'block')
+    let blocked: unknown
+    try {
+      purchases.voidPurchase(t.db, manager, {
+        id: purchase.id,
+        reasonCode: 'keyed_wrong',
+        acceptNegativeStock: true
+      })
+    } catch (caught) {
+      blocked = caught
+    }
+    expect((blocked as Error).message).not.toContain('negative-stock warning not yet accepted')
+    expect((blocked as Error).message).toContain('selling.negativeStock=block')
+
+    everythingHolds(t)
+  })
+
   it('reverses a free-sample receipt, which posted no journal at all', () => {
     const supplierId = makeSupplier('Acme')
     const productId = makeProduct()

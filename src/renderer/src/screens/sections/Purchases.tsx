@@ -8,6 +8,7 @@ import {
   Divider,
   Drawer,
   Group,
+  Modal,
   Select,
   Skeleton,
   Stack,
@@ -25,6 +26,7 @@ import {
   CircleAlert,
   Clock,
   CreditCard,
+  FileX2,
   Hash,
   Layers,
   Package,
@@ -54,7 +56,7 @@ import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
 import { formatQty } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
-import { CostInput, MoneyInput, QtyInput, useLookupList } from './ProductForm'
+import { CostInput, LookupCodeSelect, MoneyInput, QtyInput, useLookupList } from './ProductForm'
 import { PurchaseReturnHistory, PurchaseReturnModal } from './PurchaseReturn'
 
 /**
@@ -139,6 +141,9 @@ export function Purchases({
   // Sending goods back is its own permission — a manager's, like the purchase it reverses. Enforced in
   // MAIN; hiding the button here is a courtesy, not a control (CLAUDE.md §4).
   const canReturn = roleCan(userRole, 'purchaseReturn.manage')
+  // Cancelling a wrongly-keyed bill is its own permission too — a manager's, like the purchase it
+  // undoes. Enforced in MAIN; hiding the button here is a courtesy, not a control (CLAUDE.md §4).
+  const canVoid = roleCan(userRole, 'purchase.void')
 
   // Bumped when a return commits, so the returns-to-supplier history re-pulls even though it is mounted
   // on the other tab — the drawer that recorded it lives over on this one.
@@ -171,6 +176,7 @@ export function Purchases({
           currencySymbol={currencySymbol}
           canManage={canManage}
           canReturn={canReturn}
+          canVoid={canVoid}
           onNew={() => setView({ mode: 'new' })}
           onReturned={() => setReturnsKey((key) => key + 1)}
         />
@@ -194,6 +200,7 @@ function PurchaseList({
   currencySymbol,
   canManage,
   canReturn,
+  canVoid,
   onNew,
   onReturned
 }: {
@@ -201,6 +208,7 @@ function PurchaseList({
   currencySymbol: string
   canManage: boolean
   canReturn: boolean
+  canVoid: boolean
   onNew: () => void
   /** A committed return is money and stock moving — the returns history reloads with it. */
   onReturned: () => void
@@ -455,7 +463,11 @@ function PurchaseList({
         readOnly={readOnly}
         currencySymbol={currencySymbol}
         canReturn={canReturn}
+        canVoid={canVoid}
         onReturned={onReturned}
+        // A cancellation changes this bill's row in the list behind the drawer — its status, and the
+        // "owed" the shop no longer owes. Re-pull the page so the shopkeeper SEES it land.
+        onVoided={() => void load()}
         onClose={() => setSelectedId(null)}
       />
     </Stack>
@@ -471,20 +483,26 @@ function PurchaseDetailDrawer({
   readOnly,
   currencySymbol,
   canReturn,
+  canVoid,
   onReturned,
+  onVoided,
   onClose
 }: {
   purchaseId: number | null
   readOnly: boolean
   currencySymbol: string
   canReturn: boolean
+  canVoid: boolean
   /** A committed return changes this bill's returnable quantities — the history reloads with it. */
   onReturned: () => void
+  /** A cancelled bill changes its own row in the list behind us — status, and what is owed. */
+  onVoided: () => void
   onClose: () => void
 }): React.JSX.Element {
   const [purchase, setPurchase] = useState<PurchaseDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [returning, setReturning] = useState(false)
+  const [voiding, setVoiding] = useState(false)
 
   // Bumped after a return commits, to re-pull this bill. The lines themselves never change — a purchase
   // is frozen — but re-reading keeps the drawer honest if anything else about it moves.
@@ -717,6 +735,40 @@ function PurchaseDetailDrawer({
               </Button>
             </Tooltip>
           </Group>
+
+          {/* ── Correct a wrongly-keyed bill ─────────────────────────────── */}
+          {/* The OTHER thing that can be wrong with a delivery: not the goods, the typing. Hidden once
+              the bill is already cancelled — there is nothing left to correct. Gated 'purchase.void' +
+              assertWritable in MAIN; this button is the courtesy. */}
+          {purchase.status !== 'voided' && (
+            <>
+              <Divider />
+              <Group justify="space-between" align="center" wrap="nowrap">
+                <Text size="xs" c="dimmed" maw={320}>
+                  Keyed this bill wrong? Cancel it — the stock comes back off and the bill is no longer
+                  owed. The cancelled bill is kept for the record, then you enter it again correctly.
+                </Text>
+                <Tooltip
+                  label={
+                    readOnly
+                      ? 'Your licence has expired — corrections are paused'
+                      : 'Only a manager can correct an invoice'
+                  }
+                  disabled={canVoid && !readOnly}
+                >
+                  <Button
+                    variant="light"
+                    color="red"
+                    leftSection={<FileX2 size={16} />}
+                    disabled={readOnly || !canVoid}
+                    onClick={() => setVoiding(true)}
+                  >
+                    Correct this invoice
+                  </Button>
+                </Tooltip>
+              </Group>
+            </>
+          )}
         </Stack>
       )}
 
@@ -731,7 +783,243 @@ function PurchaseDetailDrawer({
           onReturned()
         }}
       />
+
+      <VoidPurchaseModal
+        purchase={purchase}
+        opened={voiding}
+        currencySymbol={currencySymbol}
+        onClose={() => setVoiding(false)}
+        onDone={() => {
+          setVoiding(false)
+          // Re-pull the bill so the red "Cancelled" banner appears where the shopkeeper is looking, and
+          // tell the list behind us so its row stops claiming the money is owed.
+          setReloadKey((key) => key + 1)
+          onVoided()
+        }}
+      />
     </Drawer>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "Correct this invoice" — the confirmation, because a cancellation cannot be undone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * MAIN owns every refusal here, and every refusal it sends is a SENTENCE THE SHOPKEEPER CAN ACT ON —
+ * "already paid … record a return to the supplier instead", "goods already returned against it", "less
+ * than zero in stock". Those sentences ARE the feature, so `result.error.userMessage` goes on screen
+ * verbatim. Replacing them with "Something went wrong" would throw away the only thing that tells the
+ * shopkeeper what to do next.
+ *
+ * THE NEGATIVE-STOCK CONFIRM. Reversing a delivery that has since been partly SOLD drives the shelf
+ * below zero. On the shop's default `selling.negativeStock: 'warn'` main refuses the FIRST attempt and
+ * explains, exactly as the Sell screen warns before a negative-stock sale; we show that refusal and
+ * offer a confirm that re-sends with `acceptNegativeStock: true`. It is never set unconditionally —
+ * that would silently defeat a guard the owner asked for. On 'block' the flag cannot rescue it and main
+ * refuses again, correctly; the message says so and the confirm is not offered a second time.
+ */
+function VoidPurchaseModal({
+  purchase,
+  opened,
+  currencySymbol,
+  onClose,
+  onDone
+}: {
+  purchase: PurchaseDetail | null
+  opened: boolean
+  currencySymbol: string
+  onClose: () => void
+  onDone: () => void
+}): React.JSX.Element {
+  const [reasonCode, setReasonCode] = useState<string | null>(null)
+  const [reasonText, setReasonText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  /** Main has warned that the shelf will go negative and is waiting to be told to go ahead anyway. */
+  const [negativeWarning, setNegativeWarning] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // A fresh open is a fresh decision — never inherit the last bill's reason or a stale warning.
+  useEffect(() => {
+    if (!opened) return
+    setReasonCode(null)
+    setReasonText('')
+    setError(null)
+    setNegativeWarning(null)
+    setBusy(false)
+  }, [opened])
+
+  async function submit(acceptNegativeStock: boolean): Promise<void> {
+    if (purchase === null || reasonCode === null || busy) return
+
+    setBusy(true)
+    setError(null)
+
+    const result = await window.pos.purchases.void({
+      id: purchase.id,
+      reasonCode,
+      reasonText: reasonText.trim() === '' ? null : reasonText.trim(),
+      // ONLY once the manager has seen main's warning and pressed the confirm. Sending it on the first
+      // attempt would defeat the guard the owner's own setting asked for.
+      ...(acceptNegativeStock ? { acceptNegativeStock: true } : {})
+    })
+
+    setBusy(false)
+
+    if (!result.ok) {
+      // Main signals the not-yet-accepted negative-stock case by REFUSING with a VALIDATION error whose
+      // technical line says so (services/purchases.ts assertReversalStockPolicy). The 'block' policy
+      // throws a different technical line and is NOT offered a confirm — it is a refusal, not a warning.
+      const technical = result.error.technical ?? ''
+      if (technical.includes('negative-stock warning not yet accepted')) {
+        setNegativeWarning(result.error.userMessage)
+        return
+      }
+      // Every other refusal — paid, has returns, already cancelled, locked month — verbatim.
+      setError(result.error.userMessage)
+      setNegativeWarning(null)
+      return
+    }
+
+    notifications.show({
+      color: 'green',
+      title: 'Invoice cancelled',
+      message: `${purchase.supplierInvoiceNo ? `Bill ${purchase.supplierInvoiceNo}` : 'The bill'} has been cancelled. The stock has come back off and it is no longer owed — you can enter it again correctly now.`
+    })
+
+    onDone()
+  }
+
+  return (
+    <Modal
+      opened={opened && purchase !== null}
+      onClose={busy ? () => {} : onClose}
+      title={
+        <Group gap="sm">
+          <FileX2 size={18} />
+          <Text fw={650}>Correct this invoice</Text>
+        </Group>
+      }
+      centered
+      size="lg"
+    >
+      {purchase === null ? null : (
+        <Stack gap="md">
+          {/* WHICH bill. A manager with three deliveries open must not cancel the wrong one. */}
+          <Card withBorder padding="md">
+            <Stack gap={6}>
+              <Group justify="space-between" wrap="nowrap">
+                <Text size="sm" c="dimmed">
+                  Supplier
+                </Text>
+                <Text size="sm" fw={600}>
+                  {purchase.supplierName ?? 'Supplier'}
+                </Text>
+              </Group>
+              {purchase.supplierInvoiceNo ? (
+                <Group justify="space-between" wrap="nowrap">
+                  <Text size="sm" c="dimmed">
+                    Bill number
+                  </Text>
+                  <Text size="sm" fw={600}>
+                    {purchase.supplierInvoiceNo}
+                  </Text>
+                </Group>
+              ) : null}
+              <Group justify="space-between" wrap="nowrap">
+                <Text size="sm" c="dimmed">
+                  Total
+                </Text>
+                <Text size="sm" fw={700}>
+                  {formatMoney(purchase.grandTotal, { symbol: currencySymbol })}
+                </Text>
+              </Group>
+            </Stack>
+          </Card>
+
+          {/* WHAT WILL HAPPEN, in the plainest words we have. */}
+          <Alert color="orange" variant="light" icon={<TriangleAlert size={18} />}>
+            <Text size="sm">
+              This bill will be cancelled. Everything on it comes back off your stock, and you will no
+              longer owe this supplier for it. The cancelled bill is kept for the record — it keeps its
+              number and all its lines — so you can enter the delivery again with the right figures.
+              This cannot be undone.
+            </Text>
+          </Alert>
+
+          <LookupCodeSelect
+            listKey="void_reason"
+            label="Reason"
+            description="Why this bill is being cancelled. Add a new reason with +."
+            value={reasonCode}
+            onChange={(value) => {
+              setReasonCode(value)
+              setError(null)
+            }}
+            disabled={busy}
+            required
+          />
+
+          <Textarea
+            label="Note (optional)"
+            description="Any extra detail — e.g. keyed 10 not 100."
+            autosize
+            minRows={1}
+            maxRows={4}
+            maxLength={500}
+            disabled={busy}
+            value={reasonText}
+            onChange={(event) => setReasonText(event.currentTarget.value)}
+          />
+
+          {/* MAIN's own refusal, word for word — it is the sentence that says what to do next. */}
+          {error && (
+            <Alert color="red" variant="light" icon={<CircleAlert size={18} />} title="Not cancelled">
+              <Text size="sm">{error}</Text>
+            </Alert>
+          )}
+
+          {/* The one refusal that is really a QUESTION: main is waiting to be told to go ahead. */}
+          {negativeWarning && (
+            <Alert
+              color="orange"
+              variant="light"
+              icon={<TriangleAlert size={18} />}
+              title="Some of this has already been sold"
+            >
+              <Text size="sm">{negativeWarning}</Text>
+            </Alert>
+          )}
+
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" disabled={busy} onClick={onClose}>
+              Keep the bill
+            </Button>
+            {negativeWarning ? (
+              <Button
+                color="red"
+                leftSection={<FileX2 size={16} />}
+                loading={busy}
+                disabled={reasonCode === null}
+                onClick={() => void submit(true)}
+              >
+                Cancel it anyway
+              </Button>
+            ) : (
+              <Button
+                color="red"
+                leftSection={<FileX2 size={16} />}
+                loading={busy}
+                disabled={reasonCode === null}
+                onClick={() => void submit(false)}
+              >
+                Cancel this invoice
+              </Button>
+            )}
+          </Group>
+        </Stack>
+      )}
+    </Modal>
   )
 }
 

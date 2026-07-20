@@ -123,7 +123,12 @@ import {
   type SupplierLedgerPage,
   type SupplierWithBalance
 } from '@shared/suppliers'
-import { CreatePurchaseInput, ListPurchasesInput, GetPurchaseInput } from '@shared/purchases'
+import {
+  CreatePurchaseInput,
+  ListPurchasesInput,
+  GetPurchaseInput,
+  VoidPurchaseInput
+} from '@shared/purchases'
 import {
   CreatePurchaseReturnInput,
   ListPurchaseReturnsInput,
@@ -1498,6 +1503,26 @@ export function registerIpcHandlers(): void {
   handle(IPC.purchaseGet, GetPurchaseInput, (input) => {
     session.requirePermissionOf('purchase.view')
     return purchasesService.getPurchase(getDb(), input.id)
+  })
+
+  /**
+   * CANCEL A WRONGLY-KEYED BILL. MANAGER ONLY — and the check is here, in MAIN, not in a hidden button.
+   *
+   * `sales.voidSale` pointing the other way. The service takes the stock back off at each ORIGINAL
+   * movement's own frozen unit_cost (never today's weighted average), contra-posts the journal by
+   * mirroring the original's own lines, MARKS the document rather than deleting it, and audits
+   * `purchase.void` with a reason code from the owner's own void_reason list. The bill KEEPS its number
+   * and every line, forever.
+   *
+   * It refuses — with a shopkeeper-readable sentence each time — a bill that has already been paid (a
+   * contra cannot un-spend real money; record a supplier return instead), one with goods already
+   * returned against it, one already cancelled, and a locked month. The service re-checks the role
+   * independently; the two agree.
+   */
+  handle(IPC.purchaseVoid, VoidPurchaseInput, (input) => {
+    const user = session.requirePermissionOf('purchase.void')
+    assertWritable()
+    return purchasesService.voidPurchase(getDb(), user, input)
   })
 
   // ── Returns to supplier — goods going BACK, and the credit that follows ─────

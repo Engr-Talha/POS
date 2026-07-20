@@ -160,6 +160,14 @@ export const IPC = {
   purchaseList: 'purchase:list',
   purchaseGet: 'purchase:get',
 
+  // CANCEL A WRONGLY-KEYED BILL — `sales.voidSale` pointing the other way. The stock comes back OFF at
+  // the cost it came ON at, the journal is contra-posted by mirroring the original's own lines, and the
+  // document is MARKED, never deleted — it keeps its number and every line so the books can still
+  // explain themselves. A WRITE: 'purchase.void' (a manager's) + assertWritable() in MAIN. The service
+  // refuses a paid bill, one with supplier returns against it, an already-cancelled one and a locked
+  // month — each with a sentence the shopkeeper can act on.
+  purchaseVoid: 'purchase:void',
+
   // ── RETURNS TO SUPPLIER — goods going BACK, and the credit that follows ──────
   //
   // The mirror of `returns:*`, pointing the other way: a customer return takes stock IN and pays money

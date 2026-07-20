@@ -130,7 +130,8 @@ import type {
   ListPurchasesInput,
   GetPurchaseInput,
   PurchaseDetail,
-  PurchaseListItem
+  PurchaseListItem,
+  VoidPurchaseInput
 } from './purchases'
 import type {
   CreatePurchaseReturnInput,
@@ -569,6 +570,19 @@ export interface PosApi {
     /** The purchases list — paginated and indexed, newest first. Filterable by supplier and date range. */
     list: (input: ListPurchasesInput) => Promise<Result<PagedResult<PurchaseListItem>>>
     get: (input: GetPurchaseInput) => Promise<Result<PurchaseDetail>>
+    /**
+     * CANCEL A WRONGLY-KEYED BILL — the shopkeeper's "Correct this invoice". `sales.void` pointing the
+     * other way: the stock comes back OFF at the cost it came ON at, the journal is contra-posted by
+     * mirroring the original's own lines, and the document is MARKED, never deleted — it keeps its
+     * number and every line. Returns the same frozen `PurchaseDetail`, now `status: 'voided'`.
+     *
+     * MAIN refuses a paid bill, one with supplier returns against it, an already-cancelled one and a
+     * locked month, each with a sentence to show the shopkeeper verbatim. Reversing stock that has since
+     * been SOLD would drive the shelf negative: on the shop's default `selling.negativeStock: 'warn'`
+     * the first attempt is refused, and the screen re-sends with `acceptNegativeStock: true` once the
+     * manager has seen the warning and confirmed. On 'block' that flag cannot rescue it — MAIN decides.
+     */
+    void: (input: VoidPurchaseInput) => Promise<Result<PurchaseDetail>>
   }
 
   /**
