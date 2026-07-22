@@ -222,14 +222,19 @@ export type ImportResult = {
  */
 const MAX_ERRORS = 500
 
-/** exceljs types its buffer as an ArrayBuffer; in Node it hands back — and takes — a real Buffer. */
-type ExcelBuffer = Parameters<Xlsx['load']>[0]
+/**
+ * exceljs types its buffer as an ArrayBuffer; in Node it hands back — and takes — a real Buffer.
+ *
+ * EXPORTED so the anytime product importer (product-import.ts) loads a workbook through the exact same
+ * type, rather than re-declaring a subtly different one.
+ */
+export type ExcelBuffer = Parameters<Xlsx['load']>[0]
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // THE FLOAT TRAP — reading a cell
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-type CellRead = {
+export type CellRead = {
   /** The cell AS TEXT. The only form in which a number is allowed to leave this section of the file. */
   text: string
   /** Excel handed us a number, rather than text the owner typed. */
@@ -257,14 +262,14 @@ const BLANK: CellRead = { text: '', wasNumber: false, isPercent: false }
  * A formula is judged on the value it actually carries. Nested, because exceljs can wrap a shared
  * formula's result in another result.
  */
-function effectiveValue(value: unknown): unknown {
+export function effectiveValue(value: unknown): unknown {
   if (value !== null && typeof value === 'object' && 'result' in (value as Record<string, unknown>)) {
     return effectiveValue((value as Record<string, unknown>)['result'])
   }
   return value
 }
 
-function readCell(row: Row, column: number | undefined): CellRead {
+export function readCell(row: Row, column: number | undefined): CellRead {
   if (column === undefined) return BLANK
 
   const cell = row.getCell(column)
@@ -292,7 +297,7 @@ function readCell(row: Row, column: number | undefined): CellRead {
  * Math.round — because every one of those re-admits the float that the integer discipline exists to
  * keep out, and it does it silently.
  */
-function valueToText(value: unknown): string {
+export function valueToText(value: unknown): string {
   if (value === null || value === undefined) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'number') return String(value) // ← the whole trap, disarmed here.
@@ -332,7 +337,7 @@ function valueToText(value: unknown): string {
  * is everything that is not a letter or a digit — which also lets "SIZE (VOLUME) - UOM" survive the
  * brackets and the dash.
  */
-function normalizeHeader(text: string): string {
+export function normalizeHeader(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
@@ -386,7 +391,7 @@ const CASH_ALIASES: Record<CashKey, string[]> = {
 }
 
 /** key -> the 1-based column number it was found in. Absent = the sheet does not have that column. */
-type ColumnMap<K extends string> = Partial<Record<K, number>>
+export type ColumnMap<K extends string> = Partial<Record<K, number>>
 
 /**
  * Match the sheet's header row against the contract.
@@ -394,7 +399,7 @@ type ColumnMap<K extends string> = Partial<Record<K, number>>
  * TWO COLUMNS THAT MEAN THE SAME THING IS AN ERROR, not a race won by whichever came last. A sheet with
  * both "RETAIL PRICE" and "SALE PRICE" in it is a sheet whose author has to say which one they meant.
  */
-function mapColumns<K extends string>(
+export function mapColumns<K extends string>(
   sheet: Worksheet,
   columns: ReadonlyArray<ColumnSpec<K>>,
   aliases: Record<K, string[]>,
@@ -438,7 +443,7 @@ function mapColumns<K extends string>(
  * and being told about one broken cell at a time — upload, fix, upload, fix — across a 900-row sheet is
  * how people give up and type it all in by hand instead.
  */
-class ErrorSink {
+export class ErrorSink {
   readonly rows: ImportError[] = []
   private overflowed = false
 
@@ -486,7 +491,7 @@ class ErrorSink {
  *   null       the cell is WRONG. A problem has already been recorded against it; the caller only has
  *              to know that this row is not safe to import.
  */
-class RowReader {
+export class RowReader {
   /** How many problems the file had BEFORE this row was read. See `failed`. */
   private readonly startedWith: number
 
@@ -808,7 +813,7 @@ export async function parseWorkbook(db: DB, buffer: Buffer): Promise<ImportPrevi
 }
 
 /** Sheets are matched by name, ignoring case and spacing — "customer udhaar" is "Customer Udhaar". */
-function findSheet(workbook: Workbook, name: string): Worksheet | undefined {
+export function findSheet(workbook: Workbook, name: string): Worksheet | undefined {
   const wanted = normalizeHeader(name)
   return workbook.worksheets.find((sheet) => normalizeHeader(sheet.name) === wanted)
 }
@@ -1247,7 +1252,7 @@ function collectLookupsToCreate(db: DB, rows: StockRow[]): Record<ImportLookupLi
  * An inactive lookup still occupies its code, and lookups.add() refuses a duplicate code outright. A
  * shop that retired "Bakery" last year and imports it again wants that same row back, not a crash.
  */
-function existingLookupLabels(db: DB, list: ImportLookupList): Map<string, number> {
+export function existingLookupLabels(db: DB, list: ImportLookupList): Map<string, number> {
   const map = new Map<string, number>()
   for (const lookup of lookups.list(db, list, true)) {
     map.set(lookup.label.trim().toLowerCase(), lookup.id)
@@ -1256,13 +1261,13 @@ function existingLookupLabels(db: DB, list: ImportLookupList): Map<string, numbe
   return map
 }
 
-function emptyLookupMap(): Record<ImportLookupList, string[]> {
+export function emptyLookupMap(): Record<ImportLookupList, string[]> {
   return { department: [], category: [], sub_category: [], brand: [], location: [] }
 }
 
 // ── Small shared helpers ─────────────────────────────────────────────────────
 
-function headerLabels<K extends string>(
+export function headerLabels<K extends string>(
   columns: ReadonlyArray<ColumnSpec<K>>
 ): Record<string, string> {
   const labels: Record<string, string> = {}

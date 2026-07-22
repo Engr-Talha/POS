@@ -53,7 +53,10 @@ import type {
   UpdateUserInput,
   SetUserPasswordInput,
   SetUserPinInput,
-  UserIdInput
+  UserIdInput,
+  OnExisting,
+  ProductImportPreview,
+  ProductImportResult
 } from './ipc'
 import type {
   CompleteSaleInput,
@@ -322,6 +325,43 @@ export interface PosApi {
     deactivate: (input: ProductDeactivateInput) => Promise<Result<Product>>
     createVariantGroup: (input: CreateVariantGroupInput) => Promise<Result<VariantGroup>>
     listVariants: (input: ListVariantsInput) => Promise<Result<Product[]>>
+  }
+
+  /**
+   * THE ANYTIME PRODUCT IMPORTER — bulk add or reprice the catalogue, on any day of the shop's life.
+   *
+   * NOT the opening importer (`opening.previewImport` etc). That one posts opening stock movements and
+   * journals and is FROZEN by the shop's first sale. This one touches ONLY the catalogue: it never
+   * posts a journal, never moves stock, never writes cost — so it is safe on a live, trading shop, and
+   * a MANAGER owns it ('product.manage'), not the owner.
+   *
+   * Same file-in-main discipline as the opening trio: none of these three takes a file PATH. Main opens
+   * the dialog, main reads the bytes, main remembers the pick and its hash. The renderer can only ever
+   * say "the one the user chose". (CLAUDE.md §3.)
+   *
+   * `template` and `preview` are READS and keep working on an expired licence — a shop must always be
+   * able to get its catalogue out and see what an import would do. Only `apply` writes. (CLAUDE.md §6.)
+   */
+  productImport: {
+    /** Build the items template — PRE-FILLED with every item the shop has — and save it where the owner
+     *  says. Returns the path written, or NULL if they closed the save dialog. An EXPORT: no licence gate. */
+    downloadTemplate: () => Promise<Result<string | null>>
+
+    /**
+     * Pick the filled-in file and say WHAT WOULD HAPPEN, under the chosen mode. WRITES NOTHING.
+     * `onExisting`: 'skip' leaves existing items untouched; 'update-prices' updates only the price of an
+     * existing item whose price differs. NULL = they closed the file picker. If `errors` is non-empty
+     * the import is refused — by MAIN, even if the screen offers the button anyway.
+     */
+    previewImport: (onExisting: OnExisting) => Promise<Result<ProductImportPreview | null>>
+
+    /**
+     * DO IT — using the file they just previewed, in ONE transaction, or not at all. One bad row refuses
+     * the WHOLE file. It never moves stock, never posts a journal, never writes cost. `onExisting` must
+     * MATCH the mode the file was previewed under, or main asks for a re-preview (what is on screen would
+     * no longer be what the import does). NULL = no previewed file and they closed the picker.
+     */
+    applyImport: (onExisting: OnExisting) => Promise<Result<ProductImportResult | null>>
   }
 
   stock: {

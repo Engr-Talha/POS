@@ -17,6 +17,7 @@ import {
 import {
   Barcode as BarcodeIcon,
   CircleAlert,
+  FileSpreadsheet,
   PackageOpen,
   PackagePlus,
   Search,
@@ -26,6 +27,7 @@ import type { ProductListItem } from '@shared/catalog'
 import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
 import { LookupSelect, ProductForm } from './ProductForm'
+import { ProductImport } from './ProductImport'
 import { Paginator } from '../../components/Paginator'
 
 /**
@@ -122,6 +124,9 @@ function ProductList({
   const [categoryId, setCategoryId] = useState<number | null>(null)
   const [belowReorderOnly, setBelowReorderOnly] = useState(false)
   const [includeInactive, setIncludeInactive] = useState(false)
+  // The bulk "Import from Excel" panel, shown on demand under the header. Catalogue-only — it never
+  // touches stock or the ledger — so it lives right here on the Items screen, not in Opening Setup.
+  const [showImport, setShowImport] = useState(false)
 
   // A scanner types a whole barcode in a few milliseconds and finishes with Enter. Debouncing keeps
   // us from firing a query per character while still feeling instant to a human typing a name.
@@ -178,16 +183,35 @@ function ProductList({
           </Text>
         </div>
 
-        <Tooltip label="Your licence has expired — items cannot be added" disabled={!readOnly}>
+        <Group gap="sm">
           <Button
-            leftSection={<PackagePlus size={16} />}
-            disabled={readOnly}
-            onClick={() => onOpen('new')}
+            variant="default"
+            leftSection={<FileSpreadsheet size={16} />}
+            onClick={() => setShowImport((current) => !current)}
           >
-            New item
+            Import from Excel
           </Button>
-        </Tooltip>
+
+          <Tooltip label="Your licence has expired — items cannot be added" disabled={!readOnly}>
+            <Button
+              leftSection={<PackagePlus size={16} />}
+              disabled={readOnly}
+              onClick={() => onOpen('new')}
+            >
+              New item
+            </Button>
+          </Tooltip>
+        </Group>
       </Group>
+
+      {/* ── Import from Excel — catalogue only: never stock, never the ledger ── */}
+      {showImport && (
+        <ProductImport
+          readOnly={readOnly}
+          currencySymbol={currencySymbol}
+          onImported={() => void load()}
+        />
+      )}
 
       {/* ── Filters ────────────────────────────────────────────────────────── */}
       <Card withBorder padding="md">

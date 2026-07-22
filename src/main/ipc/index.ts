@@ -3,7 +3,7 @@ import type { OpenDialogOptions, SaveDialogOptions } from 'electron'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import type { ZodType } from 'zod'
+import { z, type ZodType } from 'zod'
 import {
   IPC,
   ActivateInput,
@@ -52,6 +52,8 @@ import {
   type OpeningWizardState,
   type ImportPreview,
   type ImportResult,
+  type ProductImportPreview,
+  type ProductImportResult,
   type ScannedItem,
   type CompleteSaleResponse,
   type PrintOutcome,
@@ -209,6 +211,8 @@ import * as supplierLedgerService from '../services/supplier-ledger'
 import * as usersService from '../services/users'
 import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
+import * as productTemplateService from '../services/product-template'
+import * as productImportService from '../services/product-import'
 import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
 import * as purchaseReturnsService from '../services/purchase-returns'
@@ -314,6 +318,23 @@ function handle<TIn, TOut>(
  */
 let pickedImportFile: { path: string; hash: string; userId: number } | null = null
 
+/**
+ * THE ANYTIME PRODUCT-IMPORT FILE, REMEMBERED BETWEEN "PREVIEW" AND "IMPORT".
+ *
+ * Separate from `pickedImportFile` above — that one belongs to the opening importer, and mixing the two
+ * would let a product preview be applied by the opening path, or vice versa. Same discipline: the path
+ * lives in MAIN, the renderer never names it, and the hash is what makes "the one the user picked"
+ * mean something.
+ *
+ * It also remembers the MODE the file was previewed under. If the owner previews 'skip' and then asks
+ * to apply 'update-prices', what is on the screen (nothing will change) is no longer what the import
+ * would do (prices would change) — so main refuses and sends them back to re-preview, exactly as it
+ * does when the file's bytes have changed. (See productImportApply.)
+ */
+let pickedProductImportFile:
+  | { path: string; hash: string; userId: number; onExisting: 'skip' | 'update-prices' }
+  | null = null
+
 function hashOf(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex')
 }
@@ -359,6 +380,19 @@ function templateFileName(now: Date): string {
   const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   return `Opening balances template - ${day}.xlsx`
 }
+
+/** The anytime product importer's template file name — a shopkeeper can tell it from the opening one. */
+function productTemplateFileName(now: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  return `Items template - ${day}.xlsx`
+}
+
+/**
+ * THE ONLY INPUT the product importer's preview/apply take: the owner's per-import choice for existing
+ * items. zod-validated like every other handler input (CLAUDE.md §4) — not a bare string off the wire.
+ */
+const ProductImportModeInput = z.enum(['skip', 'update-prices'])
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // REPORT EXPORTS — the owner picks where the .xlsx / .pdf goes, MAIN writes it
@@ -1326,6 +1360,142 @@ export function registerIpcHandlers(): void {
     // worse surprise than doing the harmless thing twice.
     return result
   })
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THE ANYTIME PRODUCT IMPORT — bulk add or reprice the CATALOGUE, on any day
+  //
+  // A DIFFERENT importer from the opening trio above. This one touches ONLY products and their lookups:
+  // it never posts a journal, never moves stock, never writes cost. So it is NOT frozen by a first
+  // sale, and a live, trading shop uses it all the time.
+  //
+  // THE PERMISSION IS 'product.manage', NOT 'settings.manage'. This is a catalogue action a MANAGER
+  // owns — the very same gate as products.create/update — not the shop's day-one balance sheet.
+  //
+  // THE ASYMMETRY, exactly as for the opening trio (CLAUDE.md §6):
+  //   downloadTemplate  is an EXPORT.        Permission, NO assertWritable().
+  //   previewImport     WRITES NOTHING.      Permission, NO assertWritable().
+  //   applyImport       writes.              Permission AND assertWritable().
+  //
+  // UNLIKE the opening trio, preview and apply DO take an argument: the mode (skip vs update-prices).
+  // It is zod-validated. The mode is remembered with the file, and apply refuses a mode that does not
+  // match what was previewed — see productImportApply.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * THE ITEMS TEMPLATE — pre-filled with every item the shop already has, so the owner edits rather
+   * than retypes (retyping names is how one item gets imported twice under two spellings).
+   *
+   * An EXPORT: no assertWritable(), so an expired shop can still get its catalogue out. (CLAUDE.md §6.)
+   */
+  handle<void, string | null>(IPC.productImportTemplate, null, async () => {
+    session.requirePermissionOf('product.manage')
+
+    const options: SaveDialogOptions = {
+      title: 'Save the items template',
+      defaultPath: join(app.getPath('documents'), productTemplateFileName(new Date())),
+      filters: [{ name: 'Excel file', extensions: ['xlsx'] }],
+      buttonLabel: 'Save template'
+    }
+
+    const window = BrowserWindow.getFocusedWindow()
+    const chosen = window
+      ? await dialog.showSaveDialog(window, options)
+      : await dialog.showSaveDialog(options)
+
+    if (chosen.canceled || !chosen.filePath) return null
+
+    const workbook = await productTemplateService.buildProductTemplate(getDb())
+    writeFileSync(chosen.filePath, workbook)
+
+    log.info(`[product-import] template written to ${chosen.filePath}`)
+    return chosen.filePath
+  })
+
+  /**
+   * WHAT WOULD HAPPEN, under the chosen mode. WRITES NOTHING — not one product, not one lookup.
+   *
+   * The file AND the mode are remembered here on a successful read, so Import does not send the owner
+   * hunting for the file again — and so apply can refuse a mode that no longer matches the screen.
+   */
+  handle<'skip' | 'update-prices', ProductImportPreview | null>(
+    IPC.productImportPreview,
+    ProductImportModeInput,
+    async (onExisting) => {
+      const user = session.requirePermissionOf('product.manage')
+      // NO assertWritable(). parseProductWorkbook() reads the file and the database and writes NOTHING.
+
+      const path = await pickImportFile()
+      if (path === null) return null // they closed the dialog. Not an error.
+
+      const buffer = readImportFile(path)
+      const preview = await productImportService.parseProductWorkbook(getDb(), buffer, { onExisting })
+
+      pickedProductImportFile = { path, hash: hashOf(buffer), userId: user.id, onExisting }
+
+      log.info(
+        `[product-import] previewed ${basename(path)} (${onExisting}): ` +
+          `${preview.rows.length} row(s), +${preview.toCreate} new, ~${preview.toUpdate} price updates, ` +
+          `${preview.toSkip} skipped, ${preview.errors.length} problem(s)`
+      )
+
+      // The NAME, never the path — the renderer has no filesystem to act on a path with. (CLAUDE.md §3.)
+      return { ...preview, fileName: basename(path) }
+    }
+  )
+
+  /**
+   * DO IT — using the file they just previewed, in ONE transaction, or not at all.
+   *
+   * SAME FILE, SAME MODE, OR LOOK AGAIN. The file is re-read and its hash checked; and the mode must
+   * match the one it was previewed under. If either has changed, what is on the screen is no longer
+   * what the import would do, so we STOP and send them back to preview — the journals... well, there
+   * are none here, but the principle is the same: never write from figures nobody has looked at.
+   *
+   * The audit row is written by the SERVICE, inside the transaction, with the actor and the counts. It
+   * is not written again here.
+   */
+  handle<'skip' | 'update-prices', ProductImportResult | null>(
+    IPC.productImportApply,
+    ProductImportModeInput,
+    async (onExisting) => {
+      const user = session.requirePermissionOf('product.manage')
+      assertWritable()
+
+      const remembered = pickedProductImportFile?.userId === user.id ? pickedProductImportFile : null
+      const path = remembered?.path ?? (await pickImportFile())
+      if (path === null) return null
+
+      const buffer = readImportFile(path)
+
+      if (remembered) {
+        if (hashOf(buffer) !== remembered.hash) {
+          throw new AppError(
+            ErrorCode.VALIDATION,
+            'This file has changed since you looked at it, so what is on the screen is no longer what is in the file. Please preview it again, check the figures, and then import.',
+            `product import file changed on disk between preview and apply: ${path}`
+          )
+        }
+        if (onExisting !== remembered.onExisting) {
+          throw new AppError(
+            ErrorCode.VALIDATION,
+            'You changed what should happen to existing items since you previewed this file, so what is on the screen is no longer what the import would do. Please preview it again and then import.',
+            `product import mode changed between preview (${remembered.onExisting}) and apply (${onExisting})`
+          )
+        }
+      }
+
+      const result = await productImportService.applyProductImport(getDb(), user, buffer, {
+        onExisting
+      })
+
+      log.info(
+        `[product-import] imported ${basename(path)} by ${user.username} (${user.role}, ${onExisting}): ` +
+          `+${result.created} new, ~${result.updated} repriced, ${result.skipped} skipped`
+      )
+
+      return result
+    }
+  )
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CUSTOMERS & THE UDHAAR LEDGER (Phase 7)

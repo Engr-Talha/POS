@@ -81,6 +81,15 @@ const api: PosApi = {
     listVariants: (input) => ipcRenderer.invoke(IPC.productsListVariants, input)
   },
 
+  // THE ANYTIME PRODUCT IMPORTER. Catalogue only — never a journal, never stock, never cost. Look at
+  // what these do NOT take: a file path. Main opens the dialog, reads the bytes, and remembers the pick.
+  // The mode (skip vs update-prices) is the owner's per-import choice and travels with each call.
+  productImport: {
+    downloadTemplate: () => ipcRenderer.invoke(IPC.productImportTemplate),
+    previewImport: (onExisting) => ipcRenderer.invoke(IPC.productImportPreview, onExisting),
+    applyImport: (onExisting) => ipcRenderer.invoke(IPC.productImportApply, onExisting)
+  },
+
   // Every one of these is a READ of a figure derived from stock_movements — except `adjust`, which
   // is the only way anything in this app moves stock at all. There is no `setStock`, deliberately.
   stock: {

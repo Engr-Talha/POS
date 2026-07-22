@@ -124,6 +124,16 @@ export const IPC = {
   openingPreviewImport: 'opening:previewImport',
   openingApplyImport: 'opening:applyImport',
 
+  // ── The ANYTIME product importer — bulk add/reprice the CATALOGUE on any day ──
+  // A DIFFERENT importer from the opening trio above: it touches ONLY products and their lookups, never
+  // posts a journal, never moves stock, never writes cost — so it is NOT frozen by a first sale. Owned
+  // by a MANAGER ('product.manage'), not the owner, because it is a catalogue action. Same file-in-main
+  // discipline as the opening trio: the renderer never names a file. Template + preview are READS and
+  // stay open on an expired licence; only apply writes. (CLAUDE.md §3, §6)
+  productImportTemplate: 'productImport:template',
+  productImportPreview: 'productImport:preview',
+  productImportApply: 'productImport:apply',
+
   // ── Customers & the udhaar ledger (Phase 7) ────────────────────────────────
   // What a customer OWES is DERIVED from the ledger (opening + credit sales − payments), never stored,
   // exactly as stock is derived from movements. There is no channel that writes a balance, and there
@@ -736,6 +746,76 @@ export type ImportResult = {
   receivables: number
   payables: number
   summary: OpeningSummary
+}
+
+// ── The ANYTIME product importer — bulk add/reprice the CATALOGUE ─────────────
+//
+// A DIFFERENT importer from the opening one above. It touches ONLY the catalogue: it never posts a
+// journal, never moves stock, never writes cost. So it is safe to run on a live, trading shop, and it
+// carries NO balance-quantity and NO cost/supplier-price columns — a bulk sheet that wrote stock or
+// cost would revalue the shelf with no journal behind it, and the GL and the stock report would drift
+// silently (CLAUDE.md §4, §5). These shapes MIRROR services/product-import.ts; the handlers are
+// annotated with them, so a service that drifts from this contract breaks the build here.
+
+/** What happens to an existing product a row matches. The owner's per-import choice. Default 'skip'. */
+export type OnExisting = 'skip' | 'update-prices'
+
+/**
+ * How one row was classified. Everything but 'error' also appears in the preview table.
+ *   create        a new stock code — the item will be created.
+ *   update        an existing item, in 'update-prices' mode, whose price differs.
+ *   skip-exists   an existing item, in 'skip' mode — left completely untouched.
+ *   skip-nochange an existing item, in 'update-prices' mode, whose prices already match the sheet.
+ *   error         the row cannot be imported. The reason is in `errors`, by row number.
+ */
+export type ProductImportClassification =
+  | 'create'
+  | 'update'
+  | 'skip-exists'
+  | 'skip-nochange'
+  | 'error'
+
+/** One product row as it WOULD land. `retailPrice`/`wholesalePrice` are 2-dp money; blank = untouched. */
+export type ProductImportRow = {
+  row: number
+  sku: string
+  name: string
+  /** Null = this stock code is new, and the item will be created. */
+  productId: number | null
+  classification: ProductImportClassification
+  itemType: ItemType
+  nameOtherLang: string | undefined
+  sizeVolume: string | undefined
+  lookupLabels: Partial<Record<ImportLookupList, string>>
+  /** 2-dp money. Undefined = the cell was blank, so the item's price is left exactly as it is. */
+  retailPrice: number | undefined
+  wholesalePrice: number | undefined
+  /** 3-dp qty. RE ORDER LEVEL. */
+  minStockM: number | undefined
+  barcodes: string[]
+}
+
+/**
+ * WHAT WOULD HAPPEN. Nothing is written to produce it. `errors` MUST be empty or the import is refused
+ * by MAIN. `fileName` is the NAME the owner picked — never a path. `onExisting` echoes the mode this
+ * preview was computed under, so apply can refuse a mismatched mode and ask for a re-preview.
+ */
+export type ProductImportPreview = {
+  fileName: string
+  rows: ProductImportRow[]
+  toCreate: number
+  toUpdate: number
+  toSkip: number
+  lookupsToCreate: Record<ImportLookupList, string[]>
+  onExisting: OnExisting
+  errors: ImportError[]
+}
+
+/** What the product import actually did. No stock, no journal, no cost was touched to produce it. */
+export type ProductImportResult = {
+  created: number
+  updated: number
+  skipped: number
 }
 
 // ── Catalog result types that cross the boundary ─────────────────────────────
