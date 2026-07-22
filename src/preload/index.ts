@@ -73,6 +73,7 @@ const api: PosApi = {
 
   products: {
     list: (input) => ipcRenderer.invoke(IPC.productsList, input),
+    search: (input) => ipcRenderer.invoke(IPC.productsSearch, input),
     get: (input) => ipcRenderer.invoke(IPC.productsGet, input),
     create: (input) => ipcRenderer.invoke(IPC.productsCreate, input),
     update: (input) => ipcRenderer.invoke(IPC.productsUpdate, input),
@@ -88,6 +89,13 @@ const api: PosApi = {
     downloadTemplate: () => ipcRenderer.invoke(IPC.productImportTemplate),
     previewImport: (onExisting) => ipcRenderer.invoke(IPC.productImportPreview, onExisting),
     applyImport: (onExisting) => ipcRenderer.invoke(IPC.productImportApply, onExisting)
+  },
+
+  // Generate an in-house barcode for a loose item, and print peel-and-stick label sheets.
+  barcode: {
+    generate: (input) => ipcRenderer.invoke(IPC.barcodeGenerate, input),
+    generateMissing: (input) => ipcRenderer.invoke(IPC.barcodeGenerateMissing, input),
+    printLabels: (input) => ipcRenderer.invoke(IPC.labelPrint, input)
   },
 
   // Every one of these is a READ of a figure derived from stock_movements — except `adjust`, which
@@ -248,6 +256,7 @@ const api: PosApi = {
     hold: (input) => ipcRenderer.invoke(IPC.saleHold, input),
     saveQuote: (input) => ipcRenderer.invoke(IPC.saleSaveQuote, input),
     resume: (input) => ipcRenderer.invoke(IPC.saleResume, input),
+    correctionLines: (input) => ipcRenderer.invoke(IPC.saleCorrectionLines, input),
     listHeld: (input) => ipcRenderer.invoke(IPC.saleListHeld, input),
     discard: (input) => ipcRenderer.invoke(IPC.saleDiscard, input),
 

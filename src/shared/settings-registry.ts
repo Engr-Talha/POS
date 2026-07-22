@@ -83,6 +83,22 @@ export const SETTINGS: SettingDef[] = [
     group: 'shop'
   },
   {
+    key: 'shop.receiptFooter',
+    type: 'text',
+    default: '',
+    label: 'Receipt note',
+    help: 'A line printed at the bottom of every receipt — e.g. "Goods once sold are returnable within 7 days with this receipt." Leave blank for none.',
+    group: 'shop'
+  },
+  {
+    key: 'advert.slipLine',
+    type: 'text',
+    default: 'Powered by Malgary Labs POS',
+    label: 'Advertising line on receipts',
+    help: 'Printed small, below "Thank you", on every customer receipt — your company name, phone or tagline. Leave blank to print nothing.',
+    group: 'shop'
+  },
+  {
     key: 'shop.country',
     type: 'select',
     default: 'PK',
@@ -464,6 +480,48 @@ export const SETTINGS: SettingDef[] = [
     group: 'hardware',
     min: 1,
     max: 40
+  },
+
+  // ── Barcode labels ──────────────────────────────────────────────────────────
+  // Label STOCK differs per shop — sheet layout, cell size — so it is a setting, not a constant
+  // (CLAUDE.md §4). Defaults suit a common A4 sheet of 3-across 63×30mm labels.
+  {
+    key: 'labels.perRow',
+    type: 'number',
+    default: 3,
+    label: 'Labels across the page',
+    help: 'How many label cells sit side by side on your label sheet.',
+    group: 'hardware',
+    min: 1,
+    max: 6
+  },
+  {
+    key: 'labels.widthMm',
+    type: 'number',
+    default: 63,
+    label: 'Label width (mm)',
+    help: 'The width of one label on your sheet, in millimetres.',
+    group: 'hardware',
+    min: 20,
+    max: 210
+  },
+  {
+    key: 'labels.heightMm',
+    type: 'number',
+    default: 30,
+    label: 'Label height (mm)',
+    help: 'The height of one label on your sheet, in millimetres.',
+    group: 'hardware',
+    min: 12,
+    max: 150
+  },
+  {
+    key: 'labels.showPrice',
+    type: 'boolean',
+    default: true,
+    label: 'Print the price on the label',
+    help: 'Show the item’s retail price on each printed label.',
+    group: 'hardware'
   },
 
   // ── Security ───────────────────────────────────────────────────────────────

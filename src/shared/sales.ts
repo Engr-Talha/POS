@@ -281,6 +281,13 @@ export type SaleDetail = Sale & {
   cashierName?: string | null
   /** lookups('payment_method').label, joined per payment row. */
   paymentMethodLabels?: Record<number, string>
+  /**
+   * Are there returns recorded against this sale? A sale WITH returns cannot be voided (voidSale
+   * refuses it — a void reverses the whole sale, but a return has already reversed part of it), so the
+   * "Correct this invoice" action on the Sales screen hides itself rather than offer a dead end.
+   * Derived, never stored.
+   */
+  hasReturns?: boolean
 }
 
 /** One row of the sales list. Deliberately narrow — a list of 100k sales does not load its lines. */

@@ -1,6 +1,10 @@
+# DISPLAY NAME is "Malgary Labs POS". appId and the userData folder are INTENTIONALLY left as
+# com.insha.pos / "Insha POS": the folder a shop's database lives in is named from these, and renaming
+# it would make an existing install look empty until the data was migrated. A rebrand is not a
+# data-migration — so the identity stays, only the visible name changes. (See src/shared/branding.ts.)
 appId: com.insha.pos
-productName: Insha POS
-copyright: Copyright © Insha
+productName: Malgary Labs POS
+copyright: Copyright © Malgary Labs
 
 directories:
   buildResources: build
@@ -47,7 +51,7 @@ nsis:
   deleteAppDataOnUninstall: false # NEVER delete the shop's database on uninstall.
   createDesktopShortcut: always
   createStartMenuShortcut: true
-  shortcutName: Insha POS
+  shortcutName: Malgary Labs POS
 
 mac:
   target:

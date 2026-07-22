@@ -467,13 +467,20 @@ export type ScannedItem = {
  *
  * An unknown barcode returns null. It is an everyday event at a counter — a loyalty card, a coupon, a
  * smudged label — and it is not an error and must not throw.
+ *
+ * FALLS BACK TO AN EXACT STOCK-CODE MATCH. The Sell screen's field is labelled "scan barcode or type
+ * item code / name" — a cashier who types a SKU by hand (no scanner in reach, or the label is worn off)
+ * expects Enter to find it exactly as a scan would. Barcode is tried FIRST and stays the single indexed
+ * seek for the 99% case; the SKU lookup only runs on a miss, so the scanner's hot path pays nothing for
+ * this. A stock code never matches a pack (a carton has no SKU of its own), so this path always resolves
+ * to the base product, same as findProductBySku documents.
  */
 export function scanBarcode(
   db: DB,
   barcode: string,
   options: { tier?: PriceTier; customerId?: number | null } = {}
 ): ScannedItem | null {
-  const match = catalog.findProductByBarcode(db, barcode)
+  const match = catalog.findProductByBarcode(db, barcode) ?? catalog.findProductBySku(db, barcode)
   if (!match) return null
 
   const product = loadProduct(db, match.product.id)
@@ -1333,6 +1340,38 @@ function park(
 export function resume(db: DB, raw: unknown): SaleDetail {
   const input = parseOrThrow(SaleGetInput, raw, 'sale.resume')
   return assertParked(db, input.id)
+}
+
+/**
+ * "CORRECT THIS INVOICE" — the lines of a VOIDED sale, ready to re-ring as a fresh invoice.
+ *
+ * A sale correction is REVERSE + RE-ENTER (the owner's decided mechanism): `voidSale` has already
+ * cancelled the wrong invoice, put its stock back and contra-posted its journal, and this hands the
+ * cancelled sale's items back as CART LINES so the cashier can fix them and ring a NEW invoice.
+ *
+ * It reuses `toCartLines` — the SAME transform `resume` uses for a parked cart — so the corrected cart
+ * behaves identically: the price, tax and cost are resolved AGAIN from the catalog by `complete()`, and
+ * the new sale draws its OWN new number. It deliberately does NOT go through `resume`/`assertParked`,
+ * because a voided sale is not a parked cart: it must never be "converted" (that would try to re-use the
+ * voided row and `complete()` would refuse it). The corrected sale is a brand-new sale, standing alone,
+ * and the voided one stays voided in history with its number and its internal reason.
+ *
+ * Refuses anything that is not actually a cancelled sale — there is nothing to correct on a live sale
+ * through this path (you cancel it first), and the message says so.
+ */
+export function correctionLines(db: DB, raw: unknown): SaleLineInput[] {
+  const input = parseOrThrow(SaleGetInput, raw, 'sale.correctionLines')
+  const sale = getById(db, input.id)
+
+  if (sale.status !== 'voided') {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      'A corrected invoice is started from a cancelled sale. Please cancel the sale first.',
+      `sale ${input.id} has status "${sale.status}"; correctionLines expects a voided sale`
+    )
+  }
+
+  return toCartLines(sale)
 }
 
 /**
@@ -3206,7 +3245,12 @@ function hydrate(db: DB, row: SaleRow): SaleDetail {
     cashierName:
       (db.prepare('SELECT full_name FROM users WHERE id = ?').pluck().get(row.user_id) as
         | string
-        | undefined) ?? null
+        | undefined) ?? null,
+    // Whether goods have been returned against this sale. The drawer uses it to NOT offer "Correct this
+    // invoice" on a sale voidSale would refuse anyway (a returned sale cannot be voided — double
+    // reversal). It is the same COUNT voidSale itself guards on, surfaced so the UI need not guess.
+    hasReturns:
+      (db.prepare('SELECT COUNT(*) FROM returns WHERE sale_id = ?').pluck().get(row.id) as number) > 0
   }
 }
 
@@ -3428,7 +3472,12 @@ function buildReceipt(db: DB, sale: SaleDetail, isDuplicate: boolean): ReceiptDa
     currencySymbol: setting<string>(db, 'currency.symbol'),
     // The SHOP's country writes the dates on this paper, not the machine's Windows locale.
     country: setting<string>(db, 'shop.country'),
-    isDuplicate
+    isDuplicate,
+
+    // The shop's own note, and the vendor's advertising line — both editable settings, both may be
+    // blank (|| null so an empty string prints nothing rather than an empty div).
+    footer: setting<string>(db, 'shop.receiptFooter') || null,
+    advertLine: setting<string>(db, 'advert.slipLine') || null
   }
 }
 

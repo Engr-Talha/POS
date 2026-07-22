@@ -15,6 +15,7 @@ import {
 } from '@mantine/core'
 import { KeyRound, Copy, Check, CircleAlert } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
+import { APP_NAME } from '@shared/branding'
 
 /**
  * ACTIVATION — the first thing a new customer sees.
@@ -55,7 +56,7 @@ export function Activation({
       <Stack gap="lg" w="100%" maw={560}>
         <Group gap="sm">
           <KeyRound size={24} />
-          <Title order={2}>Activate Insha POS</Title>
+          <Title order={2}>Activate {APP_NAME}</Title>
         </Group>
 
         {invalidReason && (

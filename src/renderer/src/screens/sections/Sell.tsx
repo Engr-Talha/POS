@@ -52,6 +52,7 @@ import {
 } from 'lucide-react'
 
 import { normalizeBarcode } from '@shared/barcode'
+import type { ProductListItem } from '@shared/catalog'
 import type { Result } from '@shared/result'
 import type { Lookup } from '@shared/types'
 import type { Customer } from '@shared/opening'
@@ -257,10 +258,20 @@ type Modal =
 
 export function Sell({
   readOnly,
-  userRole
+  userRole,
+  correctSaleId,
+  onCorrectionConsumed
 }: {
   readOnly: boolean
   userRole: Role
+  /**
+   * A JUST-VOIDED sale whose lines the cashier wants to re-ring as a corrected invoice. Set by the
+   * Sales screen when "Correct this invoice" succeeds; it also switches the section to Sell. When it
+   * becomes non-null we seed the cart from it (`correctFromSale`) and then call `onCorrectionConsumed`
+   * so the same id can never fire twice. Null the rest of the time.
+   */
+  correctSaleId?: number | null
+  onCorrectionConsumed?: () => void
 }): React.JSX.Element {
   // ── The cart. A ref shadows the state so a queued mutation always reads the LATEST cart, never a
   //    stale closure — see §3 of the header. ────────────────────────────────────────────────────────
@@ -306,6 +317,15 @@ export function Sell({
   const [completed, setCompleted] = useState<CompleteSaleResponse | null>(null)
   const [busy, setBusy] = useState(false)
   const [retiering, setRetiering] = useState(false)
+
+  // ── TYPEAHEAD SUGGESTIONS. A cashier typing a name or code (no scanner in reach, or a worn label)
+  //    sees live matches under the field. `suggestHighlight` is the arrow-key cursor into `suggestions`;
+  //    null means nothing is highlighted yet (the first Down press lands on row 0). Cleared to `[]`
+  //    whenever a scan resolves or the field empties, so a stale list never lingers over a fresh cart.
+  const [suggestions, setSuggestions] = useState<ProductListItem[]>([])
+  const [suggestHighlight, setSuggestHighlight] = useState<number | null>(null)
+  const [suggestOpen, setSuggestOpen] = useState(false)
+  const suggestSeq = useRef(0)
 
   const [settings, setSettings] = useState<SellSettings | null>(null)
   const [methods, setMethods] = useState<Lookup[] | null>(null)
@@ -489,6 +509,25 @@ export function Sell({
   )
 
   /**
+   * A CASHIER PICKED A SUGGESTION — by clicking it or by Enter/Tab while it was highlighted. Routed
+   * through the SAME `scan()` as a barcode, by its stock code: this is the one path that already knows
+   * how to weigh, ask for a serial, and price a pack, so a suggestion cannot take a shortcut around any
+   * of that. `scanBarcode()` in main falls back to an exact SKU match when the code is not a barcode —
+   * a suggestion's SKU always hits that fallback, never the barcode branch, because a barcode never
+   * SORTS as a name/code match unless it also happens to equal one.
+   */
+  const pickSuggestion = useCallback(
+    (product: ProductListItem): void => {
+      setBarcode('')
+      setSuggestions([])
+      setSuggestOpen(false)
+      setSuggestHighlight(null)
+      void scan(product.sku)
+    },
+    [scan]
+  )
+
+  /**
    * The scanner is an HID keyboard-wedge: it types fast and finishes with its terminator. It may also
    * wrap the code in a prefix/suffix. All four are SETTINGS, and all four are honoured here.
    */
@@ -547,6 +586,46 @@ export function Sell({
     const timer = setTimeout(() => submitBarcode(), 120)
     return () => clearTimeout(timer)
   }, [barcode, settings, submitBarcode])
+
+  /**
+   * TYPEAHEAD. Debounced so a fast scanner wedge (a whole code in a handful of milliseconds) never
+   * fires a round trip per keystroke, and a genuinely human pause is what actually triggers a search —
+   * 180ms comfortably clears a wedge's inter-character gap while still feeling live to someone typing.
+   *
+   * `settings.scanner.minLength` doubles as the suggestion threshold: below it, `scanner.minLength`
+   * already treats the field as "too short to mean anything", so a shorter search would just flash a
+   * list that is about to be told it was a mistake.
+   *
+   * `suggestSeq` guards against a slow, stale response landing AFTER a faster later one — the cashier
+   * typed on, and an old answer for what they typed three characters ago must not overwrite it.
+   */
+  useEffect(() => {
+    const term = barcode.trim()
+    const seq = ++suggestSeq.current
+
+    if (settings == null || modalOpen || completed != null || term.length < settings.scanner.minLength) {
+      setSuggestions([])
+      setSuggestOpen(false)
+      setSuggestHighlight(null)
+      return
+    }
+
+    const timer = setTimeout(async () => {
+      const result = await window.pos.products.search({ search: term, pageSize: 8 })
+      if (seq !== suggestSeq.current) return // superseded by a newer keystroke
+
+      if (!result.ok) {
+        setSuggestions([])
+        setSuggestOpen(false)
+        return
+      }
+      setSuggestions(result.data.rows)
+      setSuggestOpen(result.data.rows.length > 0)
+      setSuggestHighlight(null)
+    }, 180)
+
+    return () => clearTimeout(timer)
+  }, [barcode, settings, modalOpen, completed])
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Derived: the totals, and what the shop does not have
@@ -927,6 +1006,104 @@ export function Sell({
     [fail, setCart, refocus, pickCustomer]
   )
 
+  /**
+   * "Correct this invoice" — seed the cart from a JUST-VOIDED sale so the cashier can fix it and ring a
+   * NEW invoice. It mirrors `resume` almost exactly, with ONE deliberate difference that matters: it does
+   * NOT call `setResumedSaleId`. A resumed cart is a PARKED cart being CONVERTED — `complete()` re-uses
+   * its row and its number. A corrected cart is a BRAND-NEW sale: the voided invoice stays voided in
+   * history with its own number, and `complete()` must draw a fresh number and never touch the void. So
+   * the cart is filled the same way, but `resumedSaleId` stays null and the corrected sale stands alone.
+   *
+   * The lines come from `sales.correctionLines` (the void-only twin of `sales.resume`), so they are the
+   * SAME shape and are re-priced by `complete()` the same way — a correction rung up today is priced at
+   * today's catalog, exactly like a resumed cart.
+   */
+  const correctFromSale = useCallback(
+    async (saleId: number): Promise<void> => {
+      setBusy(true)
+      const [lines, detail] = await Promise.all([
+        window.pos.sales.correctionLines({ id: saleId }),
+        window.pos.sales.get({ id: saleId })
+      ])
+      setBusy(false)
+
+      if (!lines.ok) {
+        fail('Could not start the corrected invoice', lines.error.userMessage)
+        return
+      }
+      if (!detail.ok) {
+        fail('Could not start the corrected invoice', detail.error.userMessage)
+        return
+      }
+
+      const rebuilt = new Map<string, LineInfo>()
+      for (const line of detail.data.lines) {
+        if (line.isOpenItem || line.productId == null) continue
+
+        rebuilt.set(infoKey({ productId: line.productId, packId: line.packId }), {
+          name: line.nameSnapshot,
+          nameOtherLang: line.nameOtherLang,
+          uom: line.uom,
+          packLabel: line.packId != null ? line.uom : null,
+          packSizeM: null,
+          unitPrice: line.unitPrice,
+          taxRateBp: line.taxRateBp,
+          taxMode: line.taxMode,
+          isWeighted: false,
+          trackSerials: false,
+          itemType: 'inventory',
+          onHandM: null,
+          barcode: null,
+          frozen:
+            line.packId != null
+              ? { net: line.net, tax: line.taxAmount, gross: line.gross }
+              : null
+        })
+      }
+
+      setInfos(rebuilt)
+      setCart(lines.data)
+      setSelected(lines.data.length > 0 ? 0 : null)
+      // DELIBERATELY NOT setResumedSaleId — this is a NEW sale, not a conversion of the voided one.
+      setResumedSaleId(null)
+      setTier(detail.data.priceTier)
+      setCartDiscount(detail.data.cartDiscount)
+      setCompleted(null)
+
+      const { customerId, customerName } = detail.data
+      if (customerId != null && customerName != null) {
+        const found = await window.pos.customers.list({ pageSize: 20, search: customerName })
+        if (found.ok) {
+          const match = found.data.rows.find((row) => row.id === customerId)
+          if (match) await pickCustomer(match)
+        }
+      }
+
+      setModal(null)
+      refocus()
+
+      notifications.show({
+        color: 'teal',
+        title: 'Old invoice cancelled — enter the correction',
+        message:
+          'The cancelled sale is kept for the record. Fix the items here and take payment to create the corrected invoice.',
+        autoClose: 8000
+      })
+    },
+    [fail, setCart, refocus, pickCustomer]
+  )
+
+  // The Sales screen hands us a just-voided sale to correct. We consume it exactly once — seed the cart,
+  // then tell the parent to clear the id — so re-renders never re-load it. Keyed ONLY on the id (trap #19:
+  // a fatter dep list here once bounced a screen mid-flow); `correctFromSale`/`onCorrectionConsumed` are
+  // read through the ref-stable closures React gives a top-level component.
+  useEffect(() => {
+    if (correctSaleId == null) return
+    void correctFromSale(correctSaleId)
+    onCorrectionConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [correctSaleId])
+
   const reprint = useCallback(
     async (saleId: number): Promise<void> => {
       const result = await window.pos.printing.printReceipt({ id: saleId })
@@ -1015,6 +1192,15 @@ export function Sell({
         return
       }
 
+      // THE SUGGESTION DROPDOWN OWNS Up/Down/Enter/Escape WHILE IT IS OPEN. The barcode field's own
+      // onKeyDown already handles all four for that case — this is a SECOND listener on the same
+      // keydown (registered on `window`, not the input), and preventDefault() alone does not stop it
+      // from also running. Bailing out here, on the same `suggestOpen` check, is what stops a highlighted
+      // suggestion from ALSO moving the cart-line selection or clearing the field on the same keypress.
+      if (suggestOpen && suggestions.length > 0 && ['ArrowUp', 'ArrowDown', 'Enter', 'Escape'].includes(event.key)) {
+        return
+      }
+
       // ESC: back out of whatever the cashier is in the middle of, one step at a time.
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -1094,34 +1280,123 @@ export function Sell({
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
       {/* ── THE BARCODE FIELD. It never leaves the top of the screen, and it never loses focus. ── */}
-      <TextInput
-        ref={barcodeRef}
-        size="lg"
-        autoFocus
-        disabled={readOnly}
-        placeholder={
-          readOnly
-            ? 'The licence has expired — the till is read-only'
-            : 'Scan barcode or type item code / name'
-        }
-        leftSection={<ScanLine size={22} />}
-        rightSection={busy || retiering ? <Loader size="xs" /> : null}
-        value={barcode}
-        onChange={(event) => setBarcode(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault()
-            submitBarcode()
-            return
+      <div style={{ position: 'relative' }}>
+        <TextInput
+          ref={barcodeRef}
+          size="lg"
+          autoFocus
+          disabled={readOnly}
+          placeholder={
+            readOnly
+              ? 'The licence has expired — the till is read-only'
+              : 'Scan barcode or type item code / name'
           }
-          // A scanner set to send TAB must not move the focus off the field it just typed into.
-          if (event.key === 'Tab' && settings.scanner.terminator === 'tab') {
-            event.preventDefault()
-            submitBarcode()
-          }
-        }}
-        styles={{ input: { fontSize: 20, fontFamily: 'monospace', height: 54 } }}
-      />
+          leftSection={<ScanLine size={22} />}
+          rightSection={busy || retiering ? <Loader size="xs" /> : null}
+          value={barcode}
+          onChange={(event) => setBarcode(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            // The dropdown owns Up/Down/Enter/Escape WHILE IT IS OPEN — the global keydown listener
+            // otherwise reads these as cart-line navigation and Escape-to-clear (see handlerRef above),
+            // so this must run and preventDefault BEFORE that listener sees the same event.
+            if (suggestOpen && suggestions.length > 0) {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setSuggestHighlight((current) =>
+                  current == null ? 0 : Math.min(suggestions.length - 1, current + 1)
+                )
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setSuggestHighlight((current) => (current == null ? 0 : Math.max(0, current - 1)))
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setSuggestOpen(false)
+                setSuggestHighlight(null)
+                return
+              }
+              if (event.key === 'Enter' && suggestHighlight != null) {
+                event.preventDefault()
+                pickSuggestion(suggestions[suggestHighlight] as ProductListItem)
+                return
+              }
+            }
+
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              submitBarcode()
+              return
+            }
+            // A scanner set to send TAB must not move the focus off the field it just typed into.
+            if (event.key === 'Tab' && settings.scanner.terminator === 'tab') {
+              event.preventDefault()
+              submitBarcode()
+            }
+          }}
+          styles={{ input: { fontSize: 20, fontFamily: 'monospace', height: 54 } }}
+        />
+
+        {suggestOpen && suggestions.length > 0 && (
+          <Card
+            withBorder
+            shadow="md"
+            padding={0}
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              right: 0,
+              zIndex: 200,
+              marginTop: 4,
+              maxHeight: 320,
+              overflowY: 'auto'
+            }}
+          >
+            {suggestions.map((product, index) => (
+              <div
+                key={product.id}
+                // onMouseDown (not onClick) fires before the field's blur, so picking a suggestion with
+                // the mouse cannot first steal focus away and lose the click.
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  pickSuggestion(product)
+                }}
+                onMouseEnter={() => setSuggestHighlight(index)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  padding: '8px 14px',
+                  cursor: 'pointer',
+                  backgroundColor:
+                    suggestHighlight === index
+                      ? 'var(--mantine-color-blue-light)'
+                      : undefined,
+                  borderTop: index === 0 ? undefined : '1px solid var(--mantine-color-default-border)'
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <Text size="sm" fw={600} truncate>
+                    {product.name}
+                  </Text>
+                  <Text size="xs" c="dimmed">
+                    {product.sku}
+                    {product.primaryBarcode ? ` · ${product.primaryBarcode}` : ''}
+                    {product.itemType === 'inventory' ? ` · ${formatQty(product.onHandM)} on hand` : ''}
+                  </Text>
+                </div>
+                <Text size="sm" fw={600} style={{ whiteSpace: 'nowrap' }}>
+                  {money(product.retailPrice)}
+                </Text>
+              </div>
+            ))}
+          </Card>
+        )}
+      </div>
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 16, position: 'relative' }}>
         {/* ══ LEFT: the cart ══════════════════════════════════════════════════ */}

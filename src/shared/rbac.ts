@@ -53,6 +53,12 @@ export const PERMISSIONS = {
 
   // Catalog & stock
   'product.manage': 'manager',
+  // TYPEAHEAD SUGGESTIONS AT THE TILL — a cashier scanning or typing an item's name/code must be able to
+  // see a live match list, exactly as they can already see a price by scanning a barcode. Deliberately
+  // NOT `report.view` (manager): that permission guards the browsable products LIST/catalogue report,
+  // a back-office concern. This is a narrower, read-only, capped-result search with no browsing, sorting
+  // or filtering beyond what the Sell screen's own field needs — it does not open the door to the report.
+  'catalog.search': 'cashier',
   'stock.adjust': 'manager',
 
   // Stock take — the counting sheet. A manager's job, exactly like the `stock.adjust` it is a batch of

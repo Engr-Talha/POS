@@ -1,3 +1,7 @@
+// MUST be first: pins the userData folder name before anything reads it. See app-identity.ts for why
+// it is a separate module and not a statement here (the bundler would hoist a bare statement below the
+// imports' side effects, defeating it).
+import './app-identity'
 import { join } from 'node:path'
 import { app, shell, BrowserWindow, session } from 'electron'
 import { IPC } from '@shared/ipc'
@@ -57,7 +61,7 @@ function createWindow(): void {
     minHeight: 700,
     show: false, // avoid a white flash — show once the renderer has actually painted
     autoHideMenuBar: true,
-    title: 'Insha POS',
+    title: 'Malgary Labs POS',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       // The renderer gets NO Node, NO fs, NO SQLite. Not "for now" — ever. Its only route to the

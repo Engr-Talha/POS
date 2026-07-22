@@ -369,6 +369,48 @@ describe('product-import — the template', () => {
   })
 })
 
+describe('product-import — an imported item is a NORMAL product, fully editable', () => {
+  /**
+   * The client asked: after importing an item from the sheet, opening it must show all its details so
+   * it can be edited like any other. It ALREADY does — the importer creates through products.create,
+   * the same path the form uses, so the edit form's products.getById() finds a complete product. This
+   * pins that: import a rich row, read it back the way the edit form does, and assert every field
+   * round-trips. If the importer ever diverged from create(), this fails.
+   */
+  it('round-trips through products.getById exactly as the edit form loads it', async () => {
+    const buffer = await makeWorkbook([
+      {
+        'STOCK CODE': 'FULL-1',
+        'ITEM NAME': 'Cooking Oil 5L',
+        'OTHER LANGUAGE NAME': 'کھانا پکانے کا تیل',
+        'RETAIL PRICE': '2499',
+        'WHOLESALE PRICE': '2300',
+        'RE ORDER LEVEL': '6',
+        BARCODE: '8964000112233',
+        'ITEM TYPE': 'inventory'
+      }
+    ])
+
+    const result = await productImport.applyProductImport(t.db, actor, buffer, { onExisting: 'skip' })
+    expect(result.created).toBe(1)
+
+    // EXACTLY what the edit form calls when the row is clicked.
+    const found = products.findBySku(t.db, 'FULL-1')
+    expect(found, 'the imported item must exist').not.toBeNull()
+    const detail = products.getById(t.db, found!.id)
+
+    expect(detail.product.name).toBe('Cooking Oil 5L')
+    expect(detail.product.nameOtherLang).toBe('کھانا پکانے کا تیل')
+    expect(detail.product.retailPrice).toBe(249_900)
+    expect(detail.product.wholesalePrice).toBe(230_000)
+    // The barcode the sheet carried is on the item, so the form's barcode list is populated too.
+    expect(detail.barcodes.map((b) => b.barcode)).toContain('8964000112233')
+    // And it is immediately re-editable through the normal update path — no import-only limbo.
+    products.update(t.db, actor, { id: found!.id, retailPrice: 260_000 })
+    expect(products.getById(t.db, found!.id).product.retailPrice).toBe(260_000)
+  })
+})
+
 describe('product-import — all or nothing', () => {
   it('one bad row refuses the WHOLE file; nothing is half-written', async () => {
     const buffer = await makeWorkbook([

@@ -86,4 +86,11 @@ export type ReceiptData = {
   pointsBalance?: number | null
 
   footer?: string | null
+
+  /**
+   * The vendor's advertising line — "made by Malgary Labs", a phone number, a tagline. Printed small,
+   * below "Thank you", separate from the shop's own `footer`. Editable in Settings (`advert.slipLine`)
+   * so it can change without a rebuild. Null/blank prints nothing.
+   */
+  advertLine?: string | null
 }

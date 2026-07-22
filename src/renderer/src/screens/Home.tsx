@@ -50,6 +50,7 @@ import {
 import type { AppState } from '@shared/app-state'
 import type { AuditEntry } from '@shared/types'
 import type { Permission } from '@shared/rbac'
+import { APP_NAME } from '@shared/branding'
 import { ROLE_LABEL, roleCan } from '@shared/rbac'
 import { LicenseBanner } from '../components/LicenseBanner'
 import { Books } from './sections/Books'
@@ -145,6 +146,11 @@ export function Home({
   const [version, setVersion] = useState<string | null>(null)
   const [currencySymbol, setCurrencySymbol] = useState('Rs')
 
+  // "Correct this invoice" on the Sales screen voids the wrong sale, then asks the Sell screen (which
+  // stays mounted) to re-ring its lines as a corrected invoice. Home is the only thing both screens
+  // share, so the just-voided sale id passes through here. Sell consumes it once and clears it.
+  const [correctSaleId, setCorrectSaleId] = useState<number | null>(null)
+
   const user = state.session?.user
 
   useEffect(() => {
@@ -207,7 +213,7 @@ export function Home({
       >
         <Store size={22} />
         <Text fw={650} size="lg">
-          Insha POS
+          {APP_NAME}
         </Text>
 
         {version ? (
@@ -320,7 +326,12 @@ export function Home({
                 overflow: 'hidden'
               }}
             >
-              <Sell readOnly={state.readOnly} userRole={user.role} />
+              <Sell
+                readOnly={state.readOnly}
+                userRole={user.role}
+                correctSaleId={correctSaleId}
+                onCorrectionConsumed={() => setCorrectSaleId(null)}
+              />
             </div>
           )}
           {section === 'overview' && (
@@ -335,7 +346,15 @@ export function Home({
           {section === 'stockTake' && (
             <StockTake readOnly={state.readOnly} currencySymbol={currencySymbol} />
           )}
-          {section === 'sales' && <SalesHistory currencySymbol={currencySymbol} />}
+          {section === 'sales' && (
+            <SalesHistory
+              currencySymbol={currencySymbol}
+              onCorrectInvoice={(saleId) => {
+                setCorrectSaleId(saleId)
+                setSection('sell')
+              }}
+            />
+          )}
           {section === 'returns' && user && (
             <Returns
               userRole={user.role}

@@ -1,6 +1,7 @@
 import { Workbook, type Worksheet } from 'exceljs'
 import type { DB } from '../db'
 import type { ColumnSpec } from './excel-template'
+import { APP_NAME } from '@shared/branding'
 
 /**
  * THE ANYTIME PRODUCT-IMPORT TEMPLATE — the spreadsheet a trading shop fills in to bulk add or reprice
@@ -94,7 +95,7 @@ export const PRODUCT_COLUMNS: ReadonlyArray<ColumnSpec<ProductKey>> = [
  */
 export async function buildProductTemplate(db: DB, now = new Date()): Promise<Buffer> {
   const workbook = new Workbook()
-  workbook.creator = 'Insha POS'
+  workbook.creator = APP_NAME
   workbook.created = now
 
   buildInstructions(workbook)

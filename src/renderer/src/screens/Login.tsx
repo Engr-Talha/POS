@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button, Card, Center, Group, PasswordInput, Stack, TextInput, Title } from '@mantine/core'
 import { LogIn, Store } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
+import { APP_NAME } from '@shared/branding'
 
 export function Login({
   onSignedIn
@@ -29,7 +30,7 @@ export function Login({
       <Stack gap="lg" w="100%" maw={400}>
         <Group gap="sm" justify="center">
           <Store size={24} />
-          <Title order={2}>Insha POS</Title>
+          <Title order={2}>{APP_NAME}</Title>
         </Group>
 
         <Card withBorder padding="lg">

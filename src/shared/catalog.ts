@@ -477,6 +477,18 @@ export const ProductListInput = z.object({
   sortDir: z.enum(['asc', 'desc']).optional()
 })
 
+/**
+ * THE SELL SCREEN'S TYPEAHEAD — deliberately a NARROWER shape than ProductListInput. No page, no sort,
+ * no filters, and pageSize is capped at 20: this exists to show a cashier "did you mean one of these"
+ * while they type, never to browse or export the catalogue. A search term is REQUIRED — an empty search
+ * would return an arbitrary page of the whole product list, which is exactly the browsing this is not
+ * meant to allow at `catalog.search` (cashier), a permission narrower than `report.view` (manager).
+ */
+export const ProductSearchInput = z.object({
+  search: z.string().trim().min(1).max(100),
+  pageSize: z.number().int().positive().max(20).optional()
+})
+
 export const ProductGetInput = z.object({ id: RowId })
 
 /** The scanner's hot path. Resolves against product_barcodes AND product_packs.barcode. */
@@ -617,6 +629,7 @@ export type ProductSupplierInput = z.infer<typeof ProductSupplierInput>
 export type CreateProductInput = z.infer<typeof CreateProductInput>
 export type UpdateProductInput = z.infer<typeof UpdateProductInput>
 export type ProductListInput = z.infer<typeof ProductListInput>
+export type ProductSearchInput = z.infer<typeof ProductSearchInput>
 export type ProductGetInput = z.infer<typeof ProductGetInput>
 export type ResolveBarcodeInput = z.infer<typeof ResolveBarcodeInput>
 export type AddBarcodeInput = z.infer<typeof AddBarcodeInput>

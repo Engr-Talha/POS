@@ -53,6 +53,8 @@ export const IPC = {
   // ── Catalog: products ──────────────────────────────────────────────────────
   productsList: 'products:list',
   productsGet: 'products:get',
+  /** The Sell screen's typeahead. Gated at `catalog.search` (cashier) — see rbac.ts. */
+  productsSearch: 'products:search',
   productsCreate: 'products:create',
   productsUpdate: 'products:update',
   productsDeactivate: 'products:deactivate',
@@ -133,6 +135,15 @@ export const IPC = {
   productImportTemplate: 'productImport:template',
   productImportPreview: 'productImport:preview',
   productImportApply: 'productImport:apply',
+
+  // ── In-house barcodes + peel-and-stick labels ───────────────────────────────
+  // Generate a valid EAN-13 for a loose item that carries none, and print a label sheet. Generation is
+  // a catalogue WRITE ('product.manage' + assertWritable). Printing labels is an EXPORT — like a report
+  // PDF, it stays open on an expired licence (CLAUDE.md §6): no assertWritable. The renderer names WHICH
+  // items and how many copies; MAIN reads the barcode, the price and the label layout from settings.
+  barcodeGenerate: 'barcode:generate',
+  barcodeGenerateMissing: 'barcode:generateMissing',
+  labelPrint: 'label:print',
 
   // ── Customers & the udhaar ledger (Phase 7) ────────────────────────────────
   // What a customer OWES is DERIVED from the ledger (opening + credit sales − payments), never stored,
@@ -235,6 +246,8 @@ export const IPC = {
   saleHold: 'sale:hold',
   saleSaveQuote: 'sale:saveQuote',
   saleResume: 'sale:resume',
+  /** The lines of a VOIDED sale, ready to re-ring as a corrected invoice. See services/sales.correctionLines. */
+  saleCorrectionLines: 'sale:correctionLines',
   saleListHeld: 'sale:listHeld',
   saleDiscard: 'sale:discard',
 
@@ -559,6 +572,24 @@ export const ProductDeactivateInput = z.object({ id: RowId })
 export const ProductIdInput = z.object({ productId: RowId })
 
 export const ListVariantsInput = z.object({ variantGroupId: RowId })
+
+// ── In-house barcodes + labels ───────────────────────────────────────────────
+/** Generate an EAN-13 for ONE loose item that has none. */
+export const BarcodeGenerateInput = z.object({ productId: RowId })
+/** Generate for every item without a barcode, or just the given ids. Empty/absent = all of them. */
+export const BarcodeGenerateMissingInput = z.object({ productIds: z.array(RowId).optional() })
+/** Which items to print labels for, and how many stickers of each. */
+export const LabelPrintInput = z.object({
+  items: z
+    .array(z.object({ productId: RowId, copies: z.number().int().min(1).max(100) }))
+    .min(1, 'Choose at least one item to print a label for.')
+})
+export type BarcodeGenerateInput = z.infer<typeof BarcodeGenerateInput>
+export type BarcodeGenerateMissingInput = z.infer<typeof BarcodeGenerateMissingInput>
+export type LabelPrintInput = z.infer<typeof LabelPrintInput>
+export type BarcodeGenerateResult = { productId: number; barcode: string }
+export type GenerateMissingResult = { generated: number; alreadyHad: number }
+export type LabelPrintResult = { printedCount: number; skippedNoBarcode: string[]; path: string | null }
 
 // SupplierGetInput ({ id }) is the canonical supplier read input and lives in '@shared/suppliers' —
 // the `supplier:get` handler and the Suppliers screen import it from there. It is NOT redeclared here.

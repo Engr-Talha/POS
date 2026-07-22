@@ -21,6 +21,7 @@ import {
   PackageOpen,
   PackagePlus,
   Search,
+  Tag,
   TriangleAlert
 } from 'lucide-react'
 import type { ProductListItem } from '@shared/catalog'
@@ -28,6 +29,7 @@ import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
 import { LookupSelect, ProductForm } from './ProductForm'
 import { ProductImport } from './ProductImport'
+import { BarcodeLabels } from './BarcodeLabels'
 import { Paginator } from '../../components/Paginator'
 
 /**
@@ -127,6 +129,9 @@ function ProductList({
   // The bulk "Import from Excel" panel, shown on demand under the header. Catalogue-only — it never
   // touches stock or the ledger — so it lives right here on the Items screen, not in Opening Setup.
   const [showImport, setShowImport] = useState(false)
+  // The barcode & label panel, shown on demand under the header. Generating a barcode is catalogue-only;
+  // printing labels is an export — neither touches stock or the ledger.
+  const [showLabels, setShowLabels] = useState(false)
 
   // A scanner types a whole barcode in a few milliseconds and finishes with Enter. Debouncing keeps
   // us from firing a query per character while still feeling instant to a human typing a name.
@@ -192,6 +197,14 @@ function ProductList({
             Import from Excel
           </Button>
 
+          <Button
+            variant="default"
+            leftSection={<Tag size={16} />}
+            onClick={() => setShowLabels((current) => !current)}
+          >
+            Barcodes &amp; labels
+          </Button>
+
           <Tooltip label="Your licence has expired — items cannot be added" disabled={!readOnly}>
             <Button
               leftSection={<PackagePlus size={16} />}
@@ -210,6 +223,15 @@ function ProductList({
           readOnly={readOnly}
           currencySymbol={currencySymbol}
           onImported={() => void load()}
+        />
+      )}
+
+      {/* ── Barcodes & labels — generate in-house codes, print peel-and-stick sheets ── */}
+      {showLabels && (
+        <BarcodeLabels
+          readOnly={readOnly}
+          currencySymbol={currencySymbol}
+          onChanged={() => void load()}
         />
       )}
 

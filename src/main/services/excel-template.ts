@@ -1,5 +1,6 @@
 import { Workbook, type Worksheet } from 'exceljs'
 import type { DB } from '../db'
+import { APP_NAME } from '@shared/branding'
 
 /**
  * THE OPENING-BALANCE IMPORT TEMPLATE — the spreadsheet the shop owner fills in.
@@ -156,7 +157,7 @@ export const CASH_COLUMNS: ReadonlyArray<ColumnSpec<CashKey>> = [
  */
 export async function buildTemplate(db: DB, now = new Date()): Promise<Buffer> {
   const workbook = new Workbook()
-  workbook.creator = 'Insha POS'
+  workbook.creator = APP_NAME
   workbook.created = now
 
   buildInstructions(workbook)

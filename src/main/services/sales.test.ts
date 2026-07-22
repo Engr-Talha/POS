@@ -3,6 +3,7 @@ import { hashSecret } from '../security/password'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import { openDatabase, closeDatabase } from '../db'
 import * as sales from './sales'
+import * as returns from './returns'
 import * as stock from './stock'
 import * as ledger from './ledger'
 import * as catalog from './catalog'
@@ -2190,6 +2191,43 @@ describe('the scanner', () => {
     expect(scanned.taxMode).toBe('exclusive')
     expect(scanned.onHandM).toBe(6 * ONE_UNIT)
   })
+
+  // The Sell screen's field is labelled "scan barcode or type item code / name" — a cashier typing a
+  // stock code by hand (no scanner in reach, or a worn label) expects Enter to find it exactly as a
+  // scan would. Barcode is tried FIRST; the stock code is only a fallback on a miss.
+  it('falls back to an exact stock-code match when the typed text is not a barcode', () => {
+    const productId = makeProduct({ name: 'Basmati Rice 1kg', retailPrice: 19_999 })
+    const sku = t.db.prepare('SELECT sku FROM products WHERE id = ?').pluck().get(productId) as string
+
+    const scanned = sales.scanBarcode(t.db, sku)!
+
+    expect(scanned.productId).toBe(productId)
+    expect(scanned.name).toBe('Basmati Rice 1kg')
+    expect(scanned.packId).toBeNull() // a stock code names the product, never a pack
+  })
+
+  it('matches a stock code case-insensitively, same as findBySku', () => {
+    const productId = makeProduct({ name: 'Cheddar Cheese' })
+    const sku = t.db.prepare('SELECT sku FROM products WHERE id = ?').pluck().get(productId) as string
+
+    expect(sales.scanBarcode(t.db, sku.toUpperCase())?.productId).toBe(productId)
+    expect(sales.scanBarcode(t.db, sku.toLowerCase())?.productId).toBe(productId)
+  })
+
+  it('prefers a barcode match over a stock-code match when both would resolve', () => {
+    const bySku = makeProduct({ name: 'Wins By SKU' })
+    const byBarcode = makeProduct({ name: 'Wins By Barcode' })
+    const skuOfByBarcode = t.db
+      .prepare('SELECT sku FROM products WHERE id = ?')
+      .pluck()
+      .get(byBarcode) as string
+
+    // The SECOND product's barcode is, coincidentally, the FIRST product's stock code. A barcode match
+    // must win — the scanner's hot path is never shadowed by a stock-code coincidence.
+    catalog.addBarcode(t.db, { productId: bySku, barcode: skuOfByBarcode })
+
+    expect(sales.scanBarcode(t.db, skuOfByBarcode)?.productId).toBe(bySku)
+  })
 })
 
 describe('the sales list', () => {
@@ -3015,6 +3053,124 @@ describe('loyalty points on a sale', () => {
       .get(earn.id) as { points: number }
     expect(after.points).toBe(earn.points)
     expect(t.db.prepare('SELECT COUNT(*) FROM loyalty_movements').pluck().get()).toBe(2)
+    everythingHolds(t, owner)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// "Correct this invoice" — reverse + re-enter, as ONE flow.
+//
+// voidSale's own invariants (stock back at frozen cost, contra journal, keeps its number) are covered
+// above. What is pinned HERE is the CORRECTION as a whole: void the wrong sale, then ring a NEW one
+// from `correctionLines`, and prove the two together leave the books and the shelf right — and that
+// the internal reason never reaches the customer's paper.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('correcting an invoice — void then re-ring', () => {
+  it('cancels the wrong sale and re-rings it fixed; stock and books net out correctly', () => {
+    const productId = makeProduct({ name: 'Rice 1kg', retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 20 * ONE_UNIT)
+
+    // The WRONG invoice: 10 rung by mistake.
+    const { sale: wrong } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: 10 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 117_000 }] // 10 × 117.00
+    })
+    expect(onHand(productId)).toBe(10 * ONE_UNIT) // 20 − 10
+    const wrongNumber = wrong.invoiceNo
+
+    // CORRECT IT: cancel the wrong one (a supervisor's authority — the same gate as any void).
+    sales.voidSale(t.db, supervisor, { id: wrong.id, reasonCode: 'wrong_item', reasonText: 'rang 10 not 8' })
+
+    const voided = sales.getById(t.db, wrong.id)
+    expect(voided.status).toBe('voided')
+    expect(voided.invoiceNo).toBe(wrongNumber) // KEEPS its number
+    expect(onHand(productId)).toBe(20 * ONE_UNIT) // the 10 came back on the shelf
+
+    // The correction lines come back ready to re-ring — the SAME shape resume uses.
+    const lines = sales.correctionLines(t.db, { id: wrong.id })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.productId).toBe(productId)
+
+    // Re-ring the CORRECTED invoice: 8, not 10. A brand-new sale, its own number.
+    const { sale: fixed } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: 8 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 93_600 }] // 8 × 117.00
+    })
+    expect(fixed.invoiceNo).not.toBe(wrongNumber) // a DIFFERENT number — not a conversion of the void
+    expect(fixed.status).toBe('completed')
+
+    // Net effect on the shelf: 20 − 8 = 12 (the wrong 10 went out then came back; only the real 8 left).
+    expect(onHand(productId)).toBe(12 * ONE_UNIT)
+
+    // Both documents stand, both explained. The books balance and the shelf matches the ledger.
+    everythingHolds(t, owner)
+  })
+
+  it('refuses to correct a sale that already has a return against it', () => {
+    const productId = makeProduct({ name: 'Cola', retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: 4 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 46_800 }]
+    })
+
+    // A customer brings 1 back.
+    returns.createReturn(t.db, supervisor, {
+      saleId: sale.id,
+      lines: [{ saleLineId: sale.lines[0]!.id, qtyM: ONE_UNIT }],
+      settlement: 'refund',
+      refundMethodLookupId: cash(),
+      reasonCode: 'wrong_item'
+    })
+
+    // Correcting = voiding, and a returned sale cannot be voided (double reversal). Friendly refusal.
+    expectUserMessage(
+      () => sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'wrong_item' }),
+      /returns recorded against it/i
+    )
+    // And `hasReturns` tells the UI to say so rather than offering a dead-end button.
+    expect(sales.getById(t.db, sale.id).hasReturns).toBe(true)
+
+    everythingHolds(t, owner)
+  })
+
+  it('records the internal reason on the audit row and NEVER on the receipt', () => {
+    const productId = makeProduct({ name: 'Ghee', retailPrice: RS_100, taxRateBp: GST })
+    openingStock(productId, 10 * ONE_UNIT)
+
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: 2 * ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 23_400 }]
+    })
+
+    sales.voidSale(t.db, supervisor, {
+      id: sale.id,
+      reasonCode: 'wrong_item',
+      reasonText: 'INTERNAL: keyed the wrong customer'
+    })
+
+    // The reason is on the sale.void audit row — who, role, why.
+    const audit = t.db
+      .prepare(
+        `SELECT user_role, reason_code, reason_text, entity_id FROM audit_log WHERE action = 'sale.void'`
+      )
+      .get() as
+      | { user_role: string; reason_code: string; reason_text: string; entity_id: string }
+      | undefined
+    // The void wrote exactly one row, and it points at THIS sale.
+    expect(audit?.entity_id).toBe(String(sale.id))
+    expect(audit?.reason_code).toBe('wrong_item')
+    expect(audit?.reason_text).toBe('INTERNAL: keyed the wrong customer')
+    expect(audit?.user_role).toBe('supervisor')
+
+    // The receipt for this sale carries NO reason field — reprinting it exposes nothing internal.
+    const receipt = sales.receiptFor(t.db, owner, { id: sale.id, isDuplicate: true })
+    const asText = JSON.stringify(receipt)
+    expect(asText).not.toContain('keyed the wrong customer')
+    expect(asText).not.toContain('wrong_item')
+
     everythingHolds(t, owner)
   })
 })

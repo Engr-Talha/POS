@@ -288,6 +288,7 @@ ${
 <div class="center small">
   ${data.footer ? `<div>${escapeHtml(data.footer)}</div>` : ''}
   <div>Thank you</div>
+  ${data.advertLine ? `<div style="margin-top:4px">${escapeHtml(data.advertLine)}</div>` : ''}
 </div>
 
 </body>

@@ -56,7 +56,13 @@ import type {
   UserIdInput,
   OnExisting,
   ProductImportPreview,
-  ProductImportResult
+  ProductImportResult,
+  BarcodeGenerateInput,
+  BarcodeGenerateMissingInput,
+  LabelPrintInput,
+  BarcodeGenerateResult,
+  GenerateMissingResult,
+  LabelPrintResult
 } from './ipc'
 import type {
   CompleteSaleInput,
@@ -175,6 +181,7 @@ import type {
   ProductGetInput,
   ProductListInput,
   ProductListItem,
+  ProductSearchInput,
   ProductPack,
   ProductSupplier,
   ReplaceBarcodeInput,
@@ -316,6 +323,12 @@ export interface PosApi {
   products: {
     /** Paginated. Search matches stock code, item name, the Urdu name, and barcodes. */
     list: (input: ProductListInput) => Promise<Result<PagedResult<ProductListItem>>>
+    /**
+     * THE SELL SCREEN'S TYPEAHEAD. Gated at `catalog.search` (cashier), narrower than `list` above
+     * (`report.view`, manager) — no page, no sort, no filters, capped result count. A search term is
+     * required.
+     */
+    search: (input: ProductSearchInput) => Promise<Result<PagedResult<ProductListItem>>>
     /** Everything the product form needs — product, barcodes, packs, suppliers, batches, stock. */
     get: (input: ProductGetInput) => Promise<Result<ProductDetail>>
     create: (input: CreateProductInput) => Promise<Result<ProductDetail>>
@@ -362,6 +375,19 @@ export interface PosApi {
      * no longer be what the import does). NULL = no previewed file and they closed the picker.
      */
     applyImport: (onExisting: OnExisting) => Promise<Result<ProductImportResult | null>>
+  }
+
+  barcode: {
+    /** Make an EAN-13 for ONE loose item that has none, store it as its (primary) barcode. WRITE. */
+    generate: (input: BarcodeGenerateInput) => Promise<Result<BarcodeGenerateResult>>
+    /** Make one for every item without a barcode (or just the given ids). Counts what it did. WRITE. */
+    generateMissing: (input: BarcodeGenerateMissingInput) => Promise<Result<GenerateMissingResult>>
+    /**
+     * Print a peel-and-stick label SHEET (a PDF) for the chosen items and copy counts. An EXPORT — it
+     * works on an expired licence. `path` is NULL if the owner closed the save dialog; `skippedNoBarcode`
+     * names items that had no barcode to print (generate one first).
+     */
+    printLabels: (input: LabelPrintInput) => Promise<Result<LabelPrintResult>>
   }
 
   stock: {
@@ -811,6 +837,13 @@ export interface PosApi {
      * rung up — a cart held before this morning's price change is sold at this morning's price.
      */
     resume: (input: ResumeSaleInput) => Promise<Result<SaleLineInput[]>>
+    /**
+     * "Correct this invoice" — the lines of a VOIDED sale, to seed a corrected cart. The correction is
+     * REVERSE + RE-ENTER: the wrong sale is voided (kept in history with its number and an internal
+     * reason), then its items come back as cart lines here to be fixed and rung up as a NEW invoice.
+     * Reuses the same `toCartLines` transform as `resume`; `complete()` re-prices and draws a new number.
+     */
+    correctionLines: (input: SaleGetInput) => Promise<Result<SaleLineInput[]>>
     /** The hold tray. Parked carts, or quotations. */
     listHeld: (input: ListHeldInput) => Promise<Result<SaleListItem[]>>
     /** Throw a parked cart away. Only 'held' and 'quote' rows are ever deleted; history is not. */

@@ -8,6 +8,7 @@ import {
   type ReportView,
   type Section
 } from '@shared/report-export'
+import { APP_NAME } from '@shared/branding'
 
 /**
  * REPORT -> EXCEL. A workbook the owner opens and totals HIMSELF.
@@ -73,7 +74,7 @@ export async function reportToXlsxBuffer(report: ReportPayload): Promise<Buffer>
   const view = buildReportView(report)
 
   const workbook = new Workbook()
-  workbook.creator = 'Insha POS'
+  workbook.creator = APP_NAME
   workbook.created = new Date()
 
   const sheet = workbook.addWorksheet(sheetName(view.title))

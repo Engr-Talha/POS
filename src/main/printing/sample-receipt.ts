@@ -92,6 +92,7 @@ export function sampleReceipt(isDuplicate = false): ReceiptData {
     pointsEarned: 43,
     pointsBalance: 1_286,
 
-    footer: 'Goods once sold are returnable within 7 days with this receipt.'
+    footer: 'Goods once sold are returnable within 7 days with this receipt.',
+    advertLine: 'Powered by Malgary Labs POS'
   }
 }

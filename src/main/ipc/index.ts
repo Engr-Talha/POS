@@ -20,6 +20,9 @@ import {
   ProductDeactivateInput,
   ProductIdInput,
   ListVariantsInput,
+  BarcodeGenerateInput,
+  BarcodeGenerateMissingInput,
+  LabelPrintInput,
   SupplierDeactivateInput,
   SupplierBalanceInput,
   SupplierPaymentGetInput,
@@ -166,6 +169,7 @@ import {
   CreateProductInput,
   UpdateProductInput,
   ProductListInput,
+  ProductSearchInput,
   ProductGetInput,
   CreateVariantGroupInput,
   AdjustStockInput,
@@ -213,6 +217,8 @@ import * as excelTemplateService from '../services/excel-template'
 import * as excelImportService from '../services/excel-import'
 import * as productTemplateService from '../services/product-template'
 import * as productImportService from '../services/product-import'
+import * as barcodeGenService from '../services/barcode-gen'
+import { renderLabelSheetPdf } from '../printing/label'
 import * as salesService from '../services/sales'
 import * as returnsService from '../services/returns'
 import * as purchaseReturnsService from '../services/purchase-returns'
@@ -408,6 +414,12 @@ function reportFileName(kind: ReportPayload['kind'], ext: 'xlsx' | 'pdf', now: D
   const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   const safeTitle = REPORT_TITLES[kind].replace(/[\\/:*?"<>|]/g, ' ')
   return `${safeTitle} - ${day}.${ext}`
+}
+
+function labelFileName(now: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const day = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  return `Barcode labels - ${day}.pdf`
 }
 
 /**
@@ -815,6 +827,18 @@ export function registerIpcHandlers(): void {
     return productsService.list(getDb(), input)
   })
 
+  /**
+   * THE SELL SCREEN'S TYPEAHEAD. Gated at `catalog.search` — a CASHIER permission, deliberately narrower
+   * than `report.view` above: ProductSearchInput has no page, no sort, no filters, and a hard-capped
+   * pageSize, so this can never be used to browse or export the catalogue the way the products LIST can.
+   * Reuses productsService.list()'s query (the same indexed sku/name/barcode search) with page pinned
+   * to 1 — a cashier types more, they do not page through results.
+   */
+  handle(IPC.productsSearch, ProductSearchInput, (input) => {
+    session.requirePermissionOf('catalog.search')
+    return productsService.list(getDb(), { ...input, page: 1, pageSize: input.pageSize ?? 8 })
+  })
+
   handle(IPC.productsGet, ProductGetInput, (input) => {
     session.requirePermissionOf('report.view')
     return productsService.getById(getDb(), input.id)
@@ -957,6 +981,53 @@ export function registerIpcHandlers(): void {
   handle(IPC.catalogBarcodeReplacements, ProductIdInput, (input) => {
     session.requirePermissionOf('report.view')
     return catalogService.listBarcodeReplacements(getDb(), input.productId)
+  })
+
+  // ── In-house barcodes + labels ──────────────────────────────────────────────
+  //   generate / generateMissing  WRITE the catalogue — 'product.manage' + assertWritable. The service
+  //                               audits 'product.barcode_generate' itself, so no second row here.
+  //   labelPrint                  an EXPORT (a PDF the shop peels and sticks) — stays open on an expired
+  //                               licence, exactly like a report PDF: permission, NO assertWritable.
+
+  handle(IPC.barcodeGenerate, BarcodeGenerateInput, (input) => {
+    const user = session.requirePermissionOf('product.manage')
+    assertWritable()
+    const { productId, barcode } = barcodeGenService.assignGeneratedBarcode(
+      getDb(),
+      user,
+      input.productId
+    )
+    return { productId, barcode }
+  })
+
+  handle(IPC.barcodeGenerateMissing, BarcodeGenerateMissingInput, (input) => {
+    const user = session.requirePermissionOf('product.manage')
+    assertWritable()
+    return barcodeGenService.generateMissingBarcodes(getDb(), user, input.productIds)
+  })
+
+  handle(IPC.labelPrint, LabelPrintInput, async (input) => {
+    session.requirePermissionOf('product.manage')
+    // NO assertWritable — printing labels is an export, and an expired shop may still print. (§6)
+
+    const { specs, options, skippedNoBarcode } = barcodeGenService.buildLabelSheet(
+      getDb(),
+      input.items
+    )
+
+    // Nothing to print — every chosen item lacked a barcode. Say so; do not spool a blank sheet.
+    if (specs.length === 0) {
+      return { printedCount: 0, skippedNoBarcode, path: null }
+    }
+
+    const path = await saveReportFile(
+      labelFileName(new Date()),
+      { name: 'PDF file', extensions: ['pdf'] },
+      () => renderLabelSheetPdf(specs, options)
+    )
+
+    if (path) log.info(`[labels] printed ${specs.length} label(s) to ${path}`)
+    return { printedCount: specs.length, skippedNoBarcode, path }
   })
 
   // ── Alternate packings ────────────────────────────────────────────────────
@@ -1937,6 +2008,17 @@ export function registerIpcHandlers(): void {
   handle<ResumeSaleInput, SaleLineInput[]>(IPC.saleResume, ResumeSaleInput, (input) => {
     session.requirePermissionOf('sale.create')
     return salesService.toCartLines(salesService.resume(getDb(), input))
+  })
+
+  /**
+   * "Correct this invoice" — the lines of a VOIDED sale, to seed a corrected cart. A pure READ (no
+   * `assertWritable`): correcting = void (done already, gated `sale.void`) + a fresh sale (gated
+   * `sale.create` by `complete`). This read only fills the cart; it changes nothing, so it sits on the
+   * cashier's `sale.create` gate like `resume` does. MAIN still enforces the write gates on both halves.
+   */
+  handle<SaleGetInput, SaleLineInput[]>(IPC.saleCorrectionLines, SaleGetInput, (input) => {
+    session.requirePermissionOf('sale.create')
+    return salesService.correctionLines(getDb(), input)
   })
 
   handle(IPC.saleListHeld, ListHeldInput, (input) => {

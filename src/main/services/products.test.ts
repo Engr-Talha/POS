@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import * as products from './products'
+import { ProductSearchInput } from '@shared/catalog'
 import * as audit from './audit'
 import * as auth from './auth'
 import * as lookups from './lookups'
@@ -680,6 +681,36 @@ describe('list — paginated, searchable, and never an unbounded SELECT *', () =
     const found = products.list(t.db, { search: '50%' })
     expect(found.total).toBe(1)
     expect(found.rows[0]!.sku).toBe('STK-004')
+  })
+})
+
+/**
+ * THE SELL SCREEN'S TYPEAHEAD SCHEMA — a NARROWER shape than ProductListInput, on purpose (see the
+ * comment on ProductSearchInput in shared/catalog.ts). `catalog.search` is a CASHIER permission,
+ * deliberately weaker than `report.view` (manager) which guards the full list — these two tests are
+ * what make sure that narrowing cannot quietly widen back out.
+ */
+describe('ProductSearchInput — the narrower schema behind the cashier-level typeahead', () => {
+  it('rejects an empty search — this endpoint must never answer "give me a page of everything"', () => {
+    expect(ProductSearchInput.safeParse({}).success).toBe(false)
+    expect(ProductSearchInput.safeParse({ search: '' }).success).toBe(false)
+    expect(ProductSearchInput.safeParse({ search: '   ' }).success).toBe(false)
+  })
+
+  it('caps pageSize well below the full list’s 200 — this is a "did you mean" list, not a browse', () => {
+    expect(ProductSearchInput.safeParse({ search: 'rice', pageSize: 20 }).success).toBe(true)
+    expect(ProductSearchInput.safeParse({ search: 'rice', pageSize: 21 }).success).toBe(false)
+    expect(ProductSearchInput.safeParse({ search: 'rice', pageSize: 200 }).success).toBe(false)
+  })
+
+  it('has no page, sort or filter fields — only search and pageSize survive parsing', () => {
+    const parsed = ProductSearchInput.parse({
+      search: 'rice',
+      page: 5,
+      sortBy: 'name',
+      belowReorderOnly: true
+    } as unknown as { search: string })
+    expect(parsed).toEqual({ search: 'rice' })
   })
 })
 

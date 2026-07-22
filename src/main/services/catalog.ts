@@ -488,6 +488,28 @@ export function findProductByBarcode(db: DB, rawBarcode: string): BarcodeMatch |
   }
 }
 
+/**
+ * THE SUGGESTION-DROPDOWN'S HOT PATH — one indexed lookup by stock code, same shape as
+ * findProductByBarcode() so a caller can treat "matched by barcode" and "matched by SKU" identically.
+ *
+ * `pack: null` always: a stock code names the PRODUCT, never a pack — a carton has no SKU of its own,
+ * only a barcode (product_barcodes.pack_id). Picking a suggestion always sells the base product; a
+ * cashier who means the carton scans its barcode, exactly as today.
+ *
+ * COLLATE NOCASE, same reason as products.findBySku: "abc" and "ABC" are the same stock code to the
+ * cashier who typed it.
+ */
+export function findProductBySku(db: DB, rawSku: string): BarcodeMatch | null {
+  const sku = rawSku.trim()
+  if (!sku) return null
+
+  const row = db.prepare('SELECT * FROM products WHERE sku = ? COLLATE NOCASE').get(sku) as
+    | ProductRow
+    | undefined
+
+  return row ? { product: toProduct(row), pack: null } : null
+}
+
 export type ReplaceBarcodeArgs = {
   productId: number
   oldBarcode: string

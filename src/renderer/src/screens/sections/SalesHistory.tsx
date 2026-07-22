@@ -7,11 +7,13 @@ import {
   Divider,
   Drawer,
   Group,
+  Modal,
   Select,
   Skeleton,
   Stack,
   Table,
   Text,
+  Textarea,
   TextInput,
   Title,
   Tooltip
@@ -20,6 +22,7 @@ import { notifications } from '@mantine/notifications'
 import {
   CircleAlert,
   Clock,
+  FileX2,
   Hash,
   Printer,
   Receipt,
@@ -32,6 +35,7 @@ import type { SaleDetail, SaleListItem, SaleStatus } from '@shared/sales'
 import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
+import { LookupCodeSelect } from './ProductForm'
 
 /**
  * SALES HISTORY — every sale the shop ever rang up, paginated and searchable.
@@ -62,7 +66,17 @@ const STATUS_BADGE: Record<SaleStatus, { color: string; label: string }> = {
   quote: { color: 'grape', label: 'Quote' }
 }
 
-export function SalesHistory({ currencySymbol }: { currencySymbol: string }): React.JSX.Element {
+export function SalesHistory({
+  currencySymbol,
+  onCorrectInvoice
+}: {
+  currencySymbol: string
+  /**
+   * "Correct this invoice" succeeded (the sale is now voided). Home takes the just-voided sale id, seeds
+   * the Sell screen's cart from its lines and switches to Sell so the cashier rings the corrected invoice.
+   */
+  onCorrectInvoice: (saleId: number) => void
+}): React.JSX.Element {
   const [rows, setRows] = useState<SaleListItem[] | null>(null)
   const [total, setTotal] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -285,6 +299,10 @@ export function SalesHistory({ currencySymbol }: { currencySymbol: string }): Re
       <SaleDetailDrawer
         saleId={selectedId}
         currencySymbol={currencySymbol}
+        onCorrectInvoice={(saleId) => {
+          setSelectedId(null)
+          onCorrectInvoice(saleId)
+        }}
         onClose={() => setSelectedId(null)}
       />
     </Stack>
@@ -298,15 +316,19 @@ export function SalesHistory({ currencySymbol }: { currencySymbol: string }): Re
 function SaleDetailDrawer({
   saleId,
   currencySymbol,
+  onCorrectInvoice,
   onClose
 }: {
   saleId: number | null
   currencySymbol: string
+  /** Fired after the wrong sale is voided; the parent seeds the Sell cart from its lines. */
+  onCorrectInvoice: (saleId: number) => void
   onClose: () => void
 }): React.JSX.Element {
   const [sale, setSale] = useState<SaleDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [printing, setPrinting] = useState(false)
+  const [correcting, setCorrecting] = useState(false)
 
   useEffect(() => {
     if (saleId === null) {
@@ -575,6 +597,41 @@ function SaleDetailDrawer({
             </div>
           )}
 
+          {/* ── Correct this invoice ─────────────────────────────────────── */}
+          {/* Only a COMPLETED sale can be corrected. Reverse + re-enter: this cancels the wrong invoice
+              (kept for the record, stock back on the shelf) and re-rings its lines as a NEW one, so the
+              books are never silently rewritten. A sale WITH RETURNS against it cannot be voided — the
+              two would double-reverse — so we say why instead of offering a dead-end button. A voided
+              sale has nothing to correct. */}
+          {sale.status === 'completed' && (
+            <>
+              <Divider />
+              {sale.hasReturns ? (
+                <Alert color="gray" variant="light" icon={<CircleAlert size={16} />} p="xs">
+                  <Text size="sm">
+                    This invoice has goods returned against it, so it cannot be corrected here. Reverse
+                    or settle those returns first.
+                  </Text>
+                </Alert>
+              ) : (
+                <Group justify="space-between" align="center" wrap="nowrap">
+                  <Text size="xs" c="dimmed" maw={340}>
+                    Keyed something wrong? Correct it — the old invoice is cancelled and kept for the
+                    record, its stock comes back, and you re-ring it fixed as a new invoice.
+                  </Text>
+                  <Button
+                    color="red"
+                    variant="light"
+                    leftSection={<FileX2 size={16} />}
+                    onClick={() => setCorrecting(true)}
+                  >
+                    Correct this invoice
+                  </Button>
+                </Group>
+              )}
+            </>
+          )}
+
           {/* ── Reprint ──────────────────────────────────────────────────── */}
           {canReprint && (
             <>
@@ -593,7 +650,154 @@ function SaleDetailDrawer({
           )}
         </Stack>
       )}
+
+      <CorrectInvoiceModal
+        sale={sale}
+        opened={correcting}
+        currencySymbol={currencySymbol}
+        onClose={() => setCorrecting(false)}
+        onVoided={(voidedId) => {
+          setCorrecting(false)
+          onCorrectInvoice(voidedId)
+        }}
+      />
     </Drawer>
+  )
+}
+
+/**
+ * "Correct this invoice" — the confirmation, because cancelling a sale cannot be undone.
+ *
+ * The REASON IS INTERNAL. It goes on the `sale.void` audit row (who, role, when, why) and NOWHERE near
+ * the customer's paper — the corrected invoice they get looks like any other sale. Main owns every
+ * refusal (already cancelled, has returns, a closed shift) and each is a sentence the shopkeeper can
+ * act on, so `result.error.userMessage` goes on screen verbatim.
+ *
+ * There is no negative-stock confirm here, unlike the purchase side: cancelling a SALE puts stock BACK
+ * on the shelf, which can never drive it below zero. So `sales.void` never asks — and this modal never
+ * offers an "anyway".
+ */
+function CorrectInvoiceModal({
+  sale,
+  opened,
+  currencySymbol,
+  onClose,
+  onVoided
+}: {
+  sale: SaleDetail | null
+  opened: boolean
+  currencySymbol: string
+  onClose: () => void
+  onVoided: (voidedSaleId: number) => void
+}): React.JSX.Element {
+  const [reasonCode, setReasonCode] = useState<string | null>(null)
+  const [reasonText, setReasonText] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // A fresh open is a fresh decision — never inherit the last invoice's reason or a stale error.
+  useEffect(() => {
+    if (!opened) return
+    setReasonCode(null)
+    setReasonText('')
+    setError(null)
+    setBusy(false)
+  }, [opened])
+
+  async function submit(): Promise<void> {
+    if (sale === null || reasonCode === null || busy) return
+
+    setBusy(true)
+    setError(null)
+
+    const result = await window.pos.sales.void({
+      id: sale.id,
+      reasonCode,
+      reasonText: reasonText.trim() === '' ? null : reasonText.trim()
+    })
+
+    setBusy(false)
+
+    if (!result.ok) {
+      // Every refusal — already cancelled, has returns, a closed shift, needs a supervisor — verbatim.
+      setError(result.error.userMessage)
+      return
+    }
+
+    notifications.show({
+      color: 'teal',
+      title: 'Invoice cancelled — now enter the correction',
+      message: `${sale.invoiceNo ?? 'The sale'} has been cancelled and kept for the record. Fix the items and take payment to create the corrected invoice.`
+    })
+
+    onVoided(sale.id)
+  }
+
+  return (
+    <Modal
+      opened={opened && sale !== null}
+      onClose={busy ? () => {} : onClose}
+      title={
+        <Group gap="sm">
+          <FileX2 size={18} />
+          <Text fw={650}>Correct this invoice</Text>
+        </Group>
+      }
+    >
+      {sale && (
+        <Stack gap="md">
+          <Alert color="red" variant="light" icon={<CircleAlert size={18} />}>
+            <Text size="sm">
+              {sale.invoiceNo ?? 'This sale'}
+              {sale.customerName ? ` — ${sale.customerName}` : ''}, total{' '}
+              {formatMoney(sale.grandTotal, { symbol: currencySymbol })}, will be cancelled. Its stock
+              comes back on the shelf and it is kept for the record with its number. You will then re-ring
+              its items so you can fix them and take payment for the corrected invoice. This cannot be
+              undone.
+            </Text>
+          </Alert>
+
+          <LookupCodeSelect
+            listKey="void_reason"
+            label="Reason"
+            description="Why this invoice is being corrected. This is for your records — it is never printed on the customer's receipt. Add a new reason with +."
+            value={reasonCode}
+            onChange={setReasonCode}
+            required
+          />
+
+          <Textarea
+            label="Note (optional)"
+            description="Any extra detail — e.g. rang 2 not 1."
+            autosize
+            minRows={2}
+            value={reasonText}
+            onChange={(event) => setReasonText(event.currentTarget.value)}
+          />
+
+          {error && (
+            <Alert color="red" variant="light" icon={<CircleAlert size={18} />} title="Not corrected">
+              {error}
+            </Alert>
+          )}
+
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" disabled={busy} onClick={onClose}>
+              Keep the invoice
+            </Button>
+            <Button
+              color="red"
+              leftSection={<FileX2 size={16} />}
+              loading={busy}
+              disabled={reasonCode === null}
+              onClick={() => void submit()}
+            >
+              Cancel &amp; correct
+            </Button>
+          </Group>
+        </Stack>
+      )}
+    </Modal>
   )
 }
 
