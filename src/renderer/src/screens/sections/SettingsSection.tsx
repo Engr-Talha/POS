@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
+  Button,
   Card,
+  FileButton,
   Group,
+  Image,
   NavLink,
   NumberInput,
   Select,
@@ -10,13 +13,14 @@ import {
   Stack,
   Switch,
   Text,
+  Textarea,
   TextInput,
   Title,
   useMantineColorScheme,
   type MantineColorScheme
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { TriangleAlert, Lock } from 'lucide-react'
+import { TriangleAlert, Lock, Upload, X } from 'lucide-react'
 import {
   SETTINGS,
   SETTING_GROUPS,
@@ -399,6 +403,82 @@ function SettingField({
             }}
           />
         )
+
+      case 'textarea':
+        return (
+          <Textarea
+            label={label}
+            description={def.help}
+            defaultValue={String(value ?? '')}
+            disabled={disabled}
+            autosize
+            minRows={3}
+            maxRows={10}
+            onBlur={(event) => void onSave(def.key, event.currentTarget.value)}
+          />
+        )
+
+      case 'image': {
+        // The logo is stored as a data: URI so it prints offline with no network fetch (CLAUDE.md §5).
+        // We read the chosen file in the renderer, cap it, and save the base64 string like any setting.
+        const current = String(value ?? '')
+        const pick = (file: File | null): void => {
+          if (!file) return
+          if (file.size > 512 * 1024) {
+            notifications.show({
+              color: 'red',
+              title: 'That image is too large',
+              message: 'Please choose a logo under 500 KB — a small PNG or JPG prints best.'
+            })
+            return
+          }
+          const reader = new FileReader()
+          reader.onload = () => void onSave(def.key, String(reader.result))
+          reader.readAsDataURL(file)
+        }
+        return (
+          <div>
+            <Text size="sm" fw={500}>
+              {label}
+            </Text>
+            {def.help && (
+              <Text size="xs" c="dimmed" mb={6}>
+                {def.help}
+              </Text>
+            )}
+            {current !== '' && (
+              <Image src={current} alt="Shop logo" h={64} w="auto" fit="contain" mb="xs" />
+            )}
+            <Group gap="xs">
+              <FileButton onChange={pick} accept="image/png,image/jpeg">
+                {(props) => (
+                  <Button
+                    {...props}
+                    variant="default"
+                    size="xs"
+                    leftSection={<Upload size={14} />}
+                    disabled={disabled}
+                  >
+                    {current === '' ? 'Upload logo' : 'Change logo'}
+                  </Button>
+                )}
+              </FileButton>
+              {current !== '' && (
+                <Button
+                  variant="subtle"
+                  color="red"
+                  size="xs"
+                  leftSection={<X size={14} />}
+                  disabled={disabled}
+                  onClick={() => void onSave(def.key, '')}
+                >
+                  Remove
+                </Button>
+              )}
+            </Group>
+          </div>
+        )
+      }
 
       case 'text':
       default:

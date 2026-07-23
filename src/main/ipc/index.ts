@@ -39,6 +39,7 @@ import {
   OpenDrawerInput,
   PrintReceiptInput,
   PrintQuotationInput,
+  PurchasePrintInvoiceInput,
   ReturnableLinesInput,
   ReturnablePurchaseLinesInput,
   CustomerDeactivateInput,
@@ -60,6 +61,7 @@ import {
   type ScannedItem,
   type CompleteSaleResponse,
   type PrintOutcome,
+  type PurchasePrintOutcome,
   type DrawerOutcome,
   type PrinterInfo,
   type CustomerWithBalance
@@ -232,6 +234,11 @@ import * as printer from '../printing/printer'
 import * as reportsService from '../services/reports'
 import { reportToXlsxBuffer } from '../services/reports-excel'
 import { reportToPdfBuffer } from '../services/reports-pdf'
+import {
+  invoiceA4FromReceipt,
+  invoiceA4FromPurchase,
+  type InvoiceA4Options
+} from '../printing/invoice-a4'
 import log from '../logger'
 
 /**
@@ -475,6 +482,41 @@ function printOptions(db: ReturnType<typeof getDb>): printer.PrintReceiptOptions
 }
 
 /**
+ * THE A4 INVOICE'S LETTERHEAD — the shop's own details, its embedded logo, the page size, the terms and
+ * the closing note. Every one of them a SETTING (CLAUDE.md §4), so the sale invoice and the purchase
+ * invoice wear the same letterhead regardless of which document built the body. The logo is a `data:`
+ * URI already embedded in settings — offline-safe, never a remote fetch (trap #13).
+ */
+function invoiceA4Options(db: ReturnType<typeof getDb>): InvoiceA4Options {
+  const s = (key: string): string => settingsService.get<string>(db, key, '')
+  const pageSizeRaw = settingsService.get<string>(db, 'invoice.pageSize', 'A4')
+  const pageSize: InvoiceA4Options['pageSize'] =
+    pageSizeRaw === 'Letter' || pageSizeRaw === 'A5' ? pageSizeRaw : 'A4'
+
+  return {
+    shop: {
+      name: s('shop.name') || 'My Shop',
+      address: s('shop.address') || null,
+      city: s('shop.city') || null,
+      phone: s('shop.phone') || null,
+      phone2: s('shop.phone2') || null,
+      email: s('shop.email') || null,
+      contactPerson: s('shop.contactPerson') || null,
+      taxNumber: s('shop.taxNumber') || null
+    },
+    logo: s('invoice.logo') || null,
+    pageSize,
+    terms: s('invoice.terms') || null,
+    footer: s('invoice.footer') || null
+  }
+}
+
+/** The shop's chosen default print format. 'a4' unless explicitly set to 'thermal'. */
+function invoicePrintFormat(db: ReturnType<typeof getDb>): 'a4' | 'thermal' {
+  return settingsService.get<string>(db, 'invoice.printFormat', 'a4') === 'thermal' ? 'thermal' : 'a4'
+}
+
+/**
  * Build the receipt from the DATABASE and print it. Never throws.
  *
  * `receiptFor()` is what stamps a reprint DUPLICATE and writes the `sale.reprint` audit row — so the
@@ -488,6 +530,16 @@ async function printSaleReceipt(
 ): Promise<PrintOutcome> {
   try {
     const receipt = salesService.receiptFor(db, actor, { id: saleId, isDuplicate })
+    // THE FORMAT SWITCH. 'a4' (the default) prints the full-page letterhead invoice; 'thermal' prints
+    // the narrow till slip, entirely unchanged. The A4 invoice reuses the SAME frozen figures the receipt
+    // carries — invoiceA4FromReceipt is a shape adapter, not a recompute.
+    if (invoicePrintFormat(db) === 'a4') {
+      return await printer.printInvoiceA4(
+        invoiceA4FromReceipt(receipt),
+        invoiceA4Options(db),
+        printOptions(db)
+      )
+    }
     return await printer.printReceipt(receipt, printOptions(db))
   } catch (error) {
     // Building the receipt failed — not printing it. The sale is still SAVED, so this is still not an
@@ -1747,6 +1799,53 @@ export function registerIpcHandlers(): void {
   })
 
   /**
+   * PRINT, OR SAVE AS PDF, THE A4 INVOICE FOR A PURCHASE — the full-page letterhead invoice a purchase
+   * never had. Main reads the bill from the database and builds the paper from the frozen line totals,
+   * exactly as the sale receipt reprint does — a tampered renderer cannot print its own numbers on the
+   * shop's paper.
+   *
+   * AN EXPORT, NOT A WRITE: 'purchase.view' and NO assertWritable(). Printing or saving a bill the shop
+   * already received must keep working on an expired licence, the same as a report PDF — holding a shop's
+   * own documents hostage is the one thing read-only mode forbids. (CLAUDE.md §6.)
+   *
+   *   mode 'print' -> to the printer. Never throws — a jam is a warning, and there is nothing at stake but
+   *                   paper (the purchase was committed long ago).
+   *   mode 'pdf'   -> main opens a save dialog and writes the PDF, for a shop with no A4 printer that
+   *                   emails it. The renderer never names a path — main owns the filesystem (CLAUDE.md §3).
+   */
+  handle<PurchasePrintInvoiceInput, PurchasePrintOutcome>(
+    IPC.purchasePrintInvoice,
+    PurchasePrintInvoiceInput,
+    async (input) => {
+      session.requirePermissionOf('purchase.view')
+
+      const db = getDb()
+      const purchase = purchasesService.getPurchase(db, input.id)
+      const symbol = settingsService.get<string>(db, 'currency.symbol', 'Rs')
+      const country = settingsService.get<string>(db, 'shop.country', 'PK')
+      const data = invoiceA4FromPurchase(purchase, symbol, country)
+      const opts = invoiceA4Options(db)
+
+      if (input.mode === 'pdf') {
+        const day = new Date()
+        const pad = (n: number): string => String(n).padStart(2, '0')
+        const dateStr = `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`
+        const safeNumber = data.number.replace(/[\\/:*?"<>|]/g, ' ')
+        const savedPath = await saveReportFile(
+          `Purchase invoice ${safeNumber} - ${dateStr}.pdf`,
+          { name: 'PDF file', extensions: ['pdf'] },
+          () => printer.invoiceA4ToPdfBuffer(data, opts)
+        )
+        if (savedPath) log.info(`[purchase] invoice ${data.number} saved to PDF: ${savedPath}`)
+        return { mode: 'pdf', print: null, savedPath }
+      }
+
+      const print = await printer.printInvoiceA4(data, opts, printOptions(db))
+      return { mode: 'print', print, savedPath: null }
+    }
+  )
+
+  /**
    * CANCEL A WRONGLY-KEYED BILL. MANAGER ONLY — and the check is here, in MAIN, not in a hidden button.
    *
    * `sales.voidSale` pointing the other way. The service takes the stock back off at each ORIGINAL
@@ -2078,7 +2177,16 @@ export function registerIpcHandlers(): void {
       )
 
       // 2. and 3. Hardware. FROM HERE NOTHING MAY THROW — the sale is in the books.
-      const print = await printer.printReceipt(result.receipt, printOptions(db))
+      // Honour the shop's default print format: 'a4' (default) prints the full-page letterhead invoice,
+      // 'thermal' the till slip. Both reuse the SAME frozen receipt figures; neither can fail the sale.
+      const print =
+        invoicePrintFormat(db) === 'a4'
+          ? await printer.printInvoiceA4(
+              invoiceA4FromReceipt(result.receipt),
+              invoiceA4Options(db),
+              printOptions(db)
+            )
+          : await printer.printReceipt(result.receipt, printOptions(db))
       const drawer = await kickDrawerForSale(db, result.sale)
 
       return { sale: result.sale, journalId: result.journalId, print, drawer }

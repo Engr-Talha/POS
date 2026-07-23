@@ -26,12 +26,14 @@ import {
   CircleAlert,
   Clock,
   CreditCard,
+  FileText,
   FileX2,
   Hash,
   Layers,
   Package,
   PackagePlus,
   Plus,
+  Printer,
   Save,
   Search,
   ShoppingCart,
@@ -520,6 +522,31 @@ function PurchaseDetailDrawer({
   const [error, setError] = useState<string | null>(null)
   const [returning, setReturning] = useState(false)
   const [voiding, setVoiding] = useState(false)
+  const [printing, setPrinting] = useState(false)
+
+  // Print the A4 invoice for this bill, or save it as a PDF to email/file. Main builds the paper from
+  // the stored bill (the renderer never hands it prices) and never throws — a jam is a sentence, not a
+  // red box. Printing works on an expired licence: it is an export of a bill already received. (§6)
+  async function printInvoice(mode: 'print' | 'pdf'): Promise<void> {
+    if (purchase === null) return
+    setPrinting(true)
+    const result = await window.pos.purchases.printInvoice({ id: purchase.id, mode })
+    setPrinting(false)
+    if (!result.ok) {
+      notifications.show({ color: 'red', title: 'Could not print the invoice', message: result.error.userMessage })
+      return
+    }
+    if (result.data.mode === 'pdf') {
+      if (result.data.savedPath)
+        notifications.show({ color: 'teal', icon: <Printer size={18} />, title: 'Invoice saved', message: 'The A4 invoice was saved as a PDF.' })
+      // No savedPath = they closed the save dialog. Not an error.
+      return
+    }
+    if (result.data.print?.printed)
+      notifications.show({ color: 'teal', icon: <Printer size={18} />, title: 'Invoice printed', message: 'The A4 invoice was sent to the printer.' })
+    else
+      notifications.show({ color: 'orange', icon: <TriangleAlert size={18} />, title: 'The invoice did not print', message: result.data.print?.problem ?? 'Check the printer and try again.', autoClose: 7000 })
+  }
 
   // Bumped after a return commits, to re-pull this bill. The lines themselves never change — a purchase
   // is frozen — but re-reading keeps the drawer honest if anything else about it moves.
@@ -723,6 +750,33 @@ function PurchaseDetailDrawer({
               </Stack>
             </div>
           )}
+
+          {/* ── Print / save the A4 invoice ──────────────────────────────── */}
+          <Divider />
+          <Group justify="space-between" align="center" wrap="nowrap">
+            <Text size="xs" c="dimmed" maw={320}>
+              Print this bill as a full-page invoice — your logo, address and terms — or save it as a PDF
+              to email or file.
+            </Text>
+            <Group gap="xs" wrap="nowrap">
+              <Button
+                variant="light"
+                leftSection={<Printer size={16} />}
+                loading={printing}
+                onClick={() => void printInvoice('print')}
+              >
+                Print invoice
+              </Button>
+              <Button
+                variant="default"
+                leftSection={<FileText size={16} />}
+                loading={printing}
+                onClick={() => void printInvoice('pdf')}
+              >
+                Save PDF
+              </Button>
+            </Group>
+          </Group>
 
           {/* ── Send goods back ──────────────────────────────────────────── */}
           {/* The flow lives HERE, on the bill the goods arrived on — that is where the shopkeeper

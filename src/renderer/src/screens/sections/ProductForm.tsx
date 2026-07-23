@@ -22,11 +22,14 @@ import {
   Tooltip
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
+import { useClipboard } from '@mantine/hooks'
 import {
   ArrowLeft,
   Barcode as BarcodeIcon,
   Boxes,
+  Check,
   CircleAlert,
+  Copy,
   History,
   Image as ImageIcon,
   Info,
@@ -254,6 +257,34 @@ export function LookupSelect({
         }}
       />
     </>
+  )
+}
+
+/**
+ * A quiet copy-to-clipboard button for a code the shopkeeper needs elsewhere — a stock code or a
+ * barcode they want to paste into a label maker, a supplier order, or WhatsApp. Copies the RAW
+ * value only (no label text), shows a one-second tick, and renders nothing when there is nothing
+ * to copy. Shared by the items list and the item form so there is ONE implementation, not two.
+ */
+export function CopyCode({ value }: { value: string }): React.JSX.Element | null {
+  const clipboard = useClipboard({ timeout: 1000 })
+  if (!value) return null
+  return (
+    <Tooltip label={clipboard.copied ? 'Copied!' : 'Copy'} withArrow>
+      <ActionIcon
+        variant="subtle"
+        color="gray"
+        size="sm"
+        aria-label="Copy"
+        onClick={(event) => {
+          // The rows are clickable — don't open the item when the shopkeeper just wants the code.
+          event.stopPropagation()
+          clipboard.copy(value)
+        }}
+      >
+        {clipboard.copied ? <Check size={14} /> : <Copy size={14} />}
+      </ActionIcon>
+    </Tooltip>
   )
 }
 
@@ -1107,9 +1138,12 @@ export function ProductForm({
           <div>
             <Title order={2}>{editing ? form.name || 'Item detail' : 'New item'}</Title>
             {editing && (
-              <Text size="sm" c="dimmed" ff="monospace">
-                {form.sku}
-              </Text>
+              <Group gap={4} wrap="nowrap">
+                <Text size="sm" c="dimmed" ff="monospace">
+                  {form.sku}
+                </Text>
+                <CopyCode value={form.sku} />
+              </Group>
             )}
           </div>
           {editing && !form.isActive && (
@@ -1185,6 +1219,7 @@ export function ProductForm({
                     disabled={readOnly}
                     value={form.sku}
                     onChange={(event) => set('sku', event.currentTarget.value)}
+                    rightSection={form.sku.trim() ? <CopyCode value={form.sku.trim()} /> : undefined}
                   />
                   <TextInput
                     label="Item name"
@@ -1873,7 +1908,10 @@ function BarcodesPanel({
               {barcodes.map((row) => (
                 <Table.Tr key={row.id}>
                   <Table.Td>
-                    <Text ff="monospace">{row.barcode}</Text>
+                    <Group gap={4} wrap="nowrap">
+                      <Text ff="monospace">{row.barcode}</Text>
+                      <CopyCode value={row.barcode} />
+                    </Group>
                   </Table.Td>
                   <Table.Td>
                     {row.isPrimary ? (

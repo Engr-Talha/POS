@@ -181,6 +181,20 @@ export const IPC = {
   purchaseList: 'purchase:list',
   purchaseGet: 'purchase:get',
 
+  /**
+   * PRINT OR SAVE THE A4 INVOICE FOR A PURCHASE — a full-page, letterhead invoice for a goods-received
+   * note. A SALE prints its A4 invoice through the existing `saleComplete`/`printReceipt` path, switched
+   * by `invoice.printFormat`; a purchase never printed at all before, so it gets its own channel.
+   *
+   * IT TAKES A PURCHASE ID, never a document — main reads the purchase from the database and builds the
+   * paper from the frozen line totals, exactly as `printReceipt` reads a sale. `mode` is 'print' (to a
+   * printer) or 'pdf' (main opens a save dialog and writes the PDF, for a shop with no A4 printer).
+   *
+   * An EXPORT: 'purchase.view', NO assertWritable() — printing/saving a bill you already received works
+   * on an expired licence, the same as a report PDF. (CLAUDE.md §6.)
+   */
+  purchasePrintInvoice: 'purchase:printInvoice',
+
   // CANCEL A WRONGLY-KEYED BILL — `sales.voidSale` pointing the other way. The stock comes back OFF at
   // the cost it came ON at, the journal is contra-posted by mirroring the original's own lines, and the
   // document is MARKED, never deleted — it keeps its number and every line so the books can still
@@ -966,6 +980,19 @@ export const OutstandingCreditInput = z.object({ customerId: RowId })
 export const PrintReceiptInput = z.object({ id: RowId })
 
 /**
+ * PRINT OR SAVE THE A4 INVOICE FOR A PURCHASE.
+ *
+ * A PURCHASE ID and a MODE, and nothing else: main reads the purchase from the database and builds the
+ * paper from the frozen line totals, exactly as PrintReceiptInput does for a sale. `mode` picks the
+ * printer ('print') or a save dialog that writes a PDF ('pdf') — for a shop with no A4 printer that
+ * emails the invoice instead. On 'pdf' the outcome carries the saved path (null if the dialog was closed).
+ */
+export const PurchasePrintInvoiceInput = z.object({
+  id: RowId,
+  mode: z.enum(['print', 'pdf']).default('print')
+})
+
+/**
  * PRINT THE QUOTATION FOR A QUOTE — the offer, in the customer's hand.
  *
  * A SALE ID, and nothing else, for the same reason PrintReceiptInput takes one: main reads the document
@@ -1103,6 +1130,20 @@ export type PrintOutcome = {
   printerName: string | null
   /** Cashier-readable, and actionable. Null when it printed. */
   problem: string | null
+}
+
+/**
+ * The result of printing OR saving a purchase's A4 invoice.
+ *
+ *   mode 'print' -> `print` carries the PrintOutcome (never an error — a jam is a warning, not a failure).
+ *   mode 'pdf'   -> `savedPath` is where the PDF was written, or null if the owner closed the save dialog.
+ *
+ * Exactly one of the two is populated per call; the other is null.
+ */
+export type PurchasePrintOutcome = {
+  mode: 'print' | 'pdf'
+  print: PrintOutcome | null
+  savedPath: string | null
 }
 
 /** Did the drawer open? Same contract, same reason: never an error, always the truth. */
@@ -1257,6 +1298,7 @@ export type ListHeldInput = z.infer<typeof ListHeldInput>
 export type OutstandingCreditInput = z.infer<typeof OutstandingCreditInput>
 export type PrintReceiptInput = z.infer<typeof PrintReceiptInput>
 export type PrintQuotationInput = z.infer<typeof PrintQuotationInput>
+export type PurchasePrintInvoiceInput = z.infer<typeof PurchasePrintInvoiceInput>
 export type OpenDrawerInput = z.infer<typeof OpenDrawerInput>
 export type ReturnableLinesInput = z.infer<typeof ReturnableLinesInput>
 export type ReturnablePurchaseLinesInput = z.infer<typeof ReturnablePurchaseLinesInput>

@@ -19,7 +19,15 @@
  * "turn correctness off", and one day, on a slow afternoon, somebody would flip it.
  */
 
-export type SettingType = 'text' | 'number' | 'money' | 'percent' | 'boolean' | 'select'
+export type SettingType =
+  | 'text'
+  | 'textarea' // multi-line free text — invoice terms, a long note
+  | 'number'
+  | 'money'
+  | 'percent'
+  | 'boolean'
+  | 'select'
+  | 'image' // a picture stored as a data: URI (the shop logo). Offline-safe, embedded in the file.
 
 export type SettingDef = {
   key: string
@@ -73,7 +81,25 @@ export const SETTINGS: SettingDef[] = [
   // ── Shop ───────────────────────────────────────────────────────────────────
   { key: 'shop.name', type: 'text', default: 'My Shop', label: 'Shop name', group: 'shop' },
   { key: 'shop.address', type: 'text', default: '', label: 'Address', group: 'shop' },
+  { key: 'shop.city', type: 'text', default: '', label: 'City', group: 'shop' },
   { key: 'shop.phone', type: 'text', default: '', label: 'Phone', group: 'shop' },
+  {
+    key: 'shop.phone2',
+    type: 'text',
+    default: '',
+    label: 'Second phone / mobile',
+    help: 'An extra contact number, printed alongside the first. Leave blank if there is only one.',
+    group: 'shop'
+  },
+  { key: 'shop.email', type: 'text', default: '', label: 'Email', group: 'shop' },
+  {
+    key: 'shop.contactPerson',
+    type: 'text',
+    default: '',
+    label: 'Contact person',
+    help: 'Who to ask for at the shop — printed on the invoice if set.',
+    group: 'shop'
+  },
   {
     key: 'shop.taxNumber',
     type: 'text',
@@ -209,6 +235,57 @@ export const SETTINGS: SettingDef[] = [
   },
 
   // ── Invoice & financial year ───────────────────────────────────────────────
+  // The A4 invoice's look. Logo is embedded as a data: URI (offline-safe, no network fetch — CLAUDE.md
+  // §5 trap #13). Terms/footer are the shop's own words, printed at the foot of every A4 invoice.
+  {
+    key: 'invoice.logo',
+    type: 'image',
+    default: '',
+    label: 'Shop logo',
+    help: 'Shown at the top of the A4 invoice. A PNG or JPG; it is stored inside the app and printed offline.',
+    group: 'invoice'
+  },
+  {
+    key: 'invoice.printFormat',
+    type: 'select',
+    default: 'a4',
+    label: 'Default print format',
+    help: 'A4 is a full-page invoice with your logo and terms. Thermal roll is the narrow till receipt (58/80 mm). Pick what your printer is.',
+    group: 'invoice',
+    options: [
+      { value: 'a4', label: 'A4 invoice (full page)' },
+      { value: 'thermal', label: 'Thermal roll receipt (58 / 80 mm)' }
+    ]
+  },
+  {
+    key: 'invoice.pageSize',
+    type: 'select',
+    default: 'A4',
+    label: 'A4 invoice page size',
+    help: 'The paper the full-page invoice is laid out for.',
+    group: 'invoice',
+    options: [
+      { value: 'A4', label: 'A4 (210 × 297 mm)' },
+      { value: 'Letter', label: 'US Letter (8.5 × 11 in)' },
+      { value: 'A5', label: 'A5 (148 × 210 mm)' }
+    ]
+  },
+  {
+    key: 'invoice.terms',
+    type: 'textarea',
+    default: '',
+    label: 'Invoice terms & conditions',
+    help: 'Printed at the foot of the A4 invoice, in your own words. Leave blank for none.',
+    group: 'invoice'
+  },
+  {
+    key: 'invoice.footer',
+    type: 'textarea',
+    default: '',
+    label: 'Invoice footer note',
+    help: 'A closing line under the terms — a thank-you, return policy, or bank details. Leave blank for none.',
+    group: 'invoice'
+  },
   { key: 'invoice.prefix', type: 'text', default: 'INV-', label: 'Invoice prefix', group: 'invoice' },
   {
     key: 'invoice.padding',
@@ -627,9 +704,22 @@ export function validateSetting(key: string, value: unknown): { ok: true } | { o
         : { ok: false, message: `${def.label} must be on or off.` }
 
     case 'text':
+    case 'textarea':
       return typeof value === 'string'
         ? { ok: true }
         : { ok: false, message: `${def.label} must be text.` }
+
+    case 'image':
+      // A data: URI (the embedded logo) or empty. We do not decode it — just guard the shape and a
+      // sane size ceiling, so a tampered renderer cannot stuff megabytes into the settings row.
+      if (typeof value !== 'string') return { ok: false, message: `${def.label} must be an image.` }
+      if (value !== '' && !value.startsWith('data:image/')) {
+        return { ok: false, message: `${def.label} must be an uploaded image.` }
+      }
+      if (value.length > 1_400_000) {
+        return { ok: false, message: `${def.label} is too large — please use a smaller image.` }
+      }
+      return { ok: true }
 
     case 'select': {
       const allowed = (def.options ?? []).map((o) => o.value)

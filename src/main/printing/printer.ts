@@ -9,6 +9,7 @@ import type { DrawerOutcome, PrintOutcome, PrinterInfo } from '@shared/ipc'
 import { AppError, ErrorCode } from '@shared/result'
 import { renderReceiptHtml } from './receipt'
 import { renderQuotationHtml } from './quotation'
+import { renderInvoiceA4Html, type InvoiceA4Data, type InvoiceA4Options } from './invoice-a4'
 import log from '../logger'
 
 /**
@@ -234,6 +235,61 @@ export async function printQuotation(
 }
 
 /**
+ * PRINT AN A4 INVOICE — a sale or a purchase, on a full page with the shop letterhead. NEVER THROWS,
+ * exactly like printReceipt: for a sale this runs AFTER the sale is committed (the money is taken, the
+ * stock has moved), so a printer jam must never surface as a failed sale. It comes back with an OUTCOME
+ * and the caller carries on. (For a purchase reprint nothing is at stake but paper, and the same gentle
+ * contract still lets the drawer offer "Print again".)
+ *
+ * This is the A4 branch of the format switch (`invoice.printFormat`): 'a4' prints this, 'thermal' prints
+ * the slip. renderInvoiceA4Html builds the HTML; the existing printHtml() puts it on paper.
+ */
+export async function printInvoiceA4(
+  data: InvoiceA4Data,
+  invoiceOpts: InvoiceA4Options,
+  options: PrintReceiptOptions
+): Promise<PrintOutcome> {
+  const copies = clampCopies(options.copies)
+  const deviceName = options.printerName.trim()
+  const printerName = deviceName === '' ? null : deviceName
+
+  try {
+    const html = renderInvoiceA4Html(data, invoiceOpts)
+    await printHtml(html, { deviceName, copies })
+
+    log.info(
+      `[printer] A4 ${data.kind} invoice ${data.number} printed x${copies} on ` +
+        `${printerName ?? 'the system default printer'}`
+    )
+
+    return { printed: true, copies, printerName, problem: null }
+  } catch (error) {
+    const technical = error instanceof Error ? error.message : String(error)
+    log.error(`[printer] A4 ${data.kind} invoice ${data.number} DID NOT PRINT: ${technical}`)
+
+    return {
+      printed: false,
+      copies: 0,
+      printerName,
+      problem:
+        'The invoice did not print. Check the printer is switched on, has paper, and is connected — then print it again.'
+    }
+  }
+}
+
+/**
+ * AN A4 INVOICE -> a PDF buffer, for a shop with no A4 printer that wants to SAVE or email it. An export,
+ * like a report PDF — it DOES throw on failure (there is no committed sale to protect; the owner clicked
+ * "Save as PDF" and wants to be told plainly if it did not work). htmlToPdfBuffer honours the page size.
+ */
+export async function invoiceA4ToPdfBuffer(
+  data: InvoiceA4Data,
+  invoiceOpts: InvoiceA4Options
+): Promise<Buffer> {
+  return htmlToPdfBuffer(renderInvoiceA4Html(data, invoiceOpts), invoiceOpts.pageSize)
+}
+
+/**
  * HTML -> paper. The temp file and the hidden window are both torn down in `finally`, because a shop
  * doing 1000 sales a day would otherwise leak 1000 windows and 1000 temp files before closing time.
  */
@@ -299,7 +355,10 @@ async function printHtml(
  * and the temp directory are still torn down in `finally`, because this runs on demand and must not
  * leak a hidden window per export.
  */
-export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
+export async function htmlToPdfBuffer(
+  html: string,
+  pageSize: 'A4' | 'Letter' | 'A5' = 'A4'
+): Promise<Buffer> {
   const dir = mkdtempSync(join(tmpdir(), 'pos-report-'))
   const file = join(dir, 'report.html')
   writeFileSync(file, html, 'utf8')
@@ -317,12 +376,13 @@ export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
   try {
     await window.loadFile(file)
 
-    // printBackground so the header/total shading actually prints; A4 because that is what the shop's
-    // printer holds; ~13mm margins so nothing is clipped. The report's own CSS keeps the layout
-    // within this — no @page margin doubling, and no fixed height that would add a trailing blank page.
+    // printBackground so the header/total shading actually prints; the page size is the report's A4
+    // default or, for an A4 invoice, whatever the shop set (Letter/A5); ~13mm margins so nothing is
+    // clipped. The document's own CSS keeps the layout within this — no @page margin doubling, and no
+    // fixed height that would add a trailing blank page.
     const pdf = await window.webContents.printToPDF({
       printBackground: true,
-      pageSize: 'A4',
+      pageSize,
       margins: PDF_MARGINS
     })
 

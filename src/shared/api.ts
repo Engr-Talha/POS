@@ -39,6 +39,8 @@ import type {
   OpenDrawerInput,
   PrintReceiptInput,
   PrintQuotationInput,
+  PurchasePrintInvoiceInput,
+  PurchasePrintOutcome,
   ReturnableLinesInput,
   ReturnablePurchaseLinesInput,
   CompleteSaleResponse,
@@ -649,6 +651,13 @@ export interface PosApi {
      * manager has seen the warning and confirmed. On 'block' that flag cannot rescue it — MAIN decides.
      */
     void: (input: VoidPurchaseInput) => Promise<Result<PurchaseDetail>>
+    /**
+     * PRINT, OR SAVE AS PDF, THE A4 INVOICE FOR A PURCHASE. A PURCHASE ID and a mode — main reads the
+     * bill and builds the full-page, letterhead invoice from the frozen line totals. 'print' sends it to
+     * the printer; 'pdf' opens a save dialog and writes the PDF, for a shop with no A4 printer that emails
+     * the invoice. An EXPORT — 'purchase.view', works on an expired licence, never a write. (CLAUDE.md §6.)
+     */
+    printInvoice: (input: PurchasePrintInvoiceInput) => Promise<Result<PurchasePrintOutcome>>
   }
 
   /**

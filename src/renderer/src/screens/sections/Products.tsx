@@ -27,7 +27,7 @@ import {
 import type { ProductListItem } from '@shared/catalog'
 import { formatMoney } from '@shared/money'
 import { formatQty } from '@shared/qty'
-import { LookupSelect, ProductForm } from './ProductForm'
+import { CopyCode, LookupSelect, ProductForm } from './ProductForm'
 import { ProductImport } from './ProductImport'
 import { BarcodeLabels } from './BarcodeLabels'
 import { Paginator } from '../../components/Paginator'
@@ -345,9 +345,12 @@ function ProductList({
                       onClick={() => onOpen(row.id)}
                     >
                       <Table.Td>
-                        <Text ff="monospace" size="sm">
-                          {row.sku}
-                        </Text>
+                        <Group gap={4} wrap="nowrap">
+                          <Text ff="monospace" size="sm">
+                            {row.sku}
+                          </Text>
+                          <CopyCode value={row.sku} />
+                        </Group>
                       </Table.Td>
 
                       <Table.Td>
@@ -394,6 +397,7 @@ function ProductList({
                             <Text ff="monospace" size="sm">
                               {row.primaryBarcode}
                             </Text>
+                            <CopyCode value={row.primaryBarcode} />
                           </Group>
                         ) : (
                           <Text size="sm" c="dimmed">
