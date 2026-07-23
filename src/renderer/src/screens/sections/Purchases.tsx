@@ -125,7 +125,10 @@ function orNull(text: string): string | null {
 // The screen — history / new purchase
 // ═════════════════════════════════════════════════════════════════════════════
 
-type View = { mode: 'list' } | { mode: 'new' }
+// `seed` is a just-cancelled bill whose items pre-fill a fresh New Purchase — the "re-enter" half of
+// "Correct this invoice". A seeded purchase is still a BRAND-NEW purchase (its own id); the voided one
+// stays voided. Same reverse-then-re-enter shape as the sale-side correction.
+type View = { mode: 'list' } | { mode: 'new'; seed?: PurchaseDetail }
 
 export function Purchases({
   readOnly,
@@ -154,6 +157,7 @@ export function Purchases({
       <NewPurchase
         readOnly={readOnly}
         currencySymbol={currencySymbol}
+        seed={view.seed}
         onClose={() => setView({ mode: 'list' })}
       />
     )
@@ -178,6 +182,7 @@ export function Purchases({
           canReturn={canReturn}
           canVoid={canVoid}
           onNew={() => setView({ mode: 'new' })}
+          onCorrect={(seed) => setView({ mode: 'new', seed })}
           onReturned={() => setReturnsKey((key) => key + 1)}
         />
       </Tabs.Panel>
@@ -202,6 +207,7 @@ function PurchaseList({
   canReturn,
   canVoid,
   onNew,
+  onCorrect,
   onReturned
 }: {
   readOnly: boolean
@@ -210,6 +216,8 @@ function PurchaseList({
   canReturn: boolean
   canVoid: boolean
   onNew: () => void
+  /** A bill was just cancelled to correct it — open a fresh New Purchase pre-filled from its items. */
+  onCorrect: (seed: PurchaseDetail) => void
   /** A committed return is money and stock moving — the returns history reloads with it. */
   onReturned: () => void
 }): React.JSX.Element {
@@ -468,6 +476,12 @@ function PurchaseList({
         // A cancellation changes this bill's row in the list behind the drawer — its status, and the
         // "owed" the shop no longer owes. Re-pull the page so the shopkeeper SEES it land.
         onVoided={() => void load()}
+        // "Correct this invoice": the bill was just cancelled; hand its items to a fresh New Purchase to
+        // re-enter. Close the drawer first so we are not stacking a form behind an open drawer.
+        onCorrect={(seed) => {
+          setSelectedId(null)
+          onCorrect(seed)
+        }}
         onClose={() => setSelectedId(null)}
       />
     </Stack>
@@ -486,6 +500,7 @@ function PurchaseDetailDrawer({
   canVoid,
   onReturned,
   onVoided,
+  onCorrect,
   onClose
 }: {
   purchaseId: number | null
@@ -497,6 +512,8 @@ function PurchaseDetailDrawer({
   onReturned: () => void
   /** A cancelled bill changes its own row in the list behind us — status, and what is owed. */
   onVoided: () => void
+  /** A cancelled bill being CORRECTED — re-enter its items as a fresh purchase. Carries the loaded bill. */
+  onCorrect: (seed: PurchaseDetail) => void
   onClose: () => void
 }): React.JSX.Element {
   const [purchase, setPurchase] = useState<PurchaseDetail | null>(null)
@@ -791,10 +808,12 @@ function PurchaseDetailDrawer({
         onClose={() => setVoiding(false)}
         onDone={() => {
           setVoiding(false)
-          // Re-pull the bill so the red "Cancelled" banner appears where the shopkeeper is looking, and
-          // tell the list behind us so its row stops claiming the money is owed.
-          setReloadKey((key) => key + 1)
           onVoided()
+          // REVERSE, then RE-ENTER. The wrong bill is now cancelled; hand its items to a fresh New
+          // Purchase so the manager fixes the price/qty and records the corrected bill — the whole
+          // point of "Correct this invoice". Mirrors the sale-side flow. `purchase` is the bill we just
+          // cancelled, loaded in this drawer.
+          if (purchase) onCorrect(purchase)
         }}
       />
     </Drawer>
@@ -1063,6 +1082,16 @@ type LineDraft = {
   unitCost: number
   batchNo: string
   expiryDate: string
+  /**
+   * The item's SELLING prices, 2-dp money — NOT the cost. Prefilled from the product when it is picked
+   * and editable here, because a new delivery is exactly when the shopkeeper revises them. A change
+   * applies GOING FORWARD (products.update), never re-pricing a past sale. `origRetail`/`origWholesale`
+   * hold the prefilled figures so submit can diff typed-vs-original and update ONLY what changed.
+   */
+  retailPrice: number
+  wholesalePrice: number
+  origRetail: number
+  origWholesale: number
 }
 
 type TenderDraft = {
@@ -1087,27 +1116,98 @@ function emptyLine(): LineDraft {
     qtyM: 0,
     unitCost: 0,
     batchNo: '',
-    expiryDate: ''
+    expiryDate: '',
+    retailPrice: 0,
+    wholesalePrice: 0,
+    origRetail: 0,
+    origWholesale: 0
+  }
+}
+
+/**
+ * One draft line seeded from a cancelled bill's line. Carries what to re-key: product, qty, unit cost.
+ * The selling prices (retail/wholesale) are prefilled fresh from the product by `pickProduct`-style
+ * seeding below, so a correction shows today's prices, not a snapshot. BATCH numbers are NOT re-seeded:
+ * a PurchaseLine records the batch by id, not its printed number, so the manager re-enters it — a small
+ * notice says so. (Getting the wrong batch number onto restocked goods is worse than re-typing it.)
+ */
+function seedLineFrom(line: PurchaseDetail['lines'][number]): LineDraft {
+  return {
+    key: lineKey++,
+    productId: line.productId,
+    productName: line.nameSnapshot,
+    saleUomId: null,
+    trackBatches: false, // corrected below once the product detail is read
+    qtyM: line.qtyM,
+    unitCost: line.unitCost,
+    batchNo: '',
+    expiryDate: '',
+    retailPrice: 0,
+    wholesalePrice: 0,
+    origRetail: 0,
+    origWholesale: 0
   }
 }
 
 function NewPurchase({
   readOnly,
   currencySymbol,
+  seed,
   onClose
 }: {
   readOnly: boolean
   currencySymbol: string
+  /** A just-cancelled bill to pre-fill from — the "re-enter" half of Correct this invoice. */
+  seed?: PurchaseDetail
   onClose: () => void
 }): React.JSX.Element {
-  const [supplierId, setSupplierId] = useState<number | null>(null)
-  const [invoiceNo, setInvoiceNo] = useState('')
+  const [supplierId, setSupplierId] = useState<number | null>(seed?.supplierId ?? null)
+  const [invoiceNo, setInvoiceNo] = useState(seed?.supplierInvoiceNo ?? '')
+  // A correction is entered NOW, not back-dated onto the cancelled bill's day (which may be in a locked
+  // period). The manager can change it if the goods truly arrived earlier and that month is still open.
   const [receivedDate, setReceivedDate] = useState(todayIso())
-  const [notes, setNotes] = useState('')
-  const [taxTotal, setTaxTotal] = useState(0)
-  const [lines, setLines] = useState<LineDraft[]>(() => [emptyLine()])
+  const [notes, setNotes] = useState(seed?.notes ?? '')
+  const [taxTotal, setTaxTotal] = useState(seed?.taxTotal ?? 0)
+  const [lines, setLines] = useState<LineDraft[]>(() =>
+    seed && seed.lines.length > 0 ? seed.lines.map(seedLineFrom) : [emptyLine()]
+  )
+  // Payments start EMPTY even on a correction — the corrected bill is re-tendered fresh.
   const [tenders, setTenders] = useState<TenderDraft[]>([])
   const [saving, setSaving] = useState(false)
+
+  // Seeded lines carry qty/cost but not the product's batch flag, unit, or today's selling prices — so
+  // read each seeded product's detail once, exactly as picking it by hand would, and fill those in.
+  useEffect(() => {
+    if (!seed) return
+    let cancelled = false
+    void (async () => {
+      for (const line of seed.lines) {
+        const result = await window.pos.products.get({ id: line.productId })
+        if (cancelled || !result.ok) continue
+        const p = result.data.product
+        setLines((rows) =>
+          rows.map((row) =>
+            row.productId === line.productId
+              ? {
+                  ...row,
+                  trackBatches: p.trackBatches,
+                  saleUomId: p.saleUomId,
+                  retailPrice: p.retailPrice,
+                  wholesalePrice: p.wholesalePrice,
+                  origRetail: p.retailPrice,
+                  origWholesale: p.wholesalePrice
+                }
+              : row
+          )
+        )
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // Seed is a one-shot at mount; keying on its id avoids re-running as lines are edited.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.id])
 
   // The unit labels, so a line can show "pcs" next to the quantity. Loaded once.
   const { items: uoms } = useLookupList('uom')
@@ -1152,7 +1252,17 @@ function NewPurchase({
     const result = await window.pos.products.get({ id: item.id })
     if (!result.ok) return
     const product = result.data.product
-    setLine(key, { trackBatches: product.trackBatches, saleUomId: product.saleUomId })
+    // Prefill the SELLING prices (2-dp money) so the receiver can see and revise them. `orig*` remembers
+    // what the product currently has, so submit updates ONLY a price the user actually changed. A
+    // purchase-only pack legitimately has no retail price; that guard is on the fields' visibility below.
+    setLine(key, {
+      trackBatches: product.trackBatches,
+      saleUomId: product.saleUomId,
+      retailPrice: product.retailPrice,
+      wholesalePrice: product.wholesalePrice,
+      origRetail: product.retailPrice,
+      origWholesale: product.wholesalePrice
+    })
   }
 
   // ── Live totals (a PREDICTION; create() returns the authoritative frozen GRN) ──
@@ -1218,15 +1328,48 @@ function NewPurchase({
     }
 
     const result = await window.pos.purchases.create(input)
-    setSaving(false)
 
     if (!result.ok) {
+      setSaving(false)
       notifications.show({
         color: 'red',
         title: 'Could not record this purchase',
         message: result.error.userMessage
       })
       return
+    }
+
+    // ── Selling-price revisions, AFTER the purchase is safely recorded ──────────────────────────────
+    // The purchase is the important record; a price tweak is secondary, so it runs only once the bill is
+    // in the books. We update ONLY lines whose retail/wholesale differs from what the item currently
+    // carried (origRetail/origWholesale, prefilled when the product was picked), and we send ONLY the
+    // price fields — never cost (that is DERIVED from this very purchase; products.update won't take it
+    // anyway). A failed price update is NON-FATAL: the stock is booked in regardless, so we warn and
+    // move on rather than pretend the purchase failed.
+    const priceChanges = validLines.filter(
+      (line) =>
+        line.productId !== null &&
+        (line.retailPrice !== line.origRetail || line.wholesalePrice !== line.origWholesale)
+    )
+    const priceFailures: string[] = []
+    for (const line of priceChanges) {
+      const update = await window.pos.products.update({
+        id: line.productId as number,
+        retailPrice: line.retailPrice,
+        wholesalePrice: line.wholesalePrice
+      })
+      if (!update.ok) priceFailures.push(`${line.productName}: ${update.error.userMessage}`)
+    }
+
+    setSaving(false)
+
+    if (priceFailures.length > 0) {
+      notifications.show({
+        color: 'orange',
+        title: 'Purchase saved — but a price did not update',
+        message: `The stock is booked in. These prices were left unchanged: ${priceFailures.join('; ')}`,
+        autoClose: 9000
+      })
     }
 
     const remaining = result.data.grandTotal - result.data.paidTotal
@@ -1248,7 +1391,7 @@ function NewPurchase({
           <Button variant="subtle" leftSection={<ArrowLeft size={16} />} onClick={onClose}>
             Back to purchases
           </Button>
-          <Title order={2}>New purchase</Title>
+          <Title order={2}>{seed ? 'Correct invoice' : 'New purchase'}</Title>
         </Group>
 
         <Button
@@ -1257,9 +1400,26 @@ function NewPurchase({
           disabled={!canSubmit}
           onClick={() => void submit()}
         >
-          Record purchase
+          {seed ? 'Record corrected purchase' : 'Record purchase'}
         </Button>
       </Group>
+
+      {seed && (
+        <Alert color="blue" variant="light" icon={<FileX2 size={18} />} title="Re-entering the cancelled bill">
+          <Text size="sm">
+            {seed.supplierInvoiceNo ? `Bill ${seed.supplierInvoiceNo}` : 'The bill'} has been cancelled
+            and kept for the record. Its items are filled in below — fix the price, quantity or lines,
+            set how it was paid, and record it as a fresh corrected purchase.
+            {seed.lines.some((l) => l.batchId !== null) && (
+              <>
+                {' '}
+                A batch-tracked item needs its <strong>batch number re-entered</strong> — it is not
+                copied from the cancelled bill.
+              </>
+            )}
+          </Text>
+        </Alert>
+      )}
 
       {readOnly && (
         <Alert color="orange" icon={<TriangleAlert size={18} />}>
@@ -1366,6 +1526,28 @@ function NewPurchase({
                           leftSection={<Text size="sm">{currencySymbol}</Text>}
                           value={line.unitCost}
                           onChange={(value) => setLine(line.key, { unitCost: value })}
+                          disabled={readOnly}
+                        />
+                      </Group>
+
+                      {/* The SELLING prices, prefilled from the item and editable right here — a new
+                          delivery is exactly when they get revised. These are money (2-dp), NOT the
+                          cost above; a change applies going forward and never touches a past sale. */}
+                      <Group gap={8} align="flex-start" grow>
+                        <MoneyInput
+                          label="Retail price"
+                          description="What you sell ONE for. Changing it updates the item going forward — past sales are untouched."
+                          leftSection={<Text size="sm">{currencySymbol}</Text>}
+                          value={line.retailPrice}
+                          onChange={(value) => setLine(line.key, { retailPrice: value })}
+                          disabled={readOnly}
+                        />
+                        <MoneyInput
+                          label="Wholesale price"
+                          description="The bulk / trade price. Changing it updates the item going forward — past sales are untouched."
+                          leftSection={<Text size="sm">{currencySymbol}</Text>}
+                          value={line.wholesalePrice}
+                          onChange={(value) => setLine(line.key, { wholesalePrice: value })}
                           disabled={readOnly}
                         />
                       </Group>

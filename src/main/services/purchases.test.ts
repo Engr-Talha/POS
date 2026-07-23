@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { makeTestDb, expectUserMessage, type TestDb } from '../db/testkit'
 import * as purchases from './purchases'
+import * as products from './products'
 import * as suppliers from './suppliers'
 import * as supplierLedger from './supplier-ledger'
 import * as stock from './stock'
@@ -1007,6 +1008,77 @@ describe('cancelling a purchase', () => {
     const all = purchases.listPurchases(t.db)
     expect(all.total).toBe(2)
     expect(all.rows.filter((row) => row.status === 'voided')).toHaveLength(1)
+
+    everythingHolds(t)
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// "Correct this invoice" — reverse + RE-ENTER, as one flow. The renderer does the
+// re-entry (New Purchase pre-filled from the cancelled bill); this pins that the two
+// documents together leave stock and the books right.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('correcting a purchase — void then re-record', () => {
+  it('cancels the wrong bill and re-records it fixed; stock and books net out', () => {
+    const supplierId = makeSupplier('Ronin')
+    const productId = makeProduct()
+
+    // The WRONG bill: 100 keyed by mistake, on account.
+    const wrong = purchases.createPurchase(t.db, manager, {
+      supplierId,
+      lines: [{ productId, qtyM: 100 * ONE_UNIT, unitCost: cost(1050) }]
+    })
+    expect(stock.onHand(t.db, productId)).toBe(100 * ONE_UNIT)
+
+    // CORRECT IT: cancel the wrong one…
+    purchases.voidPurchase(t.db, manager, { id: wrong.id, reasonCode: 'keyed_wrong' })
+    const voided = purchases.getPurchase(t.db, wrong.id)
+    expect(voided.status).toBe('voided')
+    expect(voided.id).toBe(wrong.id) // keeps its id
+    expect(stock.onHand(t.db, productId)).toBe(0) // the 100 came back off
+
+    // …and re-record the corrected bill: 20, not 100. A brand-new purchase, its own id.
+    const fixed = purchases.createPurchase(t.db, manager, {
+      supplierId,
+      lines: [{ productId, qtyM: 20 * ONE_UNIT, unitCost: cost(1050) }]
+    })
+    expect(fixed.id).not.toBe(wrong.id)
+    expect(fixed.status).toBe('completed')
+
+    // Net on the shelf: only the real 20 (the wrong 100 went on then came back off).
+    expect(stock.onHand(t.db, productId)).toBe(20 * ONE_UNIT)
+
+    // Both documents stand and reconcile; the trial balance balances.
+    everythingHolds(t)
+  })
+})
+
+describe('purchase-time price revision (#1) — updates selling price, never cost', () => {
+  it('products.update changes retail/wholesale but never cost, posts no movement or journal', () => {
+    const productId = makeProduct()
+    const supplierId = makeSupplier('Acme')
+
+    // A real purchase gives the item a non-zero DERIVED cost.
+    purchases.createPurchase(t.db, manager, {
+      supplierId,
+      lines: [{ productId, qtyM: 10 * ONE_UNIT, unitCost: cost(60) }]
+    })
+    const costBefore = products.getById(t.db, productId).product.costPrice
+    const movementsBefore = t.db.prepare('SELECT COUNT(*) FROM stock_movements').pluck().get() as number
+    const journalsBefore = t.db.prepare('SELECT COUNT(*) FROM journals').pluck().get() as number
+
+    // The purchase form revises the SELLING prices via products.update (retail + wholesale ONLY).
+    products.update(t.db, manager, { id: productId, retailPrice: rs(150), wholesalePrice: rs(130) })
+
+    const after = products.getById(t.db, productId).product
+    expect(after.retailPrice).toBe(rs(150))
+    expect(after.wholesalePrice).toBe(rs(130))
+    // COST is derived from the purchase — untouched by a selling-price revision.
+    expect(after.costPrice).toBe(costBefore)
+    // A catalogue change only: no new stock movement, no new journal.
+    expect(t.db.prepare('SELECT COUNT(*) FROM stock_movements').pluck().get()).toBe(movementsBefore)
+    expect(t.db.prepare('SELECT COUNT(*) FROM journals').pluck().get()).toBe(journalsBefore)
 
     everythingHolds(t)
   })
