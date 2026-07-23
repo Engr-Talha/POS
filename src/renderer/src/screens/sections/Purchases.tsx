@@ -1312,8 +1312,11 @@ function NewPurchase({
     problems.push('Every item needs a quantity greater than zero.')
   if (lines.some((line) => line.trackBatches && line.expiryDate !== '' && line.batchNo.trim() === ''))
     problems.push('An expiry date needs a batch number next to it.')
-  if (tenders.some((tender) => tender.methodLookupId === null || tender.amount <= 0))
-    problems.push('Give every payment a method and an amount.')
+  // A payment row left at Rs 0 is NOT an error — it just is not a payment, so it is ignored (the bill
+  // goes on credit for that much). Only a row with real money in it must name HOW it was paid. This is
+  // what lets "leave it blank = fully on credit" work without the empty Cash row blocking Record.
+  if (tenders.some((tender) => tender.amount > 0 && tender.methodLookupId === null))
+    problems.push('Give every payment you are making a method.')
   if (paidTotal > grandTotal)
     problems.push('You cannot pay a supplier more than their bill — there is no change when buying.')
 
@@ -1336,7 +1339,11 @@ function NewPurchase({
       }
     })
 
-    const paymentInputs: PurchasePaymentInput[] = tenders.map((tender) => {
+    // Drop any blank Rs 0 rows — they are not payments. What is left (if anything) is really paid now;
+    // the rest of the bill is on credit. An empty form = wholly on account.
+    const paymentInputs: PurchasePaymentInput[] = tenders
+      .filter((tender) => tender.amount > 0)
+      .map((tender) => {
       const code = codeOf(tender)
       const isCheque = code === 'cheque'
       const isWallet = code === 'jazzcash' || code === 'easypaisa'
