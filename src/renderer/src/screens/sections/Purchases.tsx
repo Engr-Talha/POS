@@ -1207,6 +1207,11 @@ function NewPurchase({
   const [tenders, setTenders] = useState<TenderDraft[]>([])
   const [saving, setSaving] = useState(false)
 
+  // HOW IS THIS BILL PAID — one clear choice so nobody has to guess. 'credit' = wholly on the
+  // supplier's account (no tenders). 'full' = paid now in one go. 'part' = type what was paid, the rest
+  // is credit. Defaults to 'credit' — the common case is a delivery that goes on the account.
+  const [payMode, setPayMode] = useState<'credit' | 'full' | 'part'>('credit')
+
   // Seeded lines carry qty/cost but not the product's batch flag, unit, or today's selling prices — so
   // read each seeded product's detail once, exactly as picking it by hand would, and fill those in.
   useEffect(() => {
@@ -1424,7 +1429,7 @@ function NewPurchase({
   }
 
   return (
-    <Stack gap="lg" maw={920}>
+    <Stack gap="md" maw={780}>
       <Group justify="space-between" align="flex-start">
         <Group gap="sm" align="center">
           <Button variant="subtle" leftSection={<ArrowLeft size={16} />} onClick={onClose}>
@@ -1468,7 +1473,7 @@ function NewPurchase({
       )}
 
       {/* ── The supplier and the bill ──────────────────────────────────────── */}
-      <Card withBorder padding="lg">
+      <Card withBorder padding="md">
         <Group gap="sm" mb="md">
           <Truck size={18} />
           <Text fw={600}>Supplier &amp; bill</Text>
@@ -1506,7 +1511,7 @@ function NewPurchase({
       </Card>
 
       {/* ── The lines ──────────────────────────────────────────────────────── */}
-      <Card withBorder padding="lg">
+      <Card withBorder padding="md">
         <Group justify="space-between" mb="md">
           <Group gap="sm">
             <Package size={18} />
@@ -1647,7 +1652,7 @@ function NewPurchase({
       </Card>
 
       {/* ── Tax & notes ────────────────────────────────────────────────────── */}
-      <Card withBorder padding="lg">
+      <Card withBorder padding="md">
         <Group grow align="flex-start">
           <MoneyInput
             label="Input tax (recoverable)"
@@ -1669,51 +1674,97 @@ function NewPurchase({
         </Group>
       </Card>
 
-      {/* ── How it was paid ────────────────────────────────────────────────── */}
-      <Card withBorder padding="lg">
-        <Group gap="sm" mb="md">
+      {/* ── How it was paid — ONE clear choice, no guessing ────────────────── */}
+      <Card withBorder padding="md">
+        <Group gap="sm" mb="sm">
           <CreditCard size={18} />
-          <Text fw={600}>Payment &amp; credit</Text>
-          <Text size="xs" c="dimmed">
-            — pay some, all, or nothing now; the rest goes on the supplier&apos;s account
-          </Text>
+          <Text fw={600}>How is this paid?</Text>
         </Group>
 
-        {/* The bill total and what is still owed, big and clear. */}
-        <Card withBorder padding="md" mb="md" bg="var(--mantine-color-default-hover)">
+        {/* Three buttons. Full credit = nothing now (whole bill on the account). Paid in full = one cash
+            tender for the lot. Part paid = type what was handed over, the rest is credit. Each click
+            sets the mode AND fixes the tenders to match, so the figure below is always honest. */}
+        <Button.Group>
+          <Button
+            variant={payMode === 'credit' ? 'filled' : 'default'}
+            color="red"
+            disabled={readOnly}
+            onClick={() => {
+              setPayMode('credit')
+              setTenders([])
+            }}
+          >
+            Full credit (udhaar)
+          </Button>
+          <Button
+            variant={payMode === 'full' ? 'filled' : 'default'}
+            color="teal"
+            disabled={readOnly || grandTotal <= 0 || cashMethod === null}
+            onClick={() => {
+              setPayMode('full')
+              if (cashMethod)
+                setTenders([
+                  { key: tenderKey++, methodLookupId: cashMethod.id, amount: grandTotal, chequeNo: '', chequeDate: '', walletRef: '' }
+                ])
+            }}
+          >
+            Paid in full
+          </Button>
+          <Button
+            variant={payMode === 'part' ? 'filled' : 'default'}
+            disabled={readOnly || grandTotal <= 0}
+            onClick={() => {
+              setPayMode('part')
+              // Seed one row with the whole amount so the manager just edits it down to what was paid.
+              setTenders([
+                {
+                  key: tenderKey++,
+                  methodLookupId: cashMethod?.id ?? methods[0]?.id ?? null,
+                  amount: Math.max(0, grandTotal),
+                  chequeNo: '',
+                  chequeDate: '',
+                  walletRef: ''
+                }
+              ])
+            }}
+          >
+            Part paid
+          </Button>
+        </Button.Group>
+
+        {/* The figure that matters, stated the way the chosen mode means it. */}
+        <Card withBorder padding="sm" mt="sm" bg="var(--mantine-color-default-hover)">
           <Group justify="space-between" align="center">
             <Stack gap={0}>
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
                 Bill total
               </Text>
-              <Text fw={700} size="xl">
+              <Text fw={700} size="lg">
                 {formatMoney(grandTotal, { symbol: currencySymbol })}
               </Text>
-              <Text size="xs" c="dimmed">
-                {formatMoney(subtotalNet, { symbol: currencySymbol })} goods
-                {taxTotal > 0 ? ` + ${formatMoney(taxTotal, { symbol: currencySymbol })} tax` : ''}
-              </Text>
             </Stack>
-
             <Stack gap={0} align="flex-end">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
                 {owed > 0 ? 'On credit (owed)' : owed < 0 ? 'Overpaid' : 'Paid in full'}
               </Text>
-              <Text fw={800} c={owed > 0 ? 'red' : owed < 0 ? 'orange' : 'teal'} style={{ fontSize: 34, lineHeight: 1.1 }}>
+              <Text fw={800} c={owed > 0 ? 'red' : owed < 0 ? 'orange' : 'teal'} style={{ fontSize: 28, lineHeight: 1.1 }}>
                 {formatMoney(Math.abs(owed), { symbol: currencySymbol })}
               </Text>
             </Stack>
           </Group>
         </Card>
 
-        <Stack gap={8}>
-          {tenders.length === 0 && (
-            <Text size="sm" c="dimmed">
-              No payment yet — the whole bill is on account (owed to the supplier). Add a payment for
-              anything you are paying now.
-            </Text>
-          )}
-
+        {/* Full-credit needs no rows at all — say so plainly and show nothing else. */}
+        {payMode === 'credit' ? (
+          <Text size="sm" c="dimmed" mt="sm">
+            The whole bill is on {' '}
+            <Text span fw={600} c="var(--mantine-color-text)">
+              {supplierId !== null ? 'the supplier’s' : 'the supplier’s'} account
+            </Text>{' '}
+            — nothing paid now. You can pay it later from the supplier’s ledger.
+          </Text>
+        ) : (
+        <Stack gap={8} mt="sm">
           {tenders.map((tender) => {
             const code = codeOf(tender)
             return (
@@ -1812,53 +1863,31 @@ function NewPurchase({
             )
           })}
 
-          <Group gap={8}>
-            <Button
-              variant="default"
-              size="xs"
-              leftSection={<Plus size={16} />}
-              disabled={readOnly || methods.length === 0}
-              onClick={() =>
-                setTenders((rows) => [
-                  ...rows,
-                  {
-                    key: tenderKey++,
-                    methodLookupId: cashMethod?.id ?? methods[0]?.id ?? null,
-                    // Whatever is still owed — the common case is paying the remainder.
-                    amount: Math.max(0, grandTotal - paidTotal),
-                    chequeNo: '',
-                    chequeDate: '',
-                    walletRef: ''
-                  }
-                ])
-              }
-            >
-              Add a payment
-            </Button>
-
-            {cashMethod !== null && grandTotal > 0 && (
-              <Button
-                variant="subtle"
-                size="xs"
-                disabled={readOnly}
-                onClick={() =>
-                  setTenders([
-                    {
-                      key: tenderKey++,
-                      methodLookupId: cashMethod.id,
-                      amount: grandTotal,
-                      chequeNo: '',
-                      chequeDate: '',
-                      walletRef: ''
-                    }
-                  ])
+          {/* Split payment (cash + cheque, say) — only offered in Part-paid mode. */}
+          <Button
+            variant="default"
+            size="xs"
+            w="fit-content"
+            leftSection={<Plus size={16} />}
+            disabled={readOnly || methods.length === 0}
+            onClick={() =>
+              setTenders((rows) => [
+                ...rows,
+                {
+                  key: tenderKey++,
+                  methodLookupId: cashMethod?.id ?? methods[0]?.id ?? null,
+                  amount: Math.max(0, grandTotal - paidTotal),
+                  chequeNo: '',
+                  chequeDate: '',
+                  walletRef: ''
                 }
-              >
-                Paid in full (cash)
-              </Button>
-            )}
-          </Group>
+              ])
+            }
+          >
+            Add another payment
+          </Button>
         </Stack>
+        )}
       </Card>
 
       {/* ── What is stopping a submit ──────────────────────────────────────── */}
