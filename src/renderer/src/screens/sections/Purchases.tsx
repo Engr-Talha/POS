@@ -806,14 +806,14 @@ function PurchaseDetailDrawer({
         opened={voiding}
         currencySymbol={currencySymbol}
         onClose={() => setVoiding(false)}
-        onDone={() => {
+        onDone={(voided) => {
           setVoiding(false)
-          onVoided()
-          // REVERSE, then RE-ENTER. The wrong bill is now cancelled; hand its items to a fresh New
-          // Purchase so the manager fixes the price/qty and records the corrected bill — the whole
-          // point of "Correct this invoice". Mirrors the sale-side flow. `purchase` is the bill we just
-          // cancelled, loaded in this drawer.
-          if (purchase) onCorrect(purchase)
+          // REVERSE, then RE-ENTER. The wrong bill is now cancelled; hand its items straight to a fresh
+          // New Purchase so the manager fixes the price/qty and records the corrected bill — the whole
+          // point of "Correct this invoice", mirroring the sale-side flow. We do NOT also call onVoided
+          // here: the view is switching away to the New Purchase form, so reloading the list behind it
+          // is pointless (and the list re-pulls anyway when the correction is recorded and we return).
+          onCorrect(voided)
         }}
       />
     </Drawer>
@@ -849,7 +849,9 @@ function VoidPurchaseModal({
   opened: boolean
   currencySymbol: string
   onClose: () => void
-  onDone: () => void
+  /** Carries the just-cancelled bill up, so the caller re-opens it for re-entry without relying on a
+   *  possibly-stale closure. */
+  onDone: (voided: PurchaseDetail) => void
 }): React.JSX.Element {
   const [reasonCode, setReasonCode] = useState<string | null>(null)
   const [reasonText, setReasonText] = useState('')
@@ -903,10 +905,12 @@ function VoidPurchaseModal({
     notifications.show({
       color: 'green',
       title: 'Invoice cancelled',
-      message: `${purchase.supplierInvoiceNo ? `Bill ${purchase.supplierInvoiceNo}` : 'The bill'} has been cancelled. The stock has come back off and it is no longer owed — you can enter it again correctly now.`
+      message: `${purchase.supplierInvoiceNo ? `Bill ${purchase.supplierInvoiceNo}` : 'The bill'} has been cancelled. The stock has come back off and it is no longer owed — now enter it again correctly.`
     })
 
-    onDone()
+    // Hand the cancelled bill up so it re-opens pre-filled. `purchase` is non-null here (the modal only
+    // renders with one), but we pass it explicitly rather than lean on a closure the caller can't see.
+    onDone(purchase)
   }
 
   return (
@@ -956,40 +960,59 @@ function VoidPurchaseModal({
             </Stack>
           </Card>
 
-          {/* WHAT WILL HAPPEN, in the plainest words we have. */}
-          <Alert color="orange" variant="light" icon={<TriangleAlert size={18} />}>
-            <Text size="sm">
-              This bill will be cancelled. Everything on it comes back off your stock, and you will no
-              longer owe this supplier for it. The cancelled bill is kept for the record — it keeps its
-              number and all its lines — so you can enter the delivery again with the right figures.
-              This cannot be undone.
-            </Text>
-          </Alert>
+          {purchase.paidTotal > 0 ? (
+            /* A PAID bill cannot be reverse-corrected: the money has already left the drawer or the
+               bank, and a book contra cannot un-spend real cash (services/purchases.ts documents this).
+               Say so UP FRONT and point at the instrument that handles money coming back — a return —
+               rather than let the shopkeeper hit the refusal only after pressing Cancel. */
+            <Alert color="red" variant="light" icon={<CircleAlert size={18} />} title="This bill is already paid">
+              <Text size="sm">
+                {formatMoney(purchase.paidTotal, { symbol: currencySymbol })} has been paid on this
+                bill, so it cannot simply be cancelled — the money has already left the shop. To send
+                goods back and get credit or a refund, use{' '}
+                <strong>Return to supplier</strong> instead.
+              </Text>
+            </Alert>
+          ) : (
+            /* WHAT WILL HAPPEN, in the plainest words we have. */
+            <Alert color="orange" variant="light" icon={<TriangleAlert size={18} />}>
+              <Text size="sm">
+                This bill will be cancelled. Everything on it comes back off your stock, and you will no
+                longer owe this supplier for it. The cancelled bill is kept for the record — it keeps its
+                number and all its lines — then it opens again, pre-filled, so you can enter it with the
+                right figures. This cannot be undone.
+              </Text>
+            </Alert>
+          )}
 
-          <LookupCodeSelect
-            listKey="void_reason"
-            label="Reason"
-            description="Why this bill is being cancelled. Add a new reason with +."
-            value={reasonCode}
-            onChange={(value) => {
-              setReasonCode(value)
-              setError(null)
-            }}
-            disabled={busy}
-            required
-          />
+          {purchase.paidTotal === 0 && (
+            <>
+              <LookupCodeSelect
+                listKey="void_reason"
+                label="Reason"
+                description="Why this bill is being cancelled. Add a new reason with +."
+                value={reasonCode}
+                onChange={(value) => {
+                  setReasonCode(value)
+                  setError(null)
+                }}
+                disabled={busy}
+                required
+              />
 
-          <Textarea
-            label="Note (optional)"
-            description="Any extra detail — e.g. keyed 10 not 100."
-            autosize
-            minRows={1}
-            maxRows={4}
-            maxLength={500}
-            disabled={busy}
-            value={reasonText}
-            onChange={(event) => setReasonText(event.currentTarget.value)}
-          />
+              <Textarea
+                label="Note (optional)"
+                description="Any extra detail — e.g. keyed 10 not 100."
+                autosize
+                minRows={1}
+                maxRows={4}
+                maxLength={500}
+                disabled={busy}
+                value={reasonText}
+                onChange={(event) => setReasonText(event.currentTarget.value)}
+              />
+            </>
+          )}
 
           {/* MAIN's own refusal, word for word — it is the sentence that says what to do next. */}
           {error && (
@@ -1011,29 +1034,38 @@ function VoidPurchaseModal({
           )}
 
           <Group justify="flex-end" gap="sm">
-            <Button variant="default" disabled={busy} onClick={onClose}>
-              Keep the bill
-            </Button>
-            {negativeWarning ? (
-              <Button
-                color="red"
-                leftSection={<FileX2 size={16} />}
-                loading={busy}
-                disabled={reasonCode === null}
-                onClick={() => void submit(true)}
-              >
-                Cancel it anyway
+            {purchase.paidTotal > 0 ? (
+              // Paid bill: nothing to confirm here — the only path is a return. Just let them close.
+              <Button variant="default" onClick={onClose}>
+                Close
               </Button>
             ) : (
-              <Button
-                color="red"
-                leftSection={<FileX2 size={16} />}
-                loading={busy}
-                disabled={reasonCode === null}
-                onClick={() => void submit(false)}
-              >
-                Cancel this invoice
-              </Button>
+              <>
+                <Button variant="default" disabled={busy} onClick={onClose}>
+                  Keep the bill
+                </Button>
+                {negativeWarning ? (
+                  <Button
+                    color="red"
+                    leftSection={<FileX2 size={16} />}
+                    loading={busy}
+                    disabled={reasonCode === null}
+                    onClick={() => void submit(true)}
+                  >
+                    Cancel it anyway
+                  </Button>
+                ) : (
+                  <Button
+                    color="red"
+                    leftSection={<FileX2 size={16} />}
+                    loading={busy}
+                    disabled={reasonCode === null}
+                    onClick={() => void submit(false)}
+                  >
+                    Cancel this invoice
+                  </Button>
+                )}
+              </>
             )}
           </Group>
         </Stack>
@@ -1634,7 +1666,10 @@ function NewPurchase({
       <Card withBorder padding="lg">
         <Group gap="sm" mb="md">
           <CreditCard size={18} />
-          <Text fw={600}>Payment</Text>
+          <Text fw={600}>Payment &amp; credit</Text>
+          <Text size="xs" c="dimmed">
+            — pay some, all, or nothing now; the rest goes on the supplier&apos;s account
+          </Text>
         </Group>
 
         {/* The bill total and what is still owed, big and clear. */}
@@ -1655,7 +1690,7 @@ function NewPurchase({
 
             <Stack gap={0} align="flex-end">
               <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                {owed > 0 ? 'Owed to supplier' : owed < 0 ? 'Overpaid' : 'Paid in full'}
+                {owed > 0 ? 'On credit (owed)' : owed < 0 ? 'Overpaid' : 'Paid in full'}
               </Text>
               <Text fw={800} c={owed > 0 ? 'red' : owed < 0 ? 'orange' : 'teal'} style={{ fontSize: 34, lineHeight: 1.1 }}>
                 {formatMoney(Math.abs(owed), { symbol: currencySymbol })}
