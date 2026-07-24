@@ -901,13 +901,38 @@ function hydrate(db: DB, header: PurchaseRow): PurchaseDetail {
     if (label != null) paymentMethodLabels[payment.methodLookupId] = label
   }
 
+  // WHAT HAS ALREADY GONE BACK to the supplier against this bill. The drawer shows it so the shopkeeper
+  // is not confused by a bill total that never changes: the grand_total is the ORIGINAL receipt (frozen,
+  // it never moves), but returns reduce what is really owed. `returnedValue` is the credit taken off the
+  // account (settlement 'supplier_credit'); a 'refund' return gave cash back and does not reduce the
+  // payable, so it is not netted here. `returnedQtyM` is how many units left again, across all returns.
+  const returnedValue = db
+    .prepare(
+      `SELECT COALESCE(SUM(grand_total), 0) FROM purchase_returns
+        WHERE purchase_id = ? AND settlement = 'supplier_credit'`
+    )
+    .pluck()
+    .get(header.id) as number
+
+  const returnedQtyM = db
+    .prepare(
+      `SELECT COALESCE(SUM(rl.qty_m), 0)
+         FROM purchase_return_lines rl
+         JOIN purchase_returns r ON r.id = rl.purchase_return_id
+        WHERE r.purchase_id = ?`
+    )
+    .pluck()
+    .get(header.id) as number
+
   return {
     ...toPurchase(header),
     lines,
     payments,
     supplierName: supplierName ?? null,
     userName: userName ?? null,
-    paymentMethodLabels
+    paymentMethodLabels,
+    returnedValue,
+    returnedQtyM
   }
 }
 

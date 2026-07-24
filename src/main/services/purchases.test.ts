@@ -694,6 +694,41 @@ describe('cancelling a purchase', () => {
     everythingHolds(t)
   })
 
+  it('reports what has already gone back, so the bill drawer is not confusing', () => {
+    // The client's confusion: a bill's grand total never changes (it is the frozen receipt), so after
+    // returning 22 of 23 the drawer still showed "759 owed". getPurchase now carries the returned
+    // totals and the drawer nets them — the grand total stays 759, but returnedValue and the real owed
+    // reflect the credit taken. This pins that reporting.
+    const supplierId = makeSupplier('Fontec')
+    const productId = makeProduct()
+    const purchase = receiveOnAccount(supplierId, productId, 23, 33, 'BILL-RET') // 23 @ Rs 33 = Rs 759 owed
+
+    const before = purchases.getPurchase(t.db, purchase.id)
+    expect(before.returnedQtyM).toBe(0)
+    expect(before.returnedValue).toBe(0)
+
+    // Send 22 back for supplier credit.
+    purchaseReturns.createPurchaseReturn(t.db, manager, {
+      purchaseId: purchase.id,
+      lines: [{ purchaseLineId: purchase.lines[0]!.id, qtyM: 22 * ONE_UNIT }],
+      settlement: 'supplier_credit',
+      reasonCode: 'damaged'
+    })
+
+    const after = purchases.getPurchase(t.db, purchase.id)
+    // The bill itself is frozen — its grand total is still the original receipt.
+    expect(after.grandTotal).toBe(rs(759))
+    // But the returned totals are now reported, and they match: 22 pcs, Rs 726 credit.
+    expect(after.returnedQtyM).toBe(22 * ONE_UNIT)
+    expect(after.returnedValue).toBe(rs(726))
+    // And what is REALLY owed nets the credit: 759 − 0 paid − 726 returned = 33.
+    expect(after.grandTotal - after.paidTotal - (after.returnedValue ?? 0)).toBe(rs(33))
+    // The supplier ledger agrees — the drawer figure is not inventing its own number.
+    expect(supplierLedger.balance(t.db, supplierId)).toBe(rs(33))
+
+    everythingHolds(t)
+  })
+
   it('refuses a purchase that already has goods returned to the supplier', () => {
     const supplierId = makeSupplier('Acme')
     const productId = makeProduct()

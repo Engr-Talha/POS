@@ -136,6 +136,14 @@ export type PurchaseDetail = Purchase & {
   userName?: string | null
   /** lookups('payment_method').label, joined per payment row. */
   paymentMethodLabels?: Record<number, string>
+  /**
+   * What has ALREADY gone back to the supplier against this bill — so the drawer can show it and not
+   * confuse the shopkeeper with a grand_total that never changes. `returnedValue` is the credit taken
+   * off the account (2-dp money); `returnedQtyM` is the units returned (3-dp). Both DERIVED from the
+   * purchase_returns rows on read, never stored (trap #17). Zero when nothing has gone back.
+   */
+  returnedValue?: number
+  returnedQtyM?: number
 }
 
 /** A row in the purchases list — the mirror of `SaleListItem`. */

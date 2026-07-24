@@ -575,10 +575,16 @@ function PurchaseDetailDrawer({
     }
   }, [purchaseId, reloadKey])
 
-  // A CANCELLED bill owes nothing: voidPurchase contra-posted the Payable, so the supplier ledger and
-  // GL Payable both say zero. Showing grandTotal − paidTotal here would contradict both, in red.
+  // What is REALLY still owed. A CANCELLED bill owes nothing (voidPurchase contra-posted the Payable —
+  // showing grandTotal − paidTotal would contradict the ledger, in red). Otherwise it is the bill less
+  // what was paid AND less any credit already taken off for goods returned — so a bill with 22 of 23
+  // sent back does not keep claiming the whole amount is owed. Matches supplier-ledger.balance, which
+  // nets the same return credit.
+  const returnedValue = purchase?.returnedValue ?? 0
   const owed =
-    purchase && purchase.status !== 'voided' ? purchase.grandTotal - purchase.paidTotal : 0
+    purchase && purchase.status !== 'voided'
+      ? Math.max(0, purchase.grandTotal - purchase.paidTotal - returnedValue)
+      : 0
 
   return (
     <Drawer
@@ -710,6 +716,22 @@ function PurchaseDetailDrawer({
             <Divider my={4} />
             <TotalRow label="Grand total" value={purchase.grandTotal} currencySymbol={currencySymbol} strong />
             <TotalRow label="Paid" value={purchase.paidTotal} currencySymbol={currencySymbol} dimmed />
+            {/* Goods already sent back — shown so the frozen grand total above is not confusing. The
+                credit came off what is owed. */}
+            {(purchase.returnedQtyM ?? 0) > 0 && (
+              <Group justify="space-between" wrap="nowrap">
+                <Text size="sm" c="grape">
+                  Returned to supplier
+                  <Text span c="dimmed" size="xs">
+                    {' '}
+                    · {formatQty(purchase.returnedQtyM ?? 0)} back
+                  </Text>
+                </Text>
+                <Text size="sm" c="grape">
+                  −{formatMoney(returnedValue, { symbol: currencySymbol })}
+                </Text>
+              </Group>
+            )}
             <Group justify="space-between" wrap="nowrap">
               <Text size="sm" fw={600} c={owed > 0 ? 'red' : 'dimmed'}>
                 Owed to supplier
