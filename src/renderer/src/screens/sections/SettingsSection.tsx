@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  ActionIcon,
   Alert,
   Button,
   Card,
@@ -16,11 +17,13 @@ import {
   Textarea,
   TextInput,
   Title,
+  Tooltip,
   useMantineColorScheme,
   type MantineColorScheme
 } from '@mantine/core'
+import { useClipboard } from '@mantine/hooks'
 import { notifications } from '@mantine/notifications'
-import { TriangleAlert, Lock, Upload, X } from 'lucide-react'
+import { TriangleAlert, Lock, Upload, X, KeyRound, Copy, Check, BadgeCheck } from 'lucide-react'
 import {
   SETTINGS,
   SETTING_GROUPS,
@@ -28,8 +31,169 @@ import {
   type SettingDef
 } from '@shared/settings-registry'
 import { formatMoney, parseMoney } from '@shared/money'
+import type { AppState } from '@shared/app-state'
+import type { LicenseState } from '@shared/types'
 import { Periods } from './Periods'
 import { BackupPanel } from './BackupPanel'
+
+/** Not a settings group — activating/renewing the licence is an ACT. Sentinel, like the periods one. */
+const LICENCE_SECTION = '__licence'
+
+/**
+ * THE LICENCE SECTION — and the ONE place a lapsed shop can renew from inside the app.
+ *
+ * When a licence expires the shop is READ-ONLY but still open (CLAUDE.md §6), so it never returns to the
+ * Activation screen — it lives on Home. Without this panel there was nowhere to enter a new key: the
+ * shopkeeper was told "Settings → Licence" by the banner, and there was no such thing. This is it.
+ *
+ * Crucially it is NOT disabled by `readOnly`: `license.activate` deliberately does not assertWritable, so
+ * a fresh valid key can replace an expired one. Every OTHER control on this screen is locked when expired;
+ * this is the deliberate exception, because it is the way OUT of expired.
+ */
+function LicencePanel({
+  license,
+  onActivated
+}: {
+  license: LicenseState
+  onActivated: (state: AppState) => void
+}): React.JSX.Element {
+  const clipboard = useClipboard({ timeout: 1000 })
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const expired = license.status === 'expired'
+  const active = license.status === 'active'
+
+  async function activate(): Promise<void> {
+    if (key.trim() === '' || busy) return
+    setBusy(true)
+    setError(null)
+    const result = await window.pos.license.activate({ key: key.trim() })
+    setBusy(false)
+    if (result.ok) {
+      notifications.show({
+        color: 'teal',
+        icon: <BadgeCheck size={18} />,
+        title: 'Licence activated',
+        message: 'Your new key is in. Everything is unlocked again.'
+      })
+      setKey('')
+      onActivated(result.data)
+    } else {
+      setError(result.error.userMessage)
+    }
+  }
+
+  return (
+    <Card withBorder padding="lg">
+      <Group gap="sm" mb="md">
+        <KeyRound size={18} />
+        <Text fw={600}>Licence</Text>
+      </Group>
+
+      <Stack gap="md">
+        {/* Where the shop stands right now, in plain words. */}
+        <Card withBorder padding="md" bg="var(--mantine-color-default-hover)">
+          <Stack gap={6}>
+            <Group justify="space-between">
+              <Text size="sm" c="dimmed">
+                Status
+              </Text>
+              {active ? (
+                <Text size="sm" fw={600} c="teal">
+                  Active
+                  {license.daysRemaining != null ? ` · ${license.daysRemaining} days left` : ' · lifetime'}
+                </Text>
+              ) : expired ? (
+                <Text size="sm" fw={600} c="red">
+                  Expired — new sales are paused
+                </Text>
+              ) : (
+                <Text size="sm" fw={600}>
+                  Not activated
+                </Text>
+              )}
+            </Group>
+            {'plan' in license && (
+              <Group justify="space-between">
+                <Text size="sm" c="dimmed">
+                  Plan
+                </Text>
+                <Text size="sm" tt="capitalize">
+                  {license.plan}
+                </Text>
+              </Group>
+            )}
+            {'expiresAt' in license && license.expiresAt && (
+              <Group justify="space-between">
+                <Text size="sm" c="dimmed">
+                  {expired ? 'Expired on' : 'Valid until'}
+                </Text>
+                <Text size="sm">{new Date(license.expiresAt).toLocaleDateString()}</Text>
+              </Group>
+            )}
+          </Stack>
+        </Card>
+
+        {/* The Machine ID the vendor needs to cut a key for THIS computer. Copyable. */}
+        <div>
+          <Text size="sm" fw={500}>
+            Machine ID
+          </Text>
+          <Text size="xs" c="dimmed" mb={6}>
+            Send this to us and we will make a key for this computer.
+          </Text>
+          <Group gap="xs" wrap="nowrap">
+            <TextInput style={{ flex: 1 }} value={license.machineId} readOnly />
+            <Tooltip label={clipboard.copied ? 'Copied!' : 'Copy'}>
+              <ActionIcon
+                variant="light"
+                size={36}
+                aria-label="Copy machine ID"
+                onClick={() => clipboard.copy(license.machineId)}
+              >
+                {clipboard.copied ? <Check size={16} /> : <Copy size={16} />}
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+        </div>
+
+        {/* Enter / renew the key. Works even when the shop is otherwise read-only. */}
+        <div>
+          <Text size="sm" fw={500}>
+            {expired ? 'Enter your new key to renew' : 'Enter a new key'}
+          </Text>
+          <Text size="xs" c="dimmed" mb={6}>
+            Paste the key we sent you, then press Activate.
+          </Text>
+          <Textarea
+            placeholder="Paste your licence key here…"
+            autosize
+            minRows={2}
+            maxRows={5}
+            value={key}
+            onChange={(event) => setKey(event.currentTarget.value)}
+          />
+          {error && (
+            <Alert color="red" variant="light" icon={<TriangleAlert size={16} />} mt="xs" p="xs">
+              <Text size="sm">{error}</Text>
+            </Alert>
+          )}
+          <Button
+            mt="sm"
+            leftSection={<BadgeCheck size={16} />}
+            loading={busy}
+            disabled={key.trim() === ''}
+            onClick={() => void activate()}
+          >
+            Activate
+          </Button>
+        </div>
+      </Stack>
+    </Card>
+  )
+}
 
 /**
  * THE SETTINGS SCREEN RENDERS ITSELF.
@@ -65,6 +229,8 @@ function SettingsPanel({
   currencySymbol,
   readOnly,
   isOwner,
+  license,
+  onActivated,
   onSave
 }: {
   section: string
@@ -73,8 +239,16 @@ function SettingsPanel({
   currencySymbol: string
   readOnly: boolean
   isOwner: boolean
+  license: LicenseState
+  onActivated: (state: AppState) => void
   onSave: (key: string, value: unknown) => Promise<void>
 }): React.JSX.Element | null {
+  // The licence panel — the ONE place a lapsed shop renews. NOT gated by readOnly (activate is the way
+  // out of read-only). Owner-only as a courtesy; main enforces it anyway.
+  if (section === LICENCE_SECTION) {
+    return isOwner ? <LicencePanel license={license} onActivated={onActivated} /> : null
+  }
+
   /* ── CLOSING THE MONTH ──────────────────────────────────────────────────────
      Not a setting — it is an ACT, and an audited one, so it does not come from
      the registry and must not. It lives on this screen because closing the books
@@ -120,10 +294,14 @@ function SettingsPanel({
 
 export function SettingsSection({
   readOnly,
-  isOwner
+  isOwner,
+  license,
+  onActivated
 }: {
   readOnly: boolean
   isOwner: boolean
+  license: LicenseState
+  onActivated: (state: AppState) => void
 }): React.JSX.Element {
   const [settings, setSettings] = useState<Record<string, unknown> | null>(null)
   const { setColorScheme } = useMantineColorScheme()
@@ -233,13 +411,22 @@ export function SettingsSection({
               />
             ))}
             {isOwner && (
-              <NavLink
-                active={section === PERIODS_SECTION}
-                label="Close the month"
-                leftSection={<Lock size={16} />}
-                onClick={() => setSection(PERIODS_SECTION)}
-                style={{ borderRadius: 'var(--mantine-radius-sm)' }}
-              />
+              <>
+                <NavLink
+                  active={section === PERIODS_SECTION}
+                  label="Close the month"
+                  leftSection={<Lock size={16} />}
+                  onClick={() => setSection(PERIODS_SECTION)}
+                  style={{ borderRadius: 'var(--mantine-radius-sm)' }}
+                />
+                <NavLink
+                  active={section === LICENCE_SECTION}
+                  label="Licence"
+                  leftSection={<KeyRound size={16} />}
+                  onClick={() => setSection(LICENCE_SECTION)}
+                  style={{ borderRadius: 'var(--mantine-radius-sm)' }}
+                />
+              </>
             )}
           </Stack>
         </Card>
@@ -252,6 +439,8 @@ export function SettingsSection({
             currencySymbol={currencySymbol}
             readOnly={readOnly}
             isOwner={isOwner}
+            license={license}
+            onActivated={onActivated}
             onSave={save}
           />
         </div>
@@ -265,7 +454,12 @@ export function SettingsSection({
           onChange={(value) => value && setSection(value)}
           data={[
             ...grouped.map(({ group }) => ({ value: group, label: GROUP_LABEL[group] })),
-            ...(isOwner ? [{ value: PERIODS_SECTION, label: 'Close the month' }] : [])
+            ...(isOwner
+              ? [
+                  { value: PERIODS_SECTION, label: 'Close the month' },
+                  { value: LICENCE_SECTION, label: 'Licence' }
+                ]
+              : [])
           ]}
           allowDeselect={false}
         />
@@ -276,6 +470,8 @@ export function SettingsSection({
           currencySymbol={currencySymbol}
           readOnly={readOnly}
           isOwner={isOwner}
+          license={license}
+          onActivated={onActivated}
           onSave={save}
         />
       </Stack>

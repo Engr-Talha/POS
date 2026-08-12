@@ -409,6 +409,8 @@ export function Home({
             <SettingsSection
               readOnly={state.readOnly}
               isOwner={state.session?.user.role === 'owner'}
+              license={state.license}
+              onActivated={onStateChange}
             />
           )}
         </main>

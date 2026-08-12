@@ -115,8 +115,23 @@ the app goes **read-only**:
 - they can still open it, see everything, run every report, and **back up / export all their data**;
 - they just cannot make new sales, purchases or other changes until they renew.
 
-The app warns them at **30, 15, 7 and 1 days** before expiry. Renewing is the same flow as activating: you
-mint a new key for the same Machine ID, they paste it in.
+The app warns them at **30, 15, 7 and 1 days** before expiry.
+
+### Renewing an expired shop — WHERE the key goes
+
+An expired shop stays open (read-only), so it never bounces back to the first-run Activation screen. The
+key goes in **inside the app**:
+
+1. In the running app, open **Settings → Licence** (a section only the **Owner** sees).
+2. It shows the current status (Expired), the plan, and the **Machine ID** with a copy button. The shop
+   copies that Machine ID and sends it to you.
+3. You mint a new key for that same Machine ID (Part 2 above) and send it back.
+4. They paste it into the **"Enter your new key to renew"** box and press **Activate**.
+5. The app unlocks instantly — the same books, nothing lost.
+
+This panel is deliberately the ONE thing that still works when the shop is read-only: `license.activate`
+does not check `assertWritable`, because entering a valid key is precisely the way *out* of read-only.
+Every other setting is locked while expired; the Licence section is not.
 
 **Nothing is ever deleted, hidden, or encrypted when a licence lapses.** A shop's books are theirs.
 
