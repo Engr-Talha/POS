@@ -44,6 +44,7 @@ import type {
 import { DAYS_MASK_LABELS, PROMOTION_KINDS, PROMOTION_RULE_SCOPES } from '@shared/promotions'
 import { formatMoney } from '@shared/money'
 import { Paginator } from '../../components/Paginator'
+import { ProductSuggest } from '../../components/ProductSuggest'
 import { LookupSelect, MoneyInput, QtyInput } from './ProductForm'
 
 /**
@@ -1140,14 +1141,7 @@ function RuleRow({
 }
 
 /**
- * THE PRODUCT PICKER. There is no shared one in this codebase, so this is the minimal thing that
- * works: a searchable Select over `products.list`, which is paginated and indexed (CLAUDE.md §4 —
- * assume 100k+ rows, never an unbounded list). We ask for one page of matches as the owner types
- * rather than pulling the whole catalog into a dropdown.
- *
- * `products.list` is `product.manage` (manager) and so is `promotion.manage` — anyone who can reach
- * this screen can therefore search it. If that ever stops being true, this box goes quiet and empty,
- * which is why the "not found" case says so rather than silently showing nothing.
+ * THE PRODUCT PICKER — shared ProductSuggest so Enter picks the first match (same as the till).
  */
 function ProductPicker({
   value,
@@ -1158,100 +1152,55 @@ function ProductPicker({
   onChange: (id: number | null) => void
   disabled?: boolean
 }): React.JSX.Element {
-  const [search, setSearch] = useState('')
-  const [options, setOptions] = useState<Array<{ value: string; label: string }>>([])
-  const [loading, setLoading] = useState(false)
-  const [failed, setFailed] = useState(false)
-
-  /**
-   * The chosen product must have a label even before any search has run — an edit that opened on an
-   * existing rule would otherwise show a bare id, or nothing at all. Keep it beside the search
-   * results so the box can always name what is selected.
-   */
-  const [chosen, setChosen] = useState<{ value: string; label: string } | null>(null)
+  const [query, setQuery] = useState('')
+  const [chosenLabel, setChosenLabel] = useState<string | null>(null)
 
   useEffect(() => {
     if (value == null) {
-      setChosen(null)
+      setChosenLabel(null)
       return
     }
-    // Already showing the right one — don't re-fetch on every keystroke.
-    if (chosen?.value === String(value)) return
-
     let cancelled = false
     void (async () => {
       const result = await window.pos.products.get({ id: value })
       if (cancelled || !result.ok) return
-      setChosen({ value: String(value), label: `${result.data.product.name}` })
+      const p = result.data.product
+      setChosenLabel(p.sku ? `${p.name} (${p.sku})` : p.name)
     })()
     return () => {
       cancelled = true
     }
-  }, [value, chosen])
-
-  // Search as they type, but not on every keystroke — a debounce keeps a 100k-row catalog quiet.
-  useEffect(() => {
-    const term = search.trim()
-    if (term === '') {
-      setOptions([])
-      return
-    }
-
-    let cancelled = false
-    setLoading(true)
-    const timer = setTimeout(() => {
-      void (async () => {
-        const result = await window.pos.products.list({ page: 1, pageSize: 20, search: term })
-        if (cancelled) return
-        setLoading(false)
-        if (!result.ok) {
-          setFailed(true)
-          setOptions([])
-          return
-        }
-        setFailed(false)
-        setOptions(
-          result.data.rows.map((row) => ({
-            value: String(row.id),
-            // The stock code disambiguates two items with the same name — a real shop has them.
-            label: row.sku ? `${row.name} (${row.sku})` : row.name
-          }))
-        )
-      })()
-    }, 250)
-
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [search])
-
-  // The chosen item must stay in the data list or Mantine cannot render its label.
-  const data = useMemo(() => {
-    if (!chosen) return options
-    return options.some((option) => option.value === chosen.value)
-      ? options
-      : [chosen, ...options]
-  }, [options, chosen])
+  }, [value])
 
   return (
-    <Select
-      label="Item"
-      placeholder="Type to search by name, code or barcode"
-      description={failed ? undefined : 'Search your items and pick one.'}
-      error={failed ? 'The items could not be searched.' : undefined}
-      required
-      searchable
-      data={data}
-      value={value == null ? null : String(value)}
-      searchValue={search}
-      onSearchChange={setSearch}
-      onChange={(next) => onChange(next == null ? null : Number(next))}
-      rightSection={loading ? <Loader size={14} /> : undefined}
-      nothingFoundMessage={search.trim() === '' ? 'Type to search' : 'No items match'}
-      disabled={disabled}
-      clearable
-    />
+    <Stack gap={4}>
+      <Text size="sm" fw={500}>
+        Item <Text span c="red">*</Text>
+      </Text>
+      {chosenLabel && (
+        <Group gap="xs">
+          <Text size="sm">{chosenLabel}</Text>
+          {!disabled && (
+            <Button size="compact-xs" variant="subtle" onClick={() => onChange(null)}>
+              Clear
+            </Button>
+          )}
+        </Group>
+      )}
+      <ProductSuggest
+        value={query}
+        onChange={setQuery}
+        mode="list"
+        pageSize={20}
+        disabled={disabled}
+        placeholder="Type to search by name, code or barcode"
+        onPick={(item) => {
+          setChosenLabel(item.sku ? `${item.name} (${item.sku})` : item.name)
+          setQuery('')
+          onChange(item.id)
+        }}
+      />
+    </Stack>
   )
 }
 

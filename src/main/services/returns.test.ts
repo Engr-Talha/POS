@@ -221,6 +221,9 @@ beforeEach(() => {
   owner = makeUser('owner', 'owner', 'Insha Owner')
   supervisor = makeUser('supervisor', 'super', 'Rashid Supervisor')
   cashier = makeUser('cashier', 'cash1', 'Bilal Cashier')
+  // Supervisor voids + cashier open items are fixture defaults; raise/lower settings to match.
+  settings.set(t.db, 'documents.correctionRole', 'supervisor')
+  settings.set(t.db, 'selling.priceOverrideRole', 'cashier')
 })
 
 afterEach(() => {

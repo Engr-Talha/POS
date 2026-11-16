@@ -37,8 +37,9 @@ import type {
   StockTakeStatus
 } from '@shared/stock-take'
 import { formatMoney } from '@shared/money'
-import { formatQty, parseQty } from '@shared/qty'
+import { formatQty, ONE_UNIT, parseQty } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
+import { ProductSuggest } from '../../components/ProductSuggest'
 
 /**
  * THE STOCK TAKE — the counting sheet. The shop counts its shelves; the books are corrected to match.
@@ -594,8 +595,14 @@ function CountBox({
   const [searching, setSearching] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
 
-  /** The item the scan resolved, waiting for its count. */
-  const [found, setFound] = useState<{ productId: number; name: string; sku: string } | null>(null)
+  /** The item the scan resolved, waiting for its count. Pack size is in base qty_m (carton of 24 = 24000). */
+  const [found, setFound] = useState<{
+    productId: number
+    name: string
+    sku: string
+    packSize: number | null
+    packLabel: string | null
+  } | null>(null)
   const [qtyText, setQtyText] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -637,10 +644,15 @@ function CountBox({
       return
     }
 
+    const pack = result.data.pack
     setFound({
       productId: result.data.product.id,
       name: result.data.product.name,
-      sku: result.data.product.sku
+      sku: result.data.product.sku,
+      // A pack barcode means the counter is counting CARTONS (or whatever the pack is), not pieces.
+      // Typing "10" against a carton-of-24 must mean 240 pieces on the shelf — not 10.
+      packSize: pack != null && !pack.isBase && pack.packSize > 0 ? pack.packSize : null,
+      packLabel: pack != null && !pack.isBase ? (pack.barcode ?? 'pack') : null
     })
     setBarcode('')
     setScanError(null)
@@ -655,12 +667,22 @@ function CountBox({
     // Through parseQty, like every quantity in the app — an integer number of thousandths, or a
     // refusal. Never a float (CLAUDE.md §4). Zero is legal and meaningful: "the shelf was empty" is a
     // finding, and often the most important one on the sheet.
-    const countedQtyM = parseQty(qtyText)
-    if (countedQtyM == null) {
-      setScanError('Enter the quantity you counted, like 12 or 1.5. Enter 0 if the shelf is empty.')
+    const keyedQtyM = parseQty(qtyText)
+    if (keyedQtyM == null) {
+      setScanError(
+        found.packSize != null
+          ? `Enter how many ${found.packLabel ?? 'packs'} you counted. Enter 0 if the shelf is empty.`
+          : 'Enter the quantity you counted, like 12 or 1.5. Enter 0 if the shelf is empty.'
+      )
       qtyRef.current?.focus()
       return
     }
+
+    // Pack scan → keyed qty is in PACKS; stock take stores BASE units. 10 cartons of 24 = 240000.
+    const countedQtyM =
+      found.packSize != null
+        ? Math.round((keyedQtyM * found.packSize) / ONE_UNIT)
+        : keyedQtyM
 
     setSaving(true)
 
@@ -744,7 +766,7 @@ function CountBox({
 
               <ProductSearchButton
                 onPicked={(product) => {
-                  setFound(product)
+                  setFound({ ...product, packSize: null, packLabel: null })
                   setScanError(null)
                   setTimeout(() => qtyRef.current?.focus(), 0)
                 }}
@@ -767,13 +789,20 @@ function CountBox({
                 <Text fw={600}>{found.name}</Text>
                 <Text size="xs" c="dimmed" ff="monospace">
                   {found.sku}
+                  {found.packSize != null
+                    ? ` · counting as ${found.packLabel ?? 'packs'} (${formatQty(found.packSize)} each)`
+                    : ''}
                 </Text>
               </div>
 
               <TextInput
                 ref={qtyRef}
                 label="Counted on the shelf"
-                description="What you can actually see. 0 if the shelf is empty."
+                description={
+                  found.packSize != null
+                    ? `How many ${found.packLabel ?? 'packs'} you can see. 0 if empty.`
+                    : 'What you can actually see. 0 if the shelf is empty.'
+                }
                 placeholder="0"
                 value={qtyText}
                 onChange={(event) => setQtyText(event.currentTarget.value)}
@@ -820,8 +849,7 @@ function CountBox({
  * NOT EVERYTHING HAS A BARCODE ON IT. Loose vegetables, a torn label, a bin of screws. The counter
  * needs to find those by name, so the scan box has a search beside it.
  *
- * `products.list` is paginated and indexed (CLAUDE.md §4 — assume 100k+ rows), so this asks for one
- * page of matches as they type rather than pulling the catalog into a dropdown.
+ * Shared ProductSuggest: Enter picks the first match — same muscle memory as the till.
  */
 function ProductSearchButton({
   onPicked
@@ -829,51 +857,11 @@ function ProductSearchButton({
   onPicked: (product: { productId: number; name: string; sku: string }) => void
 }): React.JSX.Element {
   const [opened, setOpened] = useState(false)
-  const [search, setSearch] = useState('')
-  const [results, setResults] = useState<Array<{ id: number; name: string; sku: string }> | null>(
-    null
-  )
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
-    if (!opened) {
-      setSearch('')
-      setResults(null)
-      setError(null)
-    }
+    if (!opened) setQuery('')
   }, [opened])
-
-  // Search as they type, debounced — a 100k-row catalog stays quiet.
-  useEffect(() => {
-    const term = search.trim()
-    if (term === '') {
-      setResults(null)
-      return
-    }
-
-    let cancelled = false
-    setLoading(true)
-    const timer = setTimeout(() => {
-      void (async () => {
-        const result = await window.pos.products.list({ page: 1, pageSize: 20, search: term })
-        if (cancelled) return
-        setLoading(false)
-        if (!result.ok) {
-          setError(result.error.userMessage)
-          setResults([])
-          return
-        }
-        setError(null)
-        setResults(result.data.rows.map((row) => ({ id: row.id, name: row.name, sku: row.sku })))
-      })()
-    }, 250)
-
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [search])
 
   return (
     <>
@@ -883,52 +871,18 @@ function ProductSearchButton({
 
       <Modal opened={opened} onClose={() => setOpened(false)} title="Find an item" centered size="lg">
         <Stack>
-          <TextInput
-            data-autofocus
-            label="Search"
+          <ProductSuggest
+            value={query}
+            onChange={setQuery}
+            mode="list"
+            pageSize={20}
+            autoFocus
             placeholder="Type a name or stock code…"
-            leftSection={<Search size={15} />}
-            rightSection={loading ? <Loader size={14} /> : undefined}
-            value={search}
-            onChange={(event) => setSearch(event.currentTarget.value)}
+            onPick={(item) => {
+              onPicked({ productId: item.id, name: item.name, sku: item.sku })
+              setOpened(false)
+            }}
           />
-
-          {error && (
-            <Alert color="red" icon={<CircleAlert size={16} />} p="xs">
-              <Text size="sm">{error}</Text>
-            </Alert>
-          )}
-
-          {results === null ? (
-            <Text size="sm" c="dimmed">
-              Type to search your items.
-            </Text>
-          ) : results.length === 0 ? (
-            <Text size="sm" c="dimmed">
-              No items match “{search.trim()}”.
-            </Text>
-          ) : (
-            <Stack gap={4}>
-              {results.map((row) => (
-                <Button
-                  key={row.id}
-                  variant="subtle"
-                  justify="space-between"
-                  rightSection={
-                    <Text size="xs" c="dimmed" ff="monospace">
-                      {row.sku}
-                    </Text>
-                  }
-                  onClick={() => {
-                    onPicked({ productId: row.id, name: row.name, sku: row.sku })
-                    setOpened(false)
-                  }}
-                >
-                  <Text size="sm">{row.name}</Text>
-                </Button>
-              ))}
-            </Stack>
-          )}
         </Stack>
       </Modal>
     </>

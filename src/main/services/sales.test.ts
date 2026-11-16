@@ -265,6 +265,10 @@ beforeEach(() => {
   owner = makeUser('owner', 'owner', 'Insha Owner')
   supervisor = makeUser('supervisor', 'super', 'Rashid Supervisor')
   cashier = makeUser('cashier', 'cash1', 'Bilal Cashier')
+  // documents.correctionRole defaults to manager. Most void scenarios in this file use a supervisor
+  // (the sale.void RBAC floor). Lower the setting to that floor so those tests stay the void path —
+  // a dedicated test below proves raising it to owner actually sticks.
+  settings.set(t.db, 'documents.correctionRole', 'supervisor')
 })
 
 /**
@@ -1022,6 +1026,43 @@ describe('a pack (carton) barcode', () => {
     expectUserMessage(
       () => sales.scanBarcode(t.db, 'SUPPLIER-OUTER'),
       /carton \(outer\) for "Rice".*no selling price.*scan the item itself/s
+    )
+
+    everythingHolds(t, owner)
+  })
+
+  it('REFUSES a base product with no selling price — same rule as a purchase-only pack', () => {
+    const productId = makeProduct({ name: 'Display sample', retailPrice: 0 })
+    catalog.addBarcode(t.db, { productId, barcode: 'FREE-SAMPLE-0' })
+    openingStock(productId, 5 * ONE_UNIT)
+
+    expectUserMessage(
+      () => sales.scanBarcode(t.db, 'FREE-SAMPLE-0'),
+      /Display sample.*no selling price/i
+    )
+
+    everythingHolds(t, owner)
+  })
+
+  it('REFUSES a retired product on scan — deactivate must stop the till, not only the list', () => {
+    const productId = makeProduct({ name: 'Old Soap', retailPrice: 4_500 })
+    catalog.addBarcode(t.db, { productId, barcode: 'RETIRED-SOAP' })
+    openingStock(productId, 5 * ONE_UNIT)
+    t.db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(productId)
+
+    expectUserMessage(
+      () => sales.scanBarcode(t.db, 'RETIRED-SOAP'),
+      /Old Soap.*retired/i
+    )
+
+    // complete() must refuse too — a cart that kept an id after deactivate must not ring it up.
+    expectUserMessage(
+      () =>
+        sales.complete(t.db, cashier, {
+          lines: [{ productId, qtyM: ONE_UNIT }],
+          payments: [{ methodLookupId: cash(), amount: 4_500 }]
+        }),
+      /Old Soap.*retired/i
     )
 
     everythingHolds(t, owner)
@@ -1865,6 +1906,28 @@ describe('voiding a sale', () => {
     everythingHolds(t, owner)
   })
 
+  it('documents.correctionRole = owner actually refuses a supervisor', () => {
+    settings.set(t.db, 'documents.correctionRole', 'owner')
+
+    const productId = makeProduct({ taxRateBp: 0 })
+    openingStock(productId, 10 * ONE_UNIT)
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ productId, qtyM: ONE_UNIT }],
+      payments: [{ methodLookupId: cash(), amount: 10_000 }]
+    })
+
+    expectUserMessage(
+      () => sales.voidSale(t.db, supervisor, { id: sale.id, reasonCode: 'wrong_item' }),
+      /needs the owner/i
+    )
+
+    // Owner can still do it — the setting raises the bar, it does not lock the door forever.
+    sales.voidSale(t.db, owner, { id: sale.id, reasonCode: 'wrong_item' })
+    expect(sales.getById(t.db, sale.id).status).toBe('voided')
+
+    everythingHolds(t, owner)
+  })
+
   it('needs a supervisor — a cashier cannot cancel a sale on their own', () => {
     const productId = makeProduct({ taxRateBp: 0 })
     openingStock(productId, 10 * ONE_UNIT)
@@ -1934,6 +1997,13 @@ describe('voiding a sale', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('an open item', () => {
+  // An open item invents a price — same gate as a catalogue override (selling.priceOverrideRole).
+  // Everyday bag/photocopy shops set that to cashier; these scenarios prove the happy path under that
+  // setting. A separate test below proves the default (supervisor) refuses a cashier alone.
+  beforeEach(() => {
+    settings.set(t.db, 'selling.priceOverrideRole', 'cashier')
+  })
+
   it('sells something that is not in the catalogue at all — and moves no stock', () => {
     const { sale, journalId } = sales.complete(t.db, cashier, {
       lines: [
@@ -2001,6 +2071,29 @@ describe('an open item', () => {
 
     expect(sale.grandTotal).toBe(11_700 + 500)
     expect(onHand(productId)).toBe(9 * ONE_UNIT) // only the real one moved
+
+    everythingHolds(t, owner)
+  })
+
+  it('REFUSES a cashier alone when price overrides need a supervisor (the default)', () => {
+    settings.set(t.db, 'selling.priceOverrideRole', 'supervisor')
+
+    expectUserMessage(
+      () =>
+        sales.complete(t.db, cashier, {
+          lines: [{ qtyM: ONE_UNIT, openItem: { name: 'Photocopy', unitPrice: 2_000, taxRateBp: 0 } }],
+          payments: [{ methodLookupId: cash(), amount: 2_000 }]
+        }),
+      /needs approval/i
+    )
+
+    // With a supervisor PIN it goes through — open item is a typed price, same as an override.
+    const { sale } = sales.complete(t.db, cashier, {
+      lines: [{ qtyM: ONE_UNIT, openItem: { name: 'Photocopy', unitPrice: 2_000, taxRateBp: 0 } }],
+      approverPin: pinOf(supervisor.username),
+      payments: [{ methodLookupId: cash(), amount: 2_000 }]
+    })
+    expect(sale.lines[0]!.priceOverrideByUserId).toBe(supervisor.id)
 
     everythingHolds(t, owner)
   })

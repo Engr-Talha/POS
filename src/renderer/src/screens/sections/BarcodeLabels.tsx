@@ -17,6 +17,7 @@ import { notifications } from '@mantine/notifications'
 import { Barcode as BarcodeIcon, CircleAlert, Printer, Search, Tag } from 'lucide-react'
 import type { ProductListItem } from '@shared/catalog'
 import { formatMoney } from '@shared/money'
+import { ProductSuggest } from '../../components/ProductSuggest'
 
 /**
  * BARCODES & LABELS — generate an in-house barcode for a loose item that has none, then print a sheet
@@ -205,11 +206,22 @@ export function BarcodeLabels({
           works even on an expired licence.
         </Text>
 
-        <TextInput
-          placeholder="Search items by name, code or barcode…"
-          leftSection={<Search size={16} />}
+        <ProductSuggest
           value={search}
-          onChange={(event) => setSearch(event.currentTarget.value)}
+          onChange={setSearch}
+          mode="list"
+          pageSize={8}
+          currencySymbol={currencySymbol}
+          placeholder="Search items by name, code or barcode…"
+          onPick={(item) => {
+            // Jump the list filter to this item and tick one label copy for it.
+            setSearch(item.sku)
+            setCopies((current) => {
+              const next = new Map(current)
+              if (!next.has(item.id)) next.set(item.id, 1)
+              return next
+            })
+          }}
         />
 
         {error ? (

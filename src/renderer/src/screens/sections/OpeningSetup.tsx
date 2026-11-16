@@ -61,9 +61,10 @@ import type {
 import type { Customer, OpeningPayable, OpeningReceivable, OpeningStockLine } from '@shared/opening'
 import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
-import { formatQty } from '@shared/qty'
+import { formatQty, ONE_UNIT } from '@shared/qty'
 import { CostInput, LookupSelect, MoneyInput, QtyInput } from './ProductForm'
 import { Paginator } from '../../components/Paginator'
+import { ProductSuggest } from '../../components/ProductSuggest'
 
 /**
  * THE OPENING SETUP WIZARD — the shopkeeper's first hour with this app.
@@ -486,7 +487,16 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
   /** Picking a product tells us whether to offer a batch at all — that lives on the product. */
   async function pickProduct(product: ProductListItem | null): Promise<void> {
     if (!product) {
-      setDraft((current) => ({ ...current, product: null, trackBatches: false }))
+      // Clear must wipe qty/cost too — otherwise the next pick inherits the previous item's figures.
+      setDraft((current) => ({
+        ...current,
+        product: null,
+        trackBatches: false,
+        qtyM: 0,
+        unitCost: 0,
+        batchNo: '',
+        expiryDate: ''
+      }))
       return
     }
 
@@ -494,16 +504,21 @@ function StepStock({ wizard, currencySymbol, readOnly, onChanged }: StepProps): 
     // item's current average cost, which is a sensible first guess at what the shelf stock cost.
     const detail = await window.pos.products.get({ id: product.id })
     const trackBatches = detail.ok ? detail.data.product.trackBatches : false
+    const costPrice = detail.ok ? detail.data.product.costPrice : product.costPrice
 
-    setDraft((current) => ({
-      ...current,
-      product,
-      trackBatches,
-      // Only ever a SUGGESTION, and only into an empty field — never over something already typed.
-      unitCost: current.unitCost === 0 ? product.costPrice : current.unitCost,
-      batchNo: trackBatches ? current.batchNo : '',
-      expiryDate: trackBatches ? current.expiryDate : ''
-    }))
+    setDraft((current) => {
+      const sameItem = current.product?.id === product.id
+      return {
+        ...current,
+        product,
+        trackBatches,
+        // Same item keeps a typed qty; switching items starts at one unit with THIS item's cost.
+        qtyM: sameItem && current.qtyM > 0 ? current.qtyM : ONE_UNIT,
+        unitCost: sameItem && current.unitCost > 0 ? current.unitCost : costPrice,
+        batchNo: trackBatches ? (sameItem ? current.batchNo : '') : '',
+        expiryDate: trackBatches ? (sameItem ? current.expiryDate : '') : ''
+      }
+    })
   }
 
   async function save(): Promise<void> {
@@ -2615,6 +2630,8 @@ function count(n: number, one: string, many: string): string {
  * Search the catalogue and pick an item. Only STOCKED items are offered — a service or a bag charge
  * has no shelf to sit on, main refuses an opening quantity for one, and a dropdown that offers a
  * choice the app will reject is a trap.
+ *
+ * Shared ProductSuggest: Enter picks the first match, same as the till.
  */
 function ProductPicker({
   value,
@@ -2625,73 +2642,42 @@ function ProductPicker({
   onChange: (product: ProductListItem | null) => void
   disabled?: boolean
 }): React.JSX.Element {
-  const [search, setSearch] = useState('')
-  const [debounced, setDebounced] = useState('')
-  const [rows, setRows] = useState<ProductListItem[] | null>(null)
-
-  // A scanner fires a whole barcode in milliseconds. Debouncing keeps us from a query per keystroke
-  // while still feeling instant to someone typing a name.
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(search.trim()), 200)
-    return () => clearTimeout(timer)
-  }, [search])
-
-  useEffect(() => {
-    let cancelled = false
-
-    void (async () => {
-      const result = await window.pos.products.list({
-        page: 1,
-        pageSize: 20,
-        search: debounced === '' ? undefined : debounced,
-        itemType: 'inventory',
-        sortBy: 'name',
-        sortDir: 'asc'
-      })
-      if (cancelled) return
-      setRows(result.ok ? result.data.rows : [])
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [debounced])
-
-  // The selected item must stay in the option list even when it is not in the latest search results,
-  // or Mantine has a value it cannot find a label for and the field goes blank.
-  const options = useMemo(() => {
-    const found = rows ?? []
-    const merged = value && !found.some((row) => row.id === value.id) ? [value, ...found] : found
-    return merged.map((row) => ({ value: String(row.id), label: `${row.sku} — ${row.name}` }))
-  }, [rows, value])
+  const [query, setQuery] = useState('')
 
   return (
-    <Select
-      label="Item"
-      placeholder="Search by stock code, name or barcode…"
-      description="Only stocked items appear here"
-      data={options}
-      value={value ? String(value.id) : null}
-      searchable
-      clearable
-      disabled={disabled}
-      leftSection={<PackageOpen size={15} />}
-      searchValue={search}
-      onSearchChange={setSearch}
-      // The server already searched — matching again in the browser would hide a barcode hit whose
-      // label does not contain the digits the owner typed.
-      filter={({ options: parsed }) => parsed}
-      nothingFoundMessage={rows === null ? 'Searching…' : 'No stocked item matches that'}
-      onChange={(next) => {
-        if (next === null) {
-          onChange(null)
-          return
-        }
-        const id = Number(next)
-        const picked = (rows ?? []).find((row) => row.id === id) ?? (value?.id === id ? value : null)
-        onChange(picked)
-      }}
-    />
+    <Stack gap={4}>
+      <Text size="sm" fw={500}>
+        Item
+      </Text>
+      <Text size="xs" c="dimmed">
+        Only stocked items appear here
+      </Text>
+      {value && (
+        <Group gap="xs">
+          <Text size="sm">
+            {value.sku} — {value.name}
+          </Text>
+          {!disabled && (
+            <Button size="compact-xs" variant="subtle" onClick={() => onChange(null)}>
+              Clear
+            </Button>
+          )}
+        </Group>
+      )}
+      <ProductSuggest
+        value={query}
+        onChange={setQuery}
+        mode="list"
+        listFilters={{ itemType: 'inventory' }}
+        pageSize={20}
+        disabled={disabled}
+        placeholder="Search by stock code, name or barcode…"
+        onPick={(item) => {
+          setQuery('')
+          onChange(item)
+        }}
+      />
+    </Stack>
   )
 }
 

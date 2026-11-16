@@ -431,7 +431,11 @@ function ScaledInput({
       autoFocus={autoFocus}
       inputMode="decimal"
       error={error ?? (bad ? 'That is not a number we can use.' : undefined)}
-      onFocus={() => setEditing(true)}
+      onFocus={(event) => {
+        setEditing(true)
+        // Select the whole amount so typing a new qty/price replaces it in one go — the rush-hour path.
+        event.currentTarget.select()
+      }}
       onChange={(event) => {
         const next = event.currentTarget.value
         setText(next)
@@ -595,9 +599,11 @@ export function AdjustStockModal({
 
   const signed = direction === 'in' ? qtyM : -qtyM
   const resulting = product.onHandM + signed
+  // Opening is how the first cost lands on the books — a zero cost seeds every later sale's COGS at 0.
+  const canPost = qtyM > 0 && reasonCode != null && (type !== 'opening' || unitCost > 0)
 
   async function submit(): Promise<void> {
-    if (!product || qtyM === 0 || !reasonCode) return
+    if (!product || !canPost) return
 
     setBusy(true)
     const result = await window.pos.stock.adjust({
@@ -687,9 +693,10 @@ export function AdjustStockModal({
           {type === 'opening' && (
             <CostInput
               label="Cost per unit"
-              description="What one of these cost you. 4 decimal places."
+              description="What one of these cost you. Required — a blank cost would make every later sale look free."
               value={unitCost}
               onChange={setUnitCost}
+              required
             />
           )}
         </Group>
@@ -729,7 +736,7 @@ export function AdjustStockModal({
           </Button>
           <Button
             loading={busy}
-            disabled={qtyM === 0 || !reasonCode}
+            disabled={!canPost}
             leftSection={<Save size={16} />}
             onClick={() => void submit()}
           >
@@ -847,6 +854,7 @@ export function ProductForm({
   readOnly,
   currencySymbol,
   onClose,
+  onOpenProduct,
   onSaved
 }: {
   /** Null = a brand-new item. */
@@ -854,6 +862,8 @@ export function ProductForm({
   readOnly: boolean
   currencySymbol: string
   onClose: () => void
+  /** Scan another barcode while editing — jump straight to that item with every field filled. */
+  onOpenProduct?: (productId: number) => void
   /**
    * "This item was saved" — NOT "close the form". Saving keeps you where you are: a freshly created
    * item stays open so you can go straight to its barcodes and its opening stock, which is exactly
@@ -878,13 +888,82 @@ export function ProductForm({
   // Only a barcode typed on a NEW product goes in with the create call — once the item exists,
   // barcodes are their own tab with their own endpoints.
   const [newBarcode, setNewBarcode] = useState('')
+  // Scan-to-jump: while this form is open, scanning another item's barcode opens that item instead.
+  const [scanToOpen, setScanToOpen] = useState('')
 
   const editing = productId !== null
+
+  async function openScannedProduct(raw: string): Promise<void> {
+    if (!onOpenProduct) return
+    const code = raw.trim()
+    if (code === '') return
+
+    const result = await window.pos.catalog.findByBarcode({ barcode: code })
+    if (!result.ok) {
+      notifications.show({
+        color: 'red',
+        title: 'Could not look that up',
+        message: result.error.userMessage
+      })
+      return
+    }
+    if (result.data === null) {
+      notifications.show({
+        color: 'orange',
+        title: 'No item for that barcode',
+        message: `Nothing in the catalogue has the barcode ${code}.`
+      })
+      return
+    }
+    if (result.data.product.id === productId) {
+      setScanToOpen('')
+      notifications.show({
+        color: 'teal',
+        title: 'Already open',
+        message: result.data.product.name,
+        autoClose: 2000
+      })
+      return
+    }
+    setScanToOpen('')
+    onOpenProduct(result.data.product.id)
+  }
 
   const load = useCallback(async (): Promise<void> => {
     if (productId === null) {
       setDetail(null)
-      setForm(EMPTY_FORM)
+      // A blank form with no Selling unit leaves Create item GREYED OUT — the shopkeeper fills in
+      // stock code + name, presses Create, and nothing happens. Excel import already defaults to
+      // Pieces (product-import / excel-import defaultSaleUomId); the hand-typed form must match.
+      // Prefer the seeded `pcs` code; if the shop renamed or retired it, take the first active UOM.
+      // Tax rate / entry mode / re-order level come from Settings so a new item is ready to save
+      // without re-typing the shop's standing defaults every time.
+      const [uoms, settings] = await Promise.all([
+        window.pos.lookups.list({ listKey: 'uom' }),
+        window.pos.settings.getAll()
+      ])
+      const rows = uoms.ok ? uoms.data : []
+      const preferred = rows.find((row) => row.code === 'pcs') ?? rows[0] ?? null
+      const taxRateBp =
+        settings.ok && typeof settings.data['tax.defaultRateBp'] === 'number'
+          ? (settings.data['tax.defaultRateBp'] as number)
+          : 0
+      const priceEntryMode: PriceEntryMode =
+        settings.ok && settings.data['tax.defaultMode'] === 'inclusive' ? 'inclusive' : 'exclusive'
+      const lowStockWhole =
+        settings.ok && typeof settings.data['stock.lowStockDefault'] === 'number'
+          ? (settings.data['stock.lowStockDefault'] as number)
+          : 0
+      setSupplierPrice(0)
+      setDiscountBp(0)
+      setUnitsPerPack(1)
+      setForm({
+        ...EMPTY_FORM,
+        saleUomId: preferred?.id ?? null,
+        taxRateBp,
+        priceEntryMode,
+        minStockM: Math.max(0, Math.round(lowStockWhole)) * ONE_UNIT
+      })
       return
     }
 
@@ -904,6 +983,15 @@ export function ProductForm({
       result.data.suppliers.find((row) => row.isPreferred) ?? result.data.suppliers[0] ?? null
     setSupplierPrice(preferred?.supplierPrice ?? 0)
     setDiscountBp(preferred?.discountBp ?? 0)
+
+    // If the item has an alternate packing bigger than the base unit, show that pack size in the
+    // price-chain calculator so edit mode is not a wall of zeros next to a filled cost.
+    const nonBase = result.data.packs.find((pack) => !pack.isBase && pack.packSize > ONE_UNIT)
+    if (nonBase) {
+      setUnitsPerPack(Math.max(1, Math.round(nonBase.packSize / ONE_UNIT)))
+    } else {
+      setUnitsPerPack(1)
+    }
   }, [productId])
 
   useEffect(() => {
@@ -1153,15 +1241,52 @@ export function ProductForm({
           )}
         </Group>
 
-        <Button
-          leftSection={<Save size={16} />}
-          loading={saving}
-          disabled={readOnly || !canSave}
-          onClick={() => void save()}
+        <Tooltip
+          label={
+            readOnly
+              ? 'Your licence has expired — items cannot be changed.'
+              : !form.sku.trim()
+                ? 'Enter a stock code first.'
+                : !form.name.trim()
+                  ? 'Enter an item name first.'
+                  : form.saleUomId === null
+                    ? 'Choose a selling unit first (Pieces, kg, …).'
+                    : ''
+          }
+          disabled={readOnly ? false : canSave}
+          withArrow
         >
-          {editing ? 'Save changes' : 'Create item'}
-        </Button>
+          {/* Disabled buttons do not fire hover — wrap so the tooltip still works. */}
+          <span>
+            <Button
+              leftSection={<Save size={16} />}
+              loading={saving}
+              disabled={readOnly || !canSave}
+              onClick={() => void save()}
+            >
+              {editing ? 'Save changes' : 'Create item'}
+            </Button>
+          </span>
+        </Tooltip>
       </Group>
+
+      {onOpenProduct && (
+        <TextInput
+          label="Scan to open another item"
+          description="Scan a barcode to jump to that product — prices, tax and stock fill in automatically."
+          placeholder="Scan barcode…"
+          leftSection={<BarcodeIcon size={16} />}
+          value={scanToOpen}
+          onChange={(event) => setScanToOpen(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              void openScannedProduct(scanToOpen)
+            }
+          }}
+          maw={420}
+        />
+      )}
 
       {readOnly && (
         <Alert color="orange" icon={<TriangleAlert size={18} />}>
@@ -1408,9 +1533,15 @@ export function ProductForm({
 
                 <CostInput
                   label="Unit cost"
-                  description="What ONE selling unit costs you. This is the figure that is saved — and every purchase re-averages it."
+                  description={
+                    editing
+                      ? 'Weighted average of what you actually paid — not typed here. Change it with a stock adjustment or a purchase.'
+                      : 'What ONE selling unit costs you. This is the figure that is saved — and every purchase re-averages it.'
+                  }
                   leftSection={<Text size="sm">{currencySymbol}</Text>}
-                  disabled={readOnly}
+                  // costPrice is NEVER written on update (CLAUDE.md §4). Edit mode must look read-only
+                  // or the owner types a new cost, presses Save, and only the name sticks.
+                  disabled={readOnly || editing}
                   value={form.costPrice}
                   onChange={(value) => set('costPrice', value)}
                 />

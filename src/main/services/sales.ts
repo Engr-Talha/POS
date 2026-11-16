@@ -3,7 +3,7 @@ import type { DB } from '../db'
 import type { User } from '@shared/types'
 import type { Role } from '@shared/rbac'
 import { AppError, ErrorCode } from '@shared/result'
-import { ROLE_RANK, roleCan } from '@shared/rbac'
+import { PERMISSIONS, ROLE_RANK, roleCan } from '@shared/rbac'
 import { ACC } from '../db/chart-of-accounts'
 import { computeLineTax, type TaxMode } from '@shared/tax'
 import { formatMoney } from '@shared/money'
@@ -279,6 +279,32 @@ function roleAtLeast(user: User, required: string): boolean {
   return ROLE_RANK[user.role] >= needed
 }
 
+/**
+ * Who may correct a finished sale is the HIGHER of the RBAC floor (`sale.void` = supervisor) and the
+ * shop setting `documents.correctionRole` (default manager). Lowering the setting below the floor does
+ * nothing — a cashier cannot void just because Settings says so. Raising it to owner is the whole
+ * point of the setting existing.
+ */
+function assertMayCorrectSale(db: DB, authoriser: User, actor: User, approver: User | null): void {
+  const floor = PERMISSIONS['sale.void']
+  const configured = setting<string>(db, 'documents.correctionRole')
+  const floorRank = ROLE_RANK[floor]
+  const configuredRank = ROLE_RANK[configured as Role] ?? 0
+  const neededRole = configuredRank >= floorRank ? configured : floor
+
+  if (!roleAtLeast(authoriser, neededRole)) {
+    throw new AppError(
+      ErrorCode.FORBIDDEN,
+      neededRole === 'owner'
+        ? 'Cancelling a sale needs the owner. Please ask them to approve it.'
+        : neededRole === 'manager'
+          ? 'Cancelling a sale needs a manager. Please ask one to approve it.'
+          : 'Cancelling a sale needs a supervisor. Please ask one to approve it.',
+      `sale.void needs role >= ${neededRole} (floor=${floor}, setting=${configured}); actor=${actor.role}, approver=${approver?.role ?? 'none'}`
+    )
+  }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Loading what a sale needs — lean, on purpose
 // ═════════════════════════════════════════════════════════════════════════════
@@ -484,6 +510,16 @@ export function scanBarcode(
   if (!match) return null
 
   const product = loadProduct(db, match.product.id)
+  // A retired item stays on the shelf with its barcode, but it must not ring up. Search/list already
+  // hide is_active=0; the scan path was the hole that kept selling them.
+  if (!product.isActive) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `"${product.name}" has been retired and cannot be sold. Ask a manager to reactivate it if it should still be on the shelf.`,
+      `scan refused inactive product id=${product.id}`
+    )
+  }
+
   const pack = match.pack
     ? loadPack(db, match.pack.id, product.id, product.name)
     : null
@@ -548,6 +584,16 @@ export function priceFor(args: {
   }
 
   if (tier === 'wholesale' && product.wholesalePrice > 0) return product.wholesalePrice
+
+  // Same rule as packs: a base item with no selling price must not walk out free. Wholesale-with-no-
+  // wholesale already falls back to retail above; a retail of 0 is "not for sale", not "give away".
+  if (product.retailPrice <= 0) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `"${product.name}" has no selling price, so it cannot be sold. Ask a manager to set a price first.`,
+      `product id=${product.id} is not sellable (retail=${product.retailPrice})`
+    )
+  }
 
   return product.retailPrice
 }
@@ -935,7 +981,7 @@ function priceLine(
 ): PricedLine {
   const resolved =
     line.openItem != null
-      ? resolveOpenItem(db, line)
+      ? resolveOpenItem(db, actor, line, approver)
       : resolveCatalogLine(db, actor, line, tier, customerId, approver)
 
   const lineDiscount = line.lineDiscount ?? 0
@@ -1002,8 +1048,25 @@ type ResolvedLine = Pick<
  * the price, and this is the ONE place in a cart line where a price legitimately arrives from outside
  * main. It moves NO STOCK and has NO COGS: there is nothing on a shelf to take off.
  */
-function resolveOpenItem(db: DB, line: SaleLineInput): ResolvedLine {
+function resolveOpenItem(
+  db: DB,
+  actor: User,
+  line: SaleLineInput,
+  approver: User | null
+): ResolvedLine {
   const open = line.openItem!
+
+  // An open item IS a typed price with no catalogue behind it — the same permissioned act as a
+  // catalogue price override. Who may do it is `selling.priceOverrideRole` (default supervisor).
+  // Shops that want cashiers ringing bags/photocopies alone lower that setting to cashier.
+  const unitPrice = assertMayOverridePrice(
+    db,
+    actor,
+    approver,
+    open.name,
+    open.unitPrice,
+    0
+  )
 
   return {
     productId: null,
@@ -1015,14 +1078,14 @@ function resolveOpenItem(db: DB, line: SaleLineInput): ResolvedLine {
     batchId: null,
     stockQtyM: 0,
     pricedQtyM: line.qtyM,
-    unitPrice: open.unitPrice,
+    unitPrice,
     taxRateBp: taxRateFor(db, open.taxRateBp ?? setting<number>(db, 'tax.defaultRateBp'), false),
     taxMode: open.taxMode ?? setting<TaxMode>(db, 'tax.defaultMode'),
     unitCost: 0,
     movesStock: false,
     // There is no catalogue row behind an open item, so there is nothing to have flagged.
     trackSerials: false,
-    priceOverrideByUserId: null
+    priceOverrideByUserId: (approver ?? actor).id
   }
 }
 
@@ -1036,6 +1099,13 @@ function resolveCatalogLine(
 ): ResolvedLine {
   const productId = line.productId!
   const product = loadProduct(db, productId)
+  if (!product.isActive) {
+    throw new AppError(
+      ErrorCode.VALIDATION,
+      `"${product.name}" has been retired and cannot be sold. Ask a manager to reactivate it if it should still be on the shelf.`,
+      `complete refused inactive product id=${product.id}`
+    )
+  }
   const pack = line.packId != null ? loadPack(db, line.packId, productId, product.name) : null
 
   // A PACK IS SOLD BY THE PACK. `qtyM` arrives in BASE units (a carton of 24 is 24000) because that is
@@ -2797,16 +2867,10 @@ export function voidSale(
 ): SaleDetail {
   const input = parseOrThrow(VoidSaleInput, raw, 'sale.void')
 
-  // A cashier may void only with a supervisor standing at the till. The RBAC check is in MAIN, because
-  // the UI is not a security boundary (CLAUDE.md §4).
+  // A cashier may void only with someone who clears BOTH the RBAC floor and documents.correctionRole.
+  // The UI is not a security boundary (CLAUDE.md §4).
   const authoriser = approver ?? actor
-  if (!roleCan(authoriser.role, 'sale.void')) {
-    throw new AppError(
-      ErrorCode.FORBIDDEN,
-      'Cancelling a sale needs a supervisor. Please ask one to approve it.',
-      `sale.void needs supervisor; actor=${actor.role}, approver=${approver?.role ?? 'none'}`
-    )
-  }
+  assertMayCorrectSale(db, authoriser, actor, approver)
 
   const sale = getById(db, input.id)
 

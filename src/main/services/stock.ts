@@ -697,6 +697,8 @@ export function adjust(
 
   // Value at the average cost the stock is CARRIED at — read BEFORE the movement moves it.
   // An `opening` may state its own cost: on day one there is no history to have averaged.
+  // Zero is legal only for a deliberate free sample (migration 0005 covers it). The product-form UI
+  // requires a cost so an accidental blank cannot seed every later sale's COGS at free.
   const unitCost =
     input.type === 'opening' && input.unitCost != null ? input.unitCost : product.cost_price
 

@@ -3,12 +3,14 @@ import { Button, Card, Center, Group, PasswordInput, Stack, TextInput, Title } f
 import { LogIn, Store } from 'lucide-react'
 import type { AppState } from '@shared/app-state'
 import { APP_NAME } from '@shared/branding'
+import { useI18n } from '../i18n/LanguageProvider'
 
 export function Login({
   onSignedIn
 }: {
   onSignedIn: (state: AppState) => void
 }): React.JSX.Element {
+  const { t } = useI18n()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -43,14 +45,14 @@ export function Login({
           >
             <Stack>
               <TextInput
-                label="Username"
+                label={t('login.username')}
                 value={username}
                 onChange={(event) => setUsername(event.currentTarget.value)}
                 autoFocus
               />
 
               <PasswordInput
-                label="Password"
+                label={t('login.password')}
                 value={password}
                 onChange={(event) => setPassword(event.currentTarget.value)}
                 error={error}
@@ -64,7 +66,7 @@ export function Login({
                 leftSection={<LogIn size={16} />}
                 disabled={!username.trim() || !password}
               >
-                Sign in
+                {t('login.signIn')}
               </Button>
             </Stack>
           </form>

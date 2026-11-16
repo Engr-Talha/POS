@@ -358,12 +358,21 @@ function assertTargetExists(db: DB, scope: PromotionRuleScope, targetId: number 
   }
 
   if (scope === 'product') {
-    const exists = db.prepare('SELECT 1 FROM products WHERE id = ?').pluck().get(targetId)
-    if (exists == null) {
+    const row = db
+      .prepare('SELECT is_active FROM products WHERE id = ?')
+      .get(targetId) as { is_active: number } | undefined
+    if (row == null) {
       throw new AppError(
         ErrorCode.NOT_FOUND,
         'That item could not be found. It may have been removed.',
         `promotion rule targets product id=${targetId}, which does not exist`
+      )
+    }
+    if (!row.is_active) {
+      throw new AppError(
+        ErrorCode.VALIDATION,
+        'That item has been retired. Pick an active item for this offer.',
+        `promotion rule targets inactive product id=${targetId}`
       )
     }
     return

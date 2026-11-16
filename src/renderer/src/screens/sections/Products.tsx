@@ -14,6 +14,7 @@ import {
   Title,
   Tooltip
 } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 import {
   Barcode as BarcodeIcon,
   CircleAlert,
@@ -31,6 +32,8 @@ import { CopyCode, LookupSelect, ProductForm } from './ProductForm'
 import { ProductImport } from './ProductImport'
 import { BarcodeLabels } from './BarcodeLabels'
 import { Paginator } from '../../components/Paginator'
+import { ProductSuggest } from '../../components/ProductSuggest'
+import { useI18n } from '../../i18n/LanguageProvider'
 
 /**
  * THE PRODUCTS LIST.
@@ -83,6 +86,7 @@ export function Products({
         readOnly={readOnly}
         currencySymbol={currencySymbol}
         onClose={() => setOpen(null)}
+        onOpenProduct={(productId) => setOpen(productId)}
         onSaved={(productId) => {
           // By default saving does NOT close the form: a new item swaps to edit mode in place, which
           // is what unlocks its barcodes and its opening stock. A shop that would rather go straight
@@ -132,6 +136,7 @@ function ProductList({
   // The barcode & label panel, shown on demand under the header. Generating a barcode is catalogue-only;
   // printing labels is an export — neither touches stock or the ledger.
   const [showLabels, setShowLabels] = useState(false)
+  const { t } = useI18n()
 
   // A scanner types a whole barcode in a few milliseconds and finishes with Enter. Debouncing keeps
   // us from firing a query per character while still feeling instant to a human typing a name.
@@ -181,10 +186,10 @@ function ProductList({
     <Stack gap="lg">
       <Group justify="space-between" align="flex-start">
         <div>
-          <Title order={2}>Items</Title>
+          <Title order={2}>{t('products.title')}</Title>
           <Text c="dimmed" size="sm" mt={4}>
-            Your catalogue. Search by stock code, name, Urdu name, shelf or barcode — old barcodes
-            still find their item. Results update as you type.
+            Your catalogue. Scan a barcode into the search box to open that item with every field
+            filled — or type a stock code / name. Old barcodes still find their item.
           </Text>
         </div>
 
@@ -211,7 +216,7 @@ function ProductList({
               disabled={readOnly}
               onClick={() => onOpen('new')}
             >
-              New item
+              {t('products.new')}
             </Button>
           </Tooltip>
         </Group>
@@ -238,14 +243,44 @@ function ProductList({
       {/* ── Filters ────────────────────────────────────────────────────────── */}
       <Card withBorder padding="md">
         <Group align="flex-end" gap="md" wrap="wrap">
-          <TextInput
-            style={{ flex: 1, minWidth: 260 }}
-            label="Search"
-            placeholder="Stock code, name, shelf, or scan a barcode…"
-            leftSection={<Search size={16} />}
-            value={search}
-            onChange={(event) => setSearch(event.currentTarget.value)}
-          />
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <Text size="sm" fw={500} mb={4}>
+              {t('common.search')}
+            </Text>
+            <ProductSuggest
+              value={search}
+              onChange={setSearch}
+              mode="list"
+              pageSize={8}
+              currencySymbol={currencySymbol}
+              autoFocus
+              leftSection={<BarcodeIcon size={16} />}
+              placeholder="Scan a barcode, or type a name / stock code…"
+              onPick={(item) => {
+                setSearch('')
+                onOpen(item.id)
+              }}
+              onSubmitRaw={async (raw) => {
+                // Exact barcode (and pack barcodes) → open the edit form with prices, tax, stock filled.
+                const result = await window.pos.catalog.findByBarcode({ barcode: raw })
+                if (!result.ok) {
+                  notifications.show({
+                    color: 'red',
+                    title: 'Could not look that up',
+                    message: result.error.userMessage
+                  })
+                  return true
+                }
+                if (result.data === null) {
+                  // Not a barcode — let Enter fall through to the highlighted name match.
+                  return false
+                }
+                setSearch('')
+                onOpen(result.data.product.id)
+                return true
+              }}
+            />
+          </div>
 
           <div style={{ minWidth: 220 }}>
             <LookupSelect

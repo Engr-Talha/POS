@@ -308,6 +308,8 @@ beforeEach(() => {
   owner = makeUser('owner', 'owner', 'Insha Owner')
   supervisor = makeUser('supervisor', 'super', 'Rashid Supervisor')
   cashier = makeUser('cashier', 'cash1', 'Bilal Cashier')
+  // documents.correctionRole defaults to manager; these fixtures void with a supervisor (sale.void floor).
+  settings.set(t.db, 'documents.correctionRole', 'supervisor')
 })
 
 afterEach(() => {

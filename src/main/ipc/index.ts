@@ -665,7 +665,13 @@ export function registerIpcHandlers(): void {
   handle(IPC.appGetState, null, () => state())
 
   // ── Licence ───────────────────────────────────────────────────────────────
+  // First-time activation (no session yet) must stay open — the Activation screen runs before login.
+  // Replacing a key from Settings needs Owner (`license.activate`). The UI hides the panel; main
+  // enforces it when someone is signed in (CLAUDE.md §4).
   handle(IPC.licenseActivate, ActivateInput, (input) => {
+    if (session.getCurrent()) {
+      session.requirePermissionOf('license.activate')
+    }
     licenseService.activate(getDb(), input.key, getMachineId())
     return state()
   })

@@ -621,7 +621,8 @@ export function Sell({
       }
       setSuggestions(result.data.rows)
       setSuggestOpen(result.data.rows.length > 0)
-      setSuggestHighlight(null)
+      // First row is pre-highlighted so Enter alone picks it (name search at rush hour).
+      setSuggestHighlight(result.data.rows.length > 0 ? 0 : null)
     }, 180)
 
     return () => clearTimeout(timer)
@@ -1318,10 +1319,17 @@ export function Sell({
                 setSuggestHighlight(null)
                 return
               }
-              if (event.key === 'Enter' && suggestHighlight != null) {
+              if (event.key === 'Enter') {
                 event.preventDefault()
-                pickSuggestion(suggestions[suggestHighlight] as ProductListItem)
-                return
+                // Rush-hour path: Enter picks the highlighted row, or the FIRST match if the cashier
+                // never pressed ↓. Typing a name and hitting Enter must not fall through to a
+                // barcode lookup that says "Not found" while the list is still open under the field.
+                const index = suggestHighlight ?? 0
+                const chosen = suggestions[index]
+                if (chosen) {
+                  pickSuggestion(chosen)
+                  return
+                }
               }
             }
 
@@ -1383,6 +1391,11 @@ export function Sell({
                   <Text size="sm" fw={600} truncate>
                     {product.name}
                   </Text>
+                  {product.nameOtherLang ? (
+                    <Text size="sm" c="dimmed" truncate dir="auto">
+                      {product.nameOtherLang}
+                    </Text>
+                  ) : null}
                   <Text size="xs" c="dimmed">
                     {product.sku}
                     {product.primaryBarcode ? ` · ${product.primaryBarcode}` : ''}
@@ -1854,6 +1867,10 @@ export function Sell({
               setCompleted(null)
               refocus()
             }}
+            onCorrected={(voidedId) => {
+              setCompleted(null)
+              void correctFromSale(voidedId)
+            }}
           />
         )}
       </div>
@@ -2039,14 +2056,45 @@ function CompletedOverlay({
   response,
   money,
   onPrintAgain,
-  onDismiss
+  onDismiss,
+  onCorrected
 }: {
   response: CompleteSaleResponse
   money: (minor: number) => string
   onPrintAgain: () => void
   onDismiss: () => void
+  /** After a successful void — put the lines back on the till for correction. */
+  onCorrected: (voidedSaleId: number) => void
 }): React.JSX.Element {
   const { sale, print, drawer } = response
+  const [fixing, setFixing] = useState(false)
+  const [reasonCode, setReasonCode] = useState<string | null>(null)
+  const [reasonText, setReasonText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [fixError, setFixError] = useState<string | null>(null)
+
+  async function voidAndCorrect(): Promise<void> {
+    if (reasonCode == null || busy) return
+    setBusy(true)
+    setFixError(null)
+    const result = await window.pos.sales.void({
+      id: sale.id,
+      reasonCode,
+      reasonText: reasonText.trim() === '' ? null : reasonText.trim()
+    })
+    setBusy(false)
+    if (!result.ok) {
+      setFixError(result.error.userMessage)
+      return
+    }
+    notifications.show({
+      color: 'teal',
+      title: 'Invoice cancelled — now enter the correction',
+      message: `${sale.invoiceNo} has been cancelled. Fix the items and take payment.`
+    })
+    setFixing(false)
+    onCorrected(sale.id)
+  }
 
   return (
     <div
@@ -2136,11 +2184,70 @@ function CompletedOverlay({
             </Button>
           </Group>
 
+          <Button
+            variant="subtle"
+            color="red"
+            fullWidth
+            leftSection={<Ban size={16} />}
+            onClick={() => {
+              setFixing(true)
+              setReasonCode(null)
+              setReasonText('')
+              setFixError(null)
+            }}
+          >
+            Wrong bill — fix it
+          </Button>
+
           <Text size="xs" c="dimmed">
             Or just scan the next item — this will clear itself.
           </Text>
         </Stack>
       </Card>
+
+      <Modal
+        opened={fixing}
+        onClose={busy ? () => {} : () => setFixing(false)}
+        title="Wrong bill — fix it"
+        centered
+      >
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            Cancels this sale and puts its lines back on the till so you can correct them. Needs a
+            supervisor. The original invoice number is kept for the record.
+          </Text>
+          <LookupCodeSelect
+            listKey="void_reason"
+            label="Why was it wrong?"
+            value={reasonCode}
+            onChange={setReasonCode}
+            required
+          />
+          <TextInput
+            label="Note (optional)"
+            value={reasonText}
+            onChange={(event) => setReasonText(event.currentTarget.value)}
+          />
+          {fixError && (
+            <Alert color="red" icon={<CircleAlert size={16} />}>
+              {fixError}
+            </Alert>
+          )}
+          <Group justify="flex-end">
+            <Button variant="default" disabled={busy} onClick={() => setFixing(false)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              loading={busy}
+              disabled={reasonCode == null}
+              onClick={() => void voidAndCorrect()}
+            >
+              Cancel sale &amp; correct
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </div>
   )
 }
@@ -2182,6 +2289,7 @@ function WeighModal({
               value={qtyM}
               onChange={setQtyM}
               leftSection={<Scale size={16} />}
+              autoFocus
               required
             />
 
@@ -2354,6 +2462,7 @@ function QtyModal({
                 setQtyM(next)
               }}
               error={error ?? undefined}
+              autoFocus
               required
             />
             <Group justify="flex-end">
@@ -2982,8 +3091,34 @@ function HeldModal({
     void load()
   }
 
+  const [highlight, setHighlight] = useState(0)
+
+  useEffect(() => {
+    setHighlight(0)
+  }, [status, rows])
+
   return (
-    <Modal opened onClose={onClose} title="Parked carts" centered size="lg">
+    <Modal
+      opened
+      onClose={onClose}
+      title="Parked carts"
+      centered
+      size="lg"
+      onKeyDown={(event) => {
+        if (rows == null || rows.length === 0) return
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          setHighlight((current) => Math.min(rows.length - 1, current + 1))
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          setHighlight((current) => Math.max(0, current - 1))
+        } else if (event.key === 'Enter') {
+          event.preventDefault()
+          const row = rows[highlight]
+          if (row) onResume(row.id)
+        }
+      }}
+    >
       <Stack gap="md">
         <SegmentedControl
           fullWidth
@@ -2994,6 +3129,9 @@ function HeldModal({
             { value: 'quote', label: 'Quotations' }
           ]}
         />
+        <Text size="xs" c="dimmed">
+          ↑↓ to choose · Enter to resume
+        </Text>
 
         {error != null && (
           <Alert color="red" icon={<CircleAlert size={18} />}>
@@ -3015,8 +3153,17 @@ function HeldModal({
           </Stack>
         ) : (
           <Stack gap={6}>
-            {rows.map((row) => (
-              <Card withBorder padding="sm" key={row.id}>
+            {rows.map((row, index) => (
+              <Card
+                withBorder
+                padding="sm"
+                key={row.id}
+                style={{
+                  backgroundColor:
+                    highlight === index ? 'var(--mantine-color-blue-light)' : undefined
+                }}
+                onMouseEnter={() => setHighlight(index)}
+              >
                 <Group justify="space-between" wrap="nowrap">
                   <Stack gap={0}>
                     <Group gap={6} wrap="nowrap">

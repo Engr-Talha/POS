@@ -16,7 +16,9 @@ import {
   Title,
   Tooltip
 } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 import {
+  Barcode as BarcodeIcon,
   Boxes,
   CalendarClock,
   CircleAlert,
@@ -27,6 +29,7 @@ import {
   TrendingDown,
   TriangleAlert
 } from 'lucide-react'
+import { ProductSuggest } from '../../components/ProductSuggest'
 import type { StockLevel } from '@shared/catalog'
 import type { NearExpiryItem } from '@shared/ipc'
 import { formatMoney } from '@shared/money'
@@ -66,8 +69,9 @@ export function Stock({
       <div>
         <Title order={2}>Stock</Title>
         <Text c="dimmed" size="sm" mt={4}>
-          What you have, what is running out, and what is about to expire. Every number here is added
-          up from your stock movements — none of it is typed in.
+          What you have, what is running out, and what is about to expire. Scan a barcode in Stock
+          levels to open Adjust for that item. Every number here is added up from your stock
+          movements — none of it is typed in.
         </Text>
       </div>
 
@@ -293,18 +297,63 @@ function Levels({
 
   const filtered = debounced !== '' || categoryId !== null
 
+  async function openAdjustForProduct(productId: number, name: string, sku: string): Promise<void> {
+    const level = await window.pos.stock.level({ productId })
+    if (!level.ok) {
+      notifications.show({
+        color: 'red',
+        title: 'Could not load stock',
+        message: level.error.userMessage
+      })
+      return
+    }
+    setSearch('')
+    onAdjust({
+      id: productId,
+      name: level.data.name || name,
+      sku: level.data.sku || sku,
+      onHandM: level.data.onHandM
+    })
+  }
+
   return (
     <Stack gap="lg">
       <Card withBorder padding="md">
         <Group align="flex-end" gap="md" wrap="wrap">
-          <TextInput
-            style={{ flex: 1, minWidth: 240 }}
-            label="Search"
-            placeholder="Stock code or item name…"
-            leftSection={<Search size={16} />}
-            value={search}
-            onChange={(event) => setSearch(event.currentTarget.value)}
-          />
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <Text size="sm" fw={500} mb={4}>
+              Search / scan
+            </Text>
+            <ProductSuggest
+              value={search}
+              onChange={setSearch}
+              mode="list"
+              pageSize={8}
+              currencySymbol={currencySymbol}
+              autoFocus
+              leftSection={<BarcodeIcon size={16} />}
+              placeholder="Scan a barcode to adjust, or type a name…"
+              listFilters={{ itemType: 'inventory', includeInactive }}
+              onPick={(item) => {
+                void openAdjustForProduct(item.id, item.name, item.sku)
+              }}
+              onSubmitRaw={async (raw) => {
+                const result = await window.pos.catalog.findByBarcode({ barcode: raw })
+                if (!result.ok) {
+                  notifications.show({
+                    color: 'red',
+                    title: 'Could not look that up',
+                    message: result.error.userMessage
+                  })
+                  return true
+                }
+                if (result.data === null) return false
+                const product = result.data.product
+                await openAdjustForProduct(product.id, product.name, product.sku)
+                return true
+              }}
+            />
+          </div>
 
           <div style={{ minWidth: 220 }}>
             <LookupSelect

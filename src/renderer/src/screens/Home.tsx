@@ -52,7 +52,10 @@ import type { AuditEntry } from '@shared/types'
 import type { Permission } from '@shared/rbac'
 import { APP_NAME } from '@shared/branding'
 import { ROLE_LABEL, roleCan } from '@shared/rbac'
+import type { UpdateStatus } from '@shared/ipc'
 import { LicenseBanner } from '../components/LicenseBanner'
+import { useI18n } from '../i18n/LanguageProvider'
+import type { StringKey } from '../i18n/strings'
 import { Books } from './sections/Books'
 import { Customers } from './sections/Customers'
 import { Expenses } from './sections/Expenses'
@@ -102,29 +105,36 @@ type Section =
  * screen they need is the one that is already in front of them. Everything else on this list is
  * something a shopkeeper does between customers.
  */
-const NAV: Array<{ key: Section; label: string; icon: typeof Store; permission?: Permission }> = [
-  { key: 'sell', label: 'Sell', icon: ScanLine, permission: 'sale.create' },
-  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { key: 'products', label: 'Items', icon: Package },
-  { key: 'stock', label: 'Stock', icon: Boxes },
+const NAV: Array<{
+  key: Section
+  labelKey: StringKey
+  icon: typeof Store
+  permission?: Permission
+}> = [
+  { key: 'sell', labelKey: 'nav.sell', icon: ScanLine, permission: 'sale.create' },
+  // Backup + audit live here — both are manager acts in main. Hiding from cashiers avoids a wall of
+  // refusals on a screen that looks useful.
+  { key: 'overview', labelKey: 'nav.overview', icon: LayoutDashboard, permission: 'backup.run' },
+  { key: 'products', labelKey: 'nav.products', icon: Package, permission: 'report.view' },
+  { key: 'stock', labelKey: 'nav.stock', icon: Boxes, permission: 'stock.adjust' },
   // Beside Stock, because it IS stock — the counting sheet that corrects it. 'stockTake.view' is the
   // supervisor's READ: a cashier who cannot open a sheet has no use for the nav item. The writes are
   // 'stockTake.manage' and are enforced in MAIN regardless of what this list draws.
-  { key: 'stockTake', label: 'Stock take', icon: ClipboardCheck, permission: 'stockTake.view' },
-  { key: 'sales', label: 'Sales', icon: ReceiptText, permission: 'report.view' },
-  { key: 'returns', label: 'Returns', icon: Undo2, permission: 'sale.refund' },
-  { key: 'purchases', label: 'Purchases', icon: ShoppingCart, permission: 'purchase.view' },
-  { key: 'expenses', label: 'Expenses', icon: HandCoins, permission: 'expense.manage' },
-  { key: 'promotions', label: 'Offers', icon: BadgePercent, permission: 'promotion.manage' },
-  { key: 'shifts', label: 'Shift', icon: Wallet, permission: 'shift.manage' },
-  { key: 'opening', label: 'Opening setup', icon: ClipboardList, permission: 'settings.manage' },
-  { key: 'books', label: 'Books', icon: Scale },
-  { key: 'reports', label: 'Reports', icon: BarChart3, permission: 'report.view' },
-  { key: 'customers', label: 'Customers', icon: BookUser, permission: 'report.view' },
-  { key: 'suppliers', label: 'Suppliers', icon: Truck, permission: 'supplier.view' },
-  { key: 'lists', label: 'Manage lists', icon: ListChecks },
-  { key: 'users', label: 'Staff', icon: UsersRound, permission: 'user.manage' },
-  { key: 'settings', label: 'Settings', icon: SettingsIcon }
+  { key: 'stockTake', labelKey: 'nav.stockTake', icon: ClipboardCheck, permission: 'stockTake.view' },
+  { key: 'sales', labelKey: 'nav.sales', icon: ReceiptText, permission: 'report.view' },
+  { key: 'returns', labelKey: 'nav.returns', icon: Undo2, permission: 'sale.refund' },
+  { key: 'purchases', labelKey: 'nav.purchases', icon: ShoppingCart, permission: 'purchase.view' },
+  { key: 'expenses', labelKey: 'nav.expenses', icon: HandCoins, permission: 'expense.manage' },
+  { key: 'promotions', labelKey: 'nav.promotions', icon: BadgePercent, permission: 'promotion.manage' },
+  { key: 'shifts', labelKey: 'nav.shifts', icon: Wallet, permission: 'shift.manage' },
+  { key: 'opening', labelKey: 'nav.opening', icon: ClipboardList, permission: 'settings.manage' },
+  { key: 'books', labelKey: 'nav.books', icon: Scale, permission: 'report.view' },
+  { key: 'reports', labelKey: 'nav.reports', icon: BarChart3, permission: 'report.view' },
+  { key: 'customers', labelKey: 'nav.customers', icon: BookUser, permission: 'report.view' },
+  { key: 'suppliers', labelKey: 'nav.suppliers', icon: Truck, permission: 'supplier.view' },
+  { key: 'lists', labelKey: 'nav.lists', icon: ListChecks, permission: 'lookups.manage' },
+  { key: 'users', labelKey: 'nav.users', icon: UsersRound, permission: 'user.manage' },
+  { key: 'settings', labelKey: 'nav.settings', icon: SettingsIcon, permission: 'settings.manage' }
 ]
 
 /**
@@ -140,11 +150,13 @@ export function Home({
 }): React.JSX.Element {
   const { setColorScheme } = useMantineColorScheme()
   const dark = useComputedColorScheme('light') === 'dark'
+  const { t } = useI18n()
 
   // THE TILL IS THE APP. It is what the shop opens in the morning and what it stares at all day.
   const [section, setSection] = useState<Section>('sell')
   const [version, setVersion] = useState<string | null>(null)
   const [currencySymbol, setCurrencySymbol] = useState('Rs')
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle' })
 
   // "Correct this invoice" on the Sales screen voids the wrong sale, then asks the Sell screen (which
   // stays mounted) to re-ring its lines as a corrected invoice. Home is the only thing both screens
@@ -167,6 +179,11 @@ export function Home({
     return () => {
       cancelled = true
     }
+  }, [])
+
+  // Quiet cue only — never a dialog mid-sale. Owner sees "ready" in the header; installs on quit.
+  useEffect(() => {
+    return window.pos.updates.onStatus(setUpdateStatus)
   }, [])
 
   /**
@@ -226,7 +243,19 @@ export function Home({
 
         {state.readOnly && (
           <Badge color="orange" variant="filled" size="sm" leftSection={<ShieldAlert size={12} />}>
-            READ-ONLY
+            {t('common.readOnly')}
+          </Badge>
+        )}
+
+        {updateStatus.state === 'ready' && (
+          <Badge
+            color="teal"
+            variant="light"
+            size="sm"
+            style={{ cursor: 'pointer' }}
+            onClick={() => setSection('settings')}
+          >
+            {t('settings.updates.headerReady')}
           </Badge>
         )}
 
@@ -253,7 +282,7 @@ export function Home({
             </Menu.Target>
             <Menu.Dropdown>
               <Menu.Item leftSection={<LogOut size={14} />} onClick={() => void signOut()}>
-                Sign out
+                {t('common.signOut')}
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
@@ -292,7 +321,7 @@ export function Home({
                   }}
                 >
                   <Icon size={17} />
-                  <Text size="sm">{item.label}</Text>
+                  <Text size="sm">{t(item.labelKey)}</Text>
                 </UnstyledButton>
               )
             })}

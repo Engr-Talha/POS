@@ -56,8 +56,9 @@ import type {
 } from '@shared/purchases'
 import { formatMoney } from '@shared/money'
 import { formatCost } from '@shared/cost'
-import { formatQty } from '@shared/qty'
+import { formatQty, ONE_UNIT } from '@shared/qty'
 import { Paginator } from '../../components/Paginator'
+import { ProductSuggest } from '../../components/ProductSuggest'
 import { CostInput, LookupCodeSelect, MoneyInput, QtyInput, useLookupList } from './ProductForm'
 import { PurchaseReturnHistory, PurchaseReturnModal } from './PurchaseReturn'
 
@@ -1345,6 +1346,7 @@ function NewPurchase({
   // it right away (a sensible starting figure the receiver corrects to the real landed cost on the
   // bill), without clobbering a cost already typed on this line.
   async function pickProduct(key: number, item: ProductListItem): Promise<void> {
+    // Immediate fill from the list row so the form is not blank while detail loads.
     setLines((rows) =>
       rows.map((row) =>
         row.key === key
@@ -1352,7 +1354,16 @@ function NewPurchase({
               ...row,
               productId: item.id,
               productName: item.name,
-              unitCost: row.unitCost > 0 ? row.unitCost : item.costPrice,
+              // One unit ready to receive — a picked item with qty 0 is the #1 reason a bill will not
+              // submit, and the cashier thinks the form is broken.
+              qtyM: row.qtyM > 0 ? row.qtyM : ONE_UNIT,
+              // Always take THIS item's cost — keeping the previous line's cost when the new item is
+              // still at 0 was booking the wrong COGS against the new SKU.
+              unitCost: item.costPrice,
+              retailPrice: item.retailPrice,
+              wholesalePrice: item.wholesalePrice,
+              origRetail: item.retailPrice,
+              origWholesale: item.wholesalePrice,
               // A batch/expiry typed for a PREVIOUS product does not belong to this one. Clear it, or a
               // stale expiry left behind when switching to a non-batch product would hide in an
               // unrendered field and block submit forever. (Buying audit.)
@@ -1365,17 +1376,33 @@ function NewPurchase({
     const result = await window.pos.products.get({ id: item.id })
     if (!result.ok) return
     const product = result.data.product
-    // Prefill the SELLING prices (2-dp money) so the receiver can see and revise them. `orig*` remembers
-    // what the product currently has, so submit updates ONLY a price the user actually changed. A
-    // purchase-only pack legitimately has no retail price; that guard is on the fields' visibility below.
-    setLine(key, {
-      trackBatches: product.trackBatches,
-      saleUomId: product.saleUomId,
-      retailPrice: product.retailPrice,
-      wholesalePrice: product.wholesalePrice,
-      origRetail: product.retailPrice,
-      origWholesale: product.wholesalePrice
-    })
+    // Preferred supplier's last price is a better seed than average cost when the shop has one.
+    const preferred =
+      result.data.suppliers.find((row) => row.isPreferred) ?? result.data.suppliers[0] ?? null
+    const seededCost =
+      preferred && preferred.supplierPrice > 0
+        ? preferred.supplierPrice
+        : product.costPrice
+
+    // Prefill qty, cost, selling prices and batch flag from the real item — edit mode must never be
+    // a blank form the user has to re-type from the shelf label.
+    setLines((rows) =>
+      rows.map((row) =>
+        row.key === key
+          ? {
+              ...row,
+              trackBatches: product.trackBatches,
+              saleUomId: product.saleUomId,
+              qtyM: row.qtyM > 0 ? row.qtyM : ONE_UNIT,
+              unitCost: seededCost,
+              retailPrice: product.retailPrice,
+              wholesalePrice: product.wholesalePrice,
+              origRetail: product.retailPrice,
+              origWholesale: product.wholesalePrice
+            }
+          : row
+      )
+    )
   }
 
   // ── Live totals (a PREDICTION; create() returns the authoritative frozen GRN) ──
@@ -2167,6 +2194,8 @@ function SupplierPicker({
  * A searchable product picker for a purchase line. Only STOCKED items appear — a non-inventory item (a
  * service, a bag charge) has no stock and cannot be received (MAIN refuses it). Hands the whole chosen
  * row up so the caller has its name and current cost without a second query.
+ *
+ * Uses the shared ProductSuggest so Enter picks the first match — same muscle memory as the till.
  */
 function ProductPicker({
   label,
@@ -2179,68 +2208,51 @@ function ProductPicker({
   onPick: (item: ProductListItem) => void
   disabled?: boolean
 }): React.JSX.Element {
-  const [rows, setRows] = useState<ProductListItem[]>([])
-  const [selected, setSelected] = useState<{ id: number; label: string } | null>(null)
-  const [search, setSearch] = useState('')
-  const [debounced, setDebounced] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null)
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(search.trim()), 200)
-    return () => clearTimeout(timer)
-  }, [search])
-
-  useEffect(() => {
+    if (value == null) {
+      setSelectedLabel(null)
+      return
+    }
     let cancelled = false
-    setLoading(true)
     void (async () => {
-      const result = await window.pos.products.list({
-        page: 1,
-        pageSize: 20,
-        search: debounced === '' ? undefined : debounced,
-        itemType: 'inventory'
-      })
-      if (cancelled) return
-      setLoading(false)
-      if (result.ok) setRows(result.data.rows)
+      const result = await window.pos.products.get({ id: value })
+      if (cancelled || !result.ok) return
+      setSelectedLabel(`${result.data.product.name} · ${result.data.product.sku}`)
     })()
     return () => {
       cancelled = true
     }
-  }, [debounced])
-
-  const data = useMemo(() => {
-    const map = new Map<string, { value: string; label: string }>()
-    for (const row of rows) {
-      map.set(String(row.id), { value: String(row.id), label: `${row.name} · ${row.sku}` })
-    }
-    if (selected && !map.has(String(selected.id))) {
-      map.set(String(selected.id), { value: String(selected.id), label: selected.label })
-    }
-    return [...map.values()]
-  }, [rows, selected])
+  }, [value])
 
   return (
-    <Select
-      label={label}
-      placeholder="Search item by name, code or barcode…"
-      leftSection={<Search size={16} />}
-      data={data}
-      value={value === null ? null : String(value)}
-      searchable
-      disabled={disabled}
-      nothingFoundMessage={loading ? 'Searching…' : 'No stocked item matches that'}
-      filter={({ options }) => options}
-      onSearchChange={setSearch}
-      onChange={(next) => {
-        if (next === null) return
-        const id = Number(next)
-        const found = rows.find((r) => r.id === id)
-        if (found) {
-          setSelected({ id: found.id, label: `${found.name} · ${found.sku}` })
-          onPick(found)
-        }
-      }}
-    />
+    <Stack gap={4}>
+      {label && (
+        <Text size="sm" fw={500}>
+          {label}
+        </Text>
+      )}
+      {selectedLabel && (
+        <Text size="xs" c="dimmed">
+          {selectedLabel}
+        </Text>
+      )}
+      <ProductSuggest
+        value={query}
+        onChange={setQuery}
+        mode="list"
+        listFilters={{ itemType: 'inventory' }}
+        pageSize={20}
+        disabled={disabled}
+        placeholder="Search item by name, code or barcode…"
+        onPick={(item) => {
+          setSelectedLabel(`${item.name} · ${item.sku}`)
+          setQuery('')
+          onPick(item)
+        }}
+      />
+    </Stack>
   )
 }

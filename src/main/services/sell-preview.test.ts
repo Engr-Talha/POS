@@ -219,6 +219,8 @@ beforeEach(() => {
   t = makeTestDb({ withSeed: true })
   cashier = makeUser('cashier', 'ali')
   supervisor = makeUser('supervisor', 'rashid')
+  // Open-item preview scenarios invent a price as the cashier; default override role is supervisor.
+  settings.set(t.db, 'selling.priceOverrideRole', 'cashier')
 })
 
 afterEach(() => t.cleanup())

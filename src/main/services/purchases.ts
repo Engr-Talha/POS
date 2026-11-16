@@ -16,7 +16,7 @@ import {
   type PurchaseStatus,
   VoidPurchaseInput
 } from '@shared/purchases'
-import { roleCan } from '@shared/rbac'
+import { PERMISSIONS, ROLE_RANK, roleCan, type Role } from '@shared/rbac'
 import * as settings from './settings'
 import { REGISTRY_DEFAULTS } from '@shared/settings-registry'
 import { formatQty } from '@shared/qty'
@@ -343,6 +343,28 @@ function setting<T>(db: DB, key: string): T {
   return settings.get<T>(db, key, REGISTRY_DEFAULTS[key] as T)
 }
 
+/**
+ * Who may correct a finished purchase is the HIGHER of the RBAC floor (`purchase.void` = manager) and
+ * `documents.correctionRole` (default manager). Owner-only in Settings actually sticks.
+ */
+function assertMayCorrectPurchase(db: DB, actor: User): void {
+  const floor = PERMISSIONS['purchase.void']
+  const configured = setting<string>(db, 'documents.correctionRole')
+  const floorRank = ROLE_RANK[floor]
+  const configuredRank = ROLE_RANK[configured as Role] ?? 0
+  const neededRole = configuredRank >= floorRank ? configured : floor
+
+  if (!roleCan(actor.role, 'purchase.void') || ROLE_RANK[actor.role] < (ROLE_RANK[neededRole as Role] ?? floorRank)) {
+    throw new AppError(
+      ErrorCode.FORBIDDEN,
+      neededRole === 'owner'
+        ? 'Correcting a purchase invoice needs the owner. Please ask them to do it.'
+        : 'Correcting a purchase invoice needs a manager. Please ask one to do it.',
+      `purchase.void needs role >= ${neededRole} (floor=${floor}, setting=${configured}); actor=${actor.role}`
+    )
+  }
+}
+
 /** A real, CURRENT entry on the owner's own list — never a hardcoded option (CLAUDE.md §4). */
 function requireLookupByCode(
   db: DB,
@@ -399,14 +421,8 @@ function requireLookupByCode(
 export function voidPurchase(db: DB, actor: User, raw: unknown, now = new Date()): PurchaseDetail {
   const input = parseOrThrow(VoidPurchaseInput, raw, 'purchase.void')
 
-  // RBAC IN MAIN. The UI is not a security boundary (CLAUDE.md §4) — hiding the button is a courtesy.
-  if (!roleCan(actor.role, 'purchase.void')) {
-    throw new AppError(
-      ErrorCode.FORBIDDEN,
-      'Correcting a purchase invoice needs a manager. Please ask one to do it.',
-      `purchase.void needs manager; actor=${actor.role}`
-    )
-  }
+  // RBAC IN MAIN + documents.correctionRole. The UI is not a security boundary (CLAUDE.md §4).
+  assertMayCorrectPurchase(db, actor)
 
   const purchase = getPurchase(db, input.id)
 

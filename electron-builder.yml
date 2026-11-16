@@ -31,9 +31,11 @@ asarUnpack:
 # ship inside v0.1.0 anyway. TRAP #1: an app shipped without an updater can never update itself.
 publish:
   provider: github
-  owner: PLACEHOLDER-OWNER
-  repo: PLACEHOLDER-pos-releases
+  # Public installers-only repo (trap #4). Code stays private; the updater reads THIS feed.
+  owner: Engr-Talha
+  repo: pos-releases
   releaseType: release
+
 
 win:
   target:

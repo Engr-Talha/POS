@@ -7,6 +7,7 @@ import * as returns from './returns'
 import * as customerLedger from './customer-ledger'
 import * as stock from './stock'
 import * as ledger from './ledger'
+import * as settings from './settings'
 import { ACC } from '../db/chart-of-accounts'
 import { ONE_UNIT } from '@shared/qty'
 import type { User } from '@shared/types'
@@ -210,6 +211,8 @@ beforeEach(() => {
   owner = makeUser('owner', 'owner', 'Insha Owner')
   supervisor = makeUser('supervisor', 'super', 'Rashid Supervisor')
   cashier = makeUser('cashier', 'cash1', 'Bilal Cashier')
+  // documents.correctionRole defaults to manager; shift fixtures void with a supervisor.
+  settings.set(t.db, 'documents.correctionRole', 'supervisor')
 })
 
 afterEach(() => {
